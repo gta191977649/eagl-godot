@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from .binary import IDENTITY4, Matrix4, Vec3, f32le, transform_point, u32le
+from .chunks import Chunk
+from .vif import VifVertexRun, extract_vif_vertex_runs
+
+
+PrimitiveMode = str
+
+
+@dataclass(frozen=True)
+class DecodedBlock:
+    run: VifVertexRun
+    primitive_mode: PrimitiveMode = "unknown"
+    expected_face_count: int | None = None
+    topology_code: int | None = None
+    texture_index: int | None = None
+    render_flag: int | None = None
+    source_offset: int | None = None
+    source_qword_size: int | None = None
+
+
+@dataclass(frozen=True)
+class MeshObject:
+    name: str
+    chunk_offset: int
+    transform: Matrix4
+    blocks: tuple[DecodedBlock, ...]
+    texture_hashes: tuple[int, ...] = ()
+
+    @property
+    def vertex_runs(self) -> tuple[VifVertexRun, ...]:
+        return tuple(block.run for block in self.blocks)
+
+    @property
+    def run_texture_indices(self) -> tuple[int | None, ...]:
+        return tuple(block.texture_index for block in self.blocks)
+
+    @property
+    def run_unknown_counts(self) -> tuple[int | None, ...]:
+        return tuple(block.expected_face_count for block in self.blocks)
+
+    @property
+    def run_render_flags(self) -> tuple[int | None, ...]:
+        return tuple(block.render_flag for block in self.blocks)
+
+
+@dataclass
+class Scene:
+    objects: list[MeshObject] = field(default_factory=list)
+
+    @property
+    def vertex_count(self) -> int:
+        return sum(len(block.run.vertices) for obj in self.objects for block in obj.blocks)
+
+
+def _find_ascii_name(payload: bytes) -> tuple[str, int] | None:
+    for start in range(0x10, min(0x34, len(payload) - 4), 4):
+        end = start
+        while end < len(payload):
+            byte = payload[end]
+            if byte == 0:
+                break
+            if byte < 0x20 or byte > 0x7E:
+                break
+            end += 1
+        if end - start >= 4 and end < len(payload) and payload[end] == 0:
+            return payload[start:end].decode("ascii", errors="replace"), start
+    return None
+
+
+def _read_transform(payload: bytes, name_start: int) -> Matrix4:
+    matrix_offset = name_start + 0x50
+    if matrix_offset + 64 > len(payload):
+        return IDENTITY4
+    rows = []
+    for row in range(4):
+        row_offset = matrix_offset + row * 16
+        rows.append(
+            (
+                f32le(payload, row_offset),
+                f32le(payload, row_offset + 4),
+                f32le(payload, row_offset + 8),
+                f32le(payload, row_offset + 12),
+            )
+        )
+    return tuple(rows)  # type: ignore[return-value]
+
+
+def parse_mesh_object(object_chunk: Chunk, bundle: bytes) -> MeshObject | None:
+    children = list(object_chunk.children)
+    header = next((chunk for chunk in children if chunk.chunk_id == 0x00034003), None)
+    run_metadata = next((chunk for chunk in children if chunk.chunk_id == 0x00034004), None)
+    vif_data = next((chunk for chunk in children if chunk.chunk_id == 0x00034005), None)
+    texture_refs = next((chunk for chunk in children if chunk.chunk_id == 0x00034006), None)
+    if header is None or vif_data is None:
+        return None
+
+    header_payload = header.payload(bundle)
+    name_info = _find_ascii_name(header_payload)
+    if name_info is None:
+        return None
+    name, name_start = name_info
+
+    vif_payload = _strip_vif_prefix(vif_data.payload(bundle))
+    metadata_payload = run_metadata.payload(bundle) if run_metadata else b""
+    blocks = _extract_blocks_from_strip_entries(vif_payload, metadata_payload, name)
+    if not blocks:
+        fallback_runs = extract_vif_vertex_runs(vif_payload)
+        if fallback_runs:
+            blocks = tuple(
+                DecodedBlock(
+                    run=run,
+                    primitive_mode=_infer_block_primitive_mode(name, None, len(run.vertices)),
+                )
+                for run in fallback_runs
+            )
+    if not blocks:
+        return None
+
+    return MeshObject(
+        name=name,
+        chunk_offset=object_chunk.offset,
+        transform=_read_transform(header_payload, name_start),
+        blocks=blocks,
+        texture_hashes=_read_texture_hashes(texture_refs.payload(bundle)) if texture_refs else (),
+    )
+
+
+def parse_scene(chunks: tuple[Chunk, ...], bundle: bytes) -> Scene:
+    scene = Scene()
+    for chunk in _walk(chunks):
+        if chunk.chunk_id == 0x80034002:
+            obj = parse_mesh_object(chunk, bundle)
+            if obj is not None:
+                scene.objects.append(obj)
+    return scene
+
+
+def transformed_vertices(obj: MeshObject, run: VifVertexRun) -> tuple[Vec3, ...]:
+    return tuple(transform_point(vertex, obj.transform) for vertex in run.vertices)
+
+
+def transformed_block_vertices(obj: MeshObject, block: DecodedBlock) -> tuple[Vec3, ...]:
+    return transformed_vertices(obj, block.run)
+
+
+def _walk(chunks: tuple[Chunk, ...]):
+    for chunk in chunks:
+        yield chunk
+        yield from _walk(chunk.children)
+
+
+def _read_texture_hashes(payload: bytes) -> tuple[int, ...]:
+    hashes: list[int] = []
+    for offset in range(0, len(payload) - 3, 8):
+        value = u32le(payload, offset)
+        if value:
+            hashes.append(value)
+    return tuple(hashes)
+
+
+def _read_run_texture_indices(payload: bytes, run_count: int) -> tuple[int | None, ...]:
+    records = _read_run_metadata_records(payload, run_count)
+    if not records:
+        return ()
+
+    indices: list[int | None] = []
+    for record in records:
+        value = u32le(record, 0)
+        indices.append(value if value != 0xFFFFFFFF else None)
+    return tuple(indices)
+
+
+def _read_run_unknown_counts(payload: bytes, run_count: int) -> tuple[int | None, ...]:
+    records = _read_run_metadata_records(payload, run_count)
+    if not records:
+        return ()
+
+    counts: list[int | None] = []
+    for record in records:
+        packed = u32le(record, 0x1C)
+        unknown_count = (packed >> 16) & 0xFF
+        counts.append(unknown_count if unknown_count else None)
+    return tuple(counts)
+
+
+def _read_run_render_flags(payload: bytes, run_count: int) -> tuple[int | None, ...]:
+    records = _read_run_metadata_records(payload, run_count)
+    if not records:
+        return ()
+
+    flags: list[int | None] = []
+    for record in records:
+        value = (u32le(record, 0x0C) >> 16) & 0xFFFF
+        flags.append(value if value else None)
+    return tuple(flags)
+
+
+def _read_run_metadata_records(payload: bytes, run_count: int) -> tuple[bytes, ...]:
+    if not payload:
+        return ()
+    payload = _strip_vif_prefix(payload)
+    if len(payload) < run_count * 64:
+        return ()
+
+    return tuple(payload[offset : offset + 64] for offset in range(0, run_count * 64, 64))
+
+
+def _strip_vif_prefix(payload: bytes) -> bytes:
+    if len(payload) >= 8 and payload[:8] == b"\x11" * 8:
+        return payload[8:]
+    return payload
+
+
+def _extract_blocks_from_strip_entries(
+    vif_payload: bytes,
+    metadata_payload: bytes,
+    object_name: str,
+) -> tuple[DecodedBlock, ...]:
+    record_count = len(_strip_vif_prefix(metadata_payload)) // 64
+    records = _read_run_metadata_records(metadata_payload, record_count)
+    if not records:
+        return ()
+
+    blocks: list[DecodedBlock] = []
+    for record in records:
+        texture_index = u32le(record, 0)
+        vif_offset = u32le(record, 0x08)
+        qword_size = (u32le(record, 0x0C) & 0xFFFF) * 16
+        render_flag = (u32le(record, 0x0C) >> 16) & 0xFFFF
+        packed = u32le(record, 0x1C)
+        topology_code = packed & 0xFF
+        expected_face_count = (packed >> 16) & 0xFF
+        if qword_size <= 0 or vif_offset < 0 or vif_offset + qword_size > len(vif_payload):
+            return ()
+        decoded = extract_vif_vertex_runs(vif_payload[vif_offset : vif_offset + qword_size])
+        if len(decoded) != 1:
+            return ()
+        run = decoded[0]
+        blocks.append(
+            DecodedBlock(
+                run=run,
+                primitive_mode=_infer_block_primitive_mode(object_name, expected_face_count or None, len(run.vertices)),
+                expected_face_count=expected_face_count or None,
+                topology_code=topology_code,
+                texture_index=texture_index if texture_index != 0xFFFFFFFF else None,
+                render_flag=render_flag or None,
+                source_offset=vif_offset,
+                source_qword_size=qword_size,
+            )
+        )
+
+    return tuple(blocks)
+
+
+def _infer_block_primitive_mode(object_name: str, expected_face_count: int | None, vertex_count: int) -> PrimitiveMode:
+    if expected_face_count is None:
+        return "strip"
+    if object_name.startswith(("XB_", "XS_", "XT_", "XW_", "XWU_", "TRACK_HELICOPTER")):
+        if vertex_count % 3 == 0 and expected_face_count == vertex_count // 3:
+            return "triangles"
+        if vertex_count % 4 == 0 and expected_face_count == vertex_count // 2:
+            return "quads"
+    return "strip"

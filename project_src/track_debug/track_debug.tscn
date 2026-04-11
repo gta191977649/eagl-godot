@@ -1,0 +1,148 @@
+[gd_scene format=3 uid="uid://c356kerios6dj"]
+
+[ext_resource type="Script" uid="uid://tolmr5c7xlof" path="res://track_debug/TrackDebug.gd" id="1_track"]
+[ext_resource type="Script" uid="uid://dxuiacnec0rla" path="res://track_debug/FreeCamera.gd" id="2_cam"]
+[ext_resource type="Script" uid="uid://bbc5pbh87m65k" path="res://track_debug/TrackRouteDebugLines.gd" id="3_lines"]
+[ext_resource type="Script" uid="uid://bx1xjadli0iwu" path="res://track_debug/TrackRenderZones.gd" id="4_zones"]
+[ext_resource type="Script" uid="uid://dmb680houxlq0" path="res://track_debug/TrackTopDownOverlay.gd" id="5_topdown"]
+
+[node name="TrackDebug" type="Node3D" unique_id=1380270673]
+script = ExtResource("1_track")
+
+[node name="World" type="Node3D" parent="." unique_id=273344082]
+
+[node name="RouteLines" type="Node3D" parent="." unique_id=1067038705]
+script = ExtResource("3_lines")
+
+[node name="RenderZones" type="Node3D" parent="." unique_id=17050940]
+script = ExtResource("4_zones")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=800289122]
+transform = Transform3D(0.707107, -0.353553, 0.612372, 0, 0.866025, 0.5, -0.707107, -0.353553, 0.612372, 0, 0, 0)
+light_energy = 2.0
+light_specular = 0.0
+
+[node name="FreeCamera" type="Camera3D" parent="." unique_id=1698039274]
+transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 120, 250)
+current = true
+far = 20000.0
+script = ExtResource("2_cam")
+
+[node name="DebugHud" type="CanvasLayer" parent="." unique_id=315460176]
+
+[node name="Panel" type="PanelContainer" parent="DebugHud" unique_id=119233308]
+offset_left = 12.0
+offset_top = 12.0
+offset_right = 780.0
+offset_bottom = 240.0
+
+[node name="Label" type="Label" parent="DebugHud/Panel" unique_id=1010205544]
+layout_mode = 2
+text = "EAGL Track Debug"
+
+[node name="CameraPanel" type="PanelContainer" parent="DebugHud" unique_id=478910673]
+offset_left = 12.0
+offset_top = 252.0
+offset_right = 360.0
+offset_bottom = 392.0
+
+[node name="VBox" type="VBoxContainer" parent="DebugHud/CameraPanel" unique_id=1721541345]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="DebugHud/CameraPanel/VBox" unique_id=645512055]
+layout_mode = 2
+text = "Camera Tune"
+
+[node name="SpeedLabel" type="Label" parent="DebugHud/CameraPanel/VBox" unique_id=1396788651]
+layout_mode = 2
+text = "Move speed"
+
+[node name="Speed" type="HSlider" parent="DebugHud/CameraPanel/VBox" unique_id=566043547]
+layout_mode = 2
+min_value = 1.0
+max_value = 500.0
+value = 60.0
+
+[node name="SensitivityLabel" type="Label" parent="DebugHud/CameraPanel/VBox" unique_id=709384690]
+layout_mode = 2
+text = "Mouse sensitivity"
+
+[node name="Sensitivity" type="HSlider" parent="DebugHud/CameraPanel/VBox" unique_id=322687352]
+layout_mode = 2
+min_value = 0.1
+max_value = 10.0
+step = 0.1
+value = 2.0
+
+[node name="FovLabel" type="Label" parent="DebugHud/CameraPanel/VBox" unique_id=72958480]
+layout_mode = 2
+text = "FOV"
+
+[node name="Fov" type="HSlider" parent="DebugHud/CameraPanel/VBox" unique_id=428204780]
+layout_mode = 2
+min_value = 30.0
+max_value = 120.0
+value = 75.0
+
+[node name="SelectPanel" type="PanelContainer" parent="DebugHud" unique_id=1036539821]
+offset_left = 372.0
+offset_top = 252.0
+offset_right = 640.0
+offset_bottom = 444.0
+
+[node name="VBox" type="VBoxContainer" parent="DebugHud/SelectPanel" unique_id=60965435]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="DebugHud/SelectPanel/VBox" unique_id=1309196667]
+layout_mode = 2
+text = "Track Select"
+
+[node name="TrackLabel" type="Label" parent="DebugHud/SelectPanel/VBox" unique_id=858395362]
+layout_mode = 2
+text = "Track"
+
+[node name="Track" type="OptionButton" parent="DebugHud/SelectPanel/VBox" unique_id=804751442]
+layout_mode = 2
+
+[node name="LevelLabel" type="Label" parent="DebugHud/SelectPanel/VBox" unique_id=476009739]
+layout_mode = 2
+text = "Level"
+
+[node name="Level" type="OptionButton" parent="DebugHud/SelectPanel/VBox" unique_id=1003346791]
+layout_mode = 2
+
+[node name="FullRoute" type="CheckBox" parent="DebugHud/SelectPanel/VBox" unique_id=2086156854]
+layout_mode = 2
+text = "Show full route"
+
+[node name="AutoCamera" type="CheckBox" parent="DebugHud/SelectPanel/VBox" unique_id=106582707]
+layout_mode = 2
+button_pressed = true
+text = "Auto camera route"
+
+[node name="RouteLines" type="CheckBox" parent="DebugHud/SelectPanel/VBox" unique_id=155313085]
+layout_mode = 2
+button_pressed = true
+text = "Show route lines"
+
+[node name="AIRouteLines" type="CheckBox" parent="DebugHud/SelectPanel/VBox" unique_id=1075978336]
+layout_mode = 2
+button_pressed = true
+text = "Show AI route lines"
+
+[node name="RenderZones" type="CheckBox" parent="DebugHud/SelectPanel/VBox" unique_id=2007118451]
+layout_mode = 2
+button_pressed = true
+text = "Show render zones"
+
+[node name="TopDownOverlay" type="Control" parent="DebugHud" unique_id=2143571000]
+layout_mode = 3
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -812.0
+offset_top = 12.0
+offset_right = -12.0
+offset_bottom = 572.0
+grow_horizontal = 0
+script = ExtResource("5_topdown")
