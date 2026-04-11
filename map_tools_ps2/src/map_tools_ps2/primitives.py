@@ -49,3 +49,17 @@ def indices_for_primitive(mode: PrimitiveMode, count: int) -> list[int] | None:
     if mode == "quads":
         return quad_batch_indices(count)
     return None
+
+
+def metadata_strip_restart_boundaries(
+    topology_code: int | None,
+    expected_face_count: int | None,
+    vertex_count: int,
+) -> set[int]:
+    if topology_code != 0x05 or expected_face_count is None:
+        return set()
+    if vertex_count < 8 or vertex_count % 4:
+        return set()
+    if expected_face_count * 2 != vertex_count:
+        return set()
+    return set(range(4, vertex_count, 4))

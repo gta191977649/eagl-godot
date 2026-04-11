@@ -10,6 +10,7 @@ from .model import DecodedBlock, MeshObject, Scene, instantiated_mesh_object, tr
 from .primitives import (
     fan_indices,
     quad_batch_indices,
+    metadata_strip_restart_boundaries as primitive_metadata_strip_restart_boundaries,
     strip_indices,
     triangle_list_indices,
 )
@@ -137,13 +138,11 @@ def _native_strip_restart_boundaries(vertices: tuple[Vec3, ...]) -> set[int]:
 def _metadata_strip_restart_boundaries(block: DecodedBlock | None, vertex_count: int) -> set[int]:
     if block is None:
         return set()
-    if block.topology_code != 0x05 or block.expected_face_count is None:
-        return set()
-    if vertex_count < 8 or vertex_count % 4:
-        return set()
-    if block.expected_face_count * 2 != vertex_count:
-        return set()
-    return set(range(4, vertex_count, 4))
+    return primitive_metadata_strip_restart_boundaries(
+        block.topology_code,
+        block.expected_face_count,
+        vertex_count,
+    )
 
 
 def _native_target_count_restart_boundary(
