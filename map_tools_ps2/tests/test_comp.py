@@ -56,6 +56,7 @@ from map_tools_ps2.model import (
 )
 from map_tools_ps2.obj_writer import write_obj
 from map_tools_ps2.primitive_probe import probe_primitive_rule
+from map_tools_ps2.primitive_stream import primitive_stream_for_block
 from map_tools_ps2.textures import Texture, _alpha_mode_for_rgba, _alpha_properties_for_rgba, _decode_ps2_alpha, decode_indexed_texture, read_ps2_tpk
 from map_tools_ps2.topology_benchmark import benchmark_topology
 from map_tools_ps2.vif import VifVertexRun, extract_vif_vertex_runs
@@ -307,8 +308,9 @@ class TopologyBenchmarkTests(unittest.TestCase):
 class TextureTests(unittest.TestCase):
     def test_ps2_full_alpha_maps_to_opaque(self):
         self.assertEqual(_decode_ps2_alpha(0), 0)
-        self.assertEqual(_decode_ps2_alpha(0x40), 0x80)
-        self.assertEqual(_decode_ps2_alpha(0x7F), 0xFF)
+        self.assertEqual(_decode_ps2_alpha(0x40), 0x7F)
+        self.assertEqual(_decode_ps2_alpha(0x7F), 0xFE)
+        self.assertEqual(_decode_ps2_alpha(0x80), 0xFF)
 
     def test_alpha_mode_ignores_near_opaque_alpha(self):
         self.assertIsNone(_alpha_mode_for_rgba(bytes([1, 2, 3, 250, 4, 5, 6, 255])))
@@ -320,6 +322,11 @@ class TextureTests(unittest.TestCase):
     def test_alpha_properties_capture_mask_cutoff(self):
         self.assertEqual(_alpha_properties_for_rgba(bytes([1, 2, 3, 0, 4, 5, 6, 255])), ("MASK", 0.5))
         self.assertEqual(_alpha_properties_for_rgba(bytes([1, 2, 3, 128, 4, 5, 6, 255])), ("BLEND", None))
+
+    def test_alpha_properties_treat_ps2_alpha_one_as_cutout(self):
+        mode, cutoff = _alpha_properties_for_rgba(bytes([1, 2, 3, 2, 4, 5, 6, 254]))
+        self.assertEqual(mode, "MASK")
+        self.assertIsNotNone(cutoff)
 
     def test_subpage_4bit_texture_indices_are_linear(self):
         palette = b"".join(bytes((index, 0, 0, 0x7F)) for index in range(16))
@@ -339,6 +346,47 @@ class TextureTests(unittest.TestCase):
         palette = b"".join(bytes((index, 0, 0, 0x7F)) for index in range(32))
         rgba = decode_indexed_texture(4, 4, bytes(range(16)), palette)
         self.assertEqual([rgba[offset] for offset in range(0, 16 * 4, 4)], list(range(16)))
+
+    def test_entry_driven_decode_uses_modelulator_page_flip(self):
+        palette = b"".join(bytes((index, 0, 0, 0x80)) for index in range(16))
+        image = bytes([0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE])
+
+        rgba = decode_indexed_texture(
+            4,
+            4,
+            image,
+            palette,
+            bit_depth=4,
+            shift_width=2,
+            shift_height=2,
+            pixel_storage_mode=0x14,
+            is_swizzled=False,
+        )
+
+        self.assertEqual(
+            [rgba[offset] for offset in range(0, 16 * 4, 4)],
+            [12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3],
+        )
+
+    def test_entry_driven_decode_applies_psmt8_palette_swizzle(self):
+        palette = b"".join(bytes((index, 0, 0, 0x80)) for index in range(256))
+
+        rgba = decode_indexed_texture(
+            32,
+            1,
+            bytes(range(32)),
+            palette,
+            bit_depth=8,
+            shift_width=5,
+            shift_height=0,
+            pixel_storage_mode=0x13,
+            is_swizzled=False,
+        )
+
+        self.assertEqual(
+            [rgba[offset] for offset in range(0, 32 * 4, 4)],
+            list(range(8)) + list(range(16, 24)) + list(range(8, 16)) + list(range(24, 32)),
+        )
 
     def test_fixture_billboard_textures_decode_from_0x80_palette_entries(self):
         location_bin = TRACKS_ROOT / "TEX24LOCATION.BIN"
@@ -472,7 +520,7 @@ class GlbMaterialTests(unittest.TestCase):
             Vec3(101.0, 1.0, 0.0),
         )
 
-        self.assertEqual(_native_strip_segments(vertices), ((0, 6), (6, 10)))
+        self.assertEqual(_native_strip_segments(vertices), ((0, 10),))
 
     def test_native_strip_segments_split_xb_roof_strip_to_metadata_count(self):
         vertices = (
@@ -496,13 +544,13 @@ class GlbMaterialTests(unittest.TestCase):
             topology_code=0,
         )
 
-        self.assertEqual(_native_strip_segments(vertices, block, "XB_ALBERNISKY_77"), ((0, 6), (6, 12)))
+        self.assertEqual(_native_strip_segments(vertices, block, "XB_ALBERNISKY_77"), ((0, 12),))
         self.assertEqual(_native_strip_segments(vertices, block, "TRN_SECTION60_UNDERROAD"), ((0, 12),))
 
     def test_topology_05_half_face_blocks_split_every_four_vertices(self):
         vertices = tuple(Vec3(float(index), float(index & 1), 0.0) for index in range(20))
         block = DecodedBlock(
-            run=VifVertexRun(vertices, (), (), (20, 4, 60, 252)),
+            run=VifVertexRun(vertices, (), (), (20, 4, 60, 252), (0x00286666, 0, 0, 0x00433330)),
             primitive_mode="strip",
             expected_face_count=10,
             topology_code=0x05,
@@ -511,7 +559,7 @@ class GlbMaterialTests(unittest.TestCase):
         self.assertEqual(_native_strip_segments(vertices, block, "XS_LIGHTPOSTA_1_00"), ((0, 4), (4, 8), (8, 12), (12, 16), (16, 20)))
         self.assertEqual(
             _indices_for_block(vertices, "XS_LIGHTPOSTA_1_00", block),
-            [0, 1, 2, 1, 3, 2, 4, 5, 6, 5, 7, 6, 8, 9, 10, 9, 11, 10, 12, 13, 14, 13, 15, 14, 16, 17, 18, 17, 19, 18],
+            [0, 1, 2, 3, 2, 1, 4, 5, 6, 7, 6, 5, 8, 9, 10, 11, 10, 9, 12, 13, 14, 15, 14, 13, 16, 17, 18, 19, 18, 17],
         )
 
     def test_native_segment_triangle_indices_dedupe_internal_duplicate_faces(self):
@@ -601,9 +649,9 @@ class GlbMaterialTests(unittest.TestCase):
         json_length = struct.unpack_from("<I", data, 12)[0]
         gltf = __import__("json").loads(data[20 : 20 + json_length])
         primitives = gltf["meshes"][0]["primitives"]
-        self.assertEqual([primitive["mode"] for primitive in primitives], [5, 5])
+        self.assertEqual([primitive["mode"] for primitive in primitives], [5])
         self.assertTrue(all("indices" not in primitive for primitive in primitives))
-        self.assertEqual([(primitive["extras"]["segment_start"], primitive["extras"]["segment_end"]) for primitive in primitives], [(0, 6), (6, 10)])
+        self.assertEqual([(primitive["extras"]["segment_start"], primitive["extras"]["segment_end"]) for primitive in primitives], [(0, 10)])
 
     def test_write_glb_native_skips_fully_duplicate_strip_segment(self):
         run = VifVertexRun(
@@ -992,10 +1040,9 @@ class GlbMaterialTests(unittest.TestCase):
             expected_face_count=22,
             topology_code=0x05,
         )
-        self.assertEqual(
-            _indices_for_block(vertices, "TRN_SECTION80_CHOP2", block),
-            _strip_indices_for_vertices(vertices, "TRN_SECTION80_CHOP2"),
-        )
+        indices = _indices_for_block(vertices, "TRN_SECTION80_CHOP2", block)
+        self.assertEqual(len(indices) // 3, len(vertices) - 2)
+        self.assertNotEqual(len(indices) // 3, block.expected_face_count)
 
     def test_target_count_priority_is_reserved_for_props(self):
         self.assertFalse(_should_prioritize_target_count("XB_WELLL_A1_00"))
@@ -1004,7 +1051,7 @@ class GlbMaterialTests(unittest.TestCase):
         self.assertFalse(_should_prioritize_target_count("RD_SECTION70_CHOP4"))
         self.assertFalse(_should_prioritize_target_count("TEST_OBJECT"))
 
-    def test_trackb24_container_truck_does_not_expand_to_metadata_count(self):
+    def test_trackb24_container_truck_uses_vif_control_mask(self):
         bundle_path = TRACKS_ROOT / "TRACKB24.BUN"
         if not bundle_path.exists():
             self.skipTest("TRACKB24 fixture is not available")
@@ -1018,9 +1065,10 @@ class GlbMaterialTests(unittest.TestCase):
         block = target.blocks[31]
         vertices = transformed_block_vertices(target, block)
         self.assertEqual(block.expected_face_count, 22)
-        self.assertEqual(len(_indices_for_block(vertices, target.name, block)) // 3, len(_strip_indices_for_vertices(vertices, target.name)) // 3)
+        self.assertEqual(primitive_stream_for_block(vertices, block).source_proof, "vif_control")
+        self.assertEqual(len(_indices_for_block(vertices, target.name, block)) // 3, 22)
 
-    def test_trackb24_container_truck_metadata_counts_do_not_force_lists(self):
+    def test_trackb24_container_truck_more_blocks_use_vif_control_mask(self):
         bundle_path = TRACKS_ROOT / "TRACKB24.BUN"
         if not bundle_path.exists():
             self.skipTest("TRACKB24 fixture is not available")
@@ -1031,11 +1079,12 @@ class GlbMaterialTests(unittest.TestCase):
         if target is None:
             self.fail("XB_CONTAINERTRKCABA_L1A fixture is missing from TRACKB24.BUN")
 
-        for block_index, expected_faces in ((2, 26), (42, 5), (85, 13)):
+        for block_index, expected_faces in ((2, 14), (42, 4), (85, 5)):
             with self.subTest(block_index=block_index):
                 block = target.blocks[block_index]
                 vertices = transformed_block_vertices(target, block)
                 self.assertEqual(block.primitive_mode, "strip")
+                self.assertEqual(primitive_stream_for_block(vertices, block).source_proof, "vif_control")
                 self.assertEqual(len(_indices_for_block(vertices, target.name, block)) // 3, expected_faces)
 
     def test_trackb24_container_truck_positions_match_runtime_accessor(self):
@@ -1188,7 +1237,7 @@ class GlbMaterialTests(unittest.TestCase):
         ):
             self.assertAlmostEqual(actual, expected, places=6)
 
-    def test_trackb44_trn_section80_chop3_uses_full_geometry_strip(self):
+    def test_trackb44_trn_section80_chop3_uses_vif_control_mask(self):
         bundle_path = TRACKS_ROOT / "TRACKB44.BUN"
         if not bundle_path.exists():
             self.skipTest("TRACKB44 fixture is not available")
@@ -1200,18 +1249,18 @@ class GlbMaterialTests(unittest.TestCase):
             self.fail("TRN_SECTION80_CHOP3 fixture is missing from TRACKB44.BUN")
 
         chosen_faces = 0
-        geometry_faces = 0
         metadata_faces = 0
         for block in target.blocks:
             vertices = transformed_block_vertices(target, block)
+            stream = primitive_stream_for_block(vertices, block)
+            self.assertEqual(stream.source_proof, "vif_control")
             chosen_faces += len(_indices_for_block(vertices, target.name, block)) // 3
-            geometry_faces += len(_strip_indices_for_vertices(vertices, target.name)) // 3
             metadata_faces += block.expected_face_count or 0
 
-        self.assertEqual(chosen_faces, geometry_faces)
-        self.assertGreater(chosen_faces, metadata_faces)
+        self.assertEqual(chosen_faces, 704)
+        self.assertEqual(chosen_faces, metadata_faces)
 
-    def test_trackb44_rd_section50_chop4_does_not_force_exact_quad_batches(self):
+    def test_trackb44_rd_section50_chop4_uses_vif_control_mask(self):
         bundle_path = TRACKS_ROOT / "TRACKB44.BUN"
         if not bundle_path.exists():
             self.skipTest("TRACKB44 fixture is not available")
@@ -1226,9 +1275,10 @@ class GlbMaterialTests(unittest.TestCase):
         vertices = transformed_block_vertices(target, block)
         self.assertEqual(block.expected_face_count, 14)
         self.assertEqual(len(vertices), 28)
-        self.assertEqual(len(_indices_for_block(vertices, target.name, block)) // 3, 24)
+        self.assertEqual(primitive_stream_for_block(vertices, block).source_proof, "vif_control")
+        self.assertEqual(len(_indices_for_block(vertices, target.name, block)) // 3, 14)
 
-    def test_trackb44_section50_metadata_counts_do_not_force_quads(self):
+    def test_trackb44_section50_uses_vif_control_mask(self):
         bundle_path = TRACKS_ROOT / "TRACKB44.BUN"
         if not bundle_path.exists():
             self.skipTest("TRACKB44 fixture is not available")
@@ -1237,11 +1287,11 @@ class GlbMaterialTests(unittest.TestCase):
         scene = parse_scene(parse_chunks(bundle), bundle)
 
         cases = (
-            ("RDDRT_SECTION50_CHOP4", 18, 26),
-            ("RDDRT_SECTION50_CHOP4", 20, 26),
-            ("RD_SECTION50_CHOP4", 27, 16),
-            ("TRN_SECTION50_CHOP4", 67, 22),
-            ("TRN_SECTION50_CHOP4", 85, 12),
+            ("RDDRT_SECTION50_CHOP4", 18, 14),
+            ("RDDRT_SECTION50_CHOP4", 20, 14),
+            ("RD_SECTION50_CHOP4", 27, 14),
+            ("TRN_SECTION50_CHOP4", 67, 14),
+            ("TRN_SECTION50_CHOP4", 85, 10),
         )
         for object_name, block_index, expected_faces in cases:
             with self.subTest(object_name=object_name, block_index=block_index):
@@ -1250,7 +1300,31 @@ class GlbMaterialTests(unittest.TestCase):
                     self.fail(f"{object_name} fixture is missing from TRACKB44.BUN")
                 block = target.blocks[block_index]
                 vertices = transformed_block_vertices(target, block)
+                self.assertEqual(primitive_stream_for_block(vertices, block).source_proof, "vif_control")
                 self.assertEqual(len(_indices_for_block(vertices, target.name, block)) // 3, expected_faces)
+
+    def test_trackb61_section30_blocks_use_vif_control_mask(self):
+        bundle_path = TRACKS_ROOT / "TRACKB61.LZC"
+        if not bundle_path.exists():
+            self.skipTest("TRACKB61 fixture is not available")
+
+        bundle = load_bundle_bytes(bundle_path)
+        scene = parse_scene(parse_chunks(bundle), bundle)
+        target = next((obj for obj in scene.objects if obj.name == "TRN_SECTION30_CHOP3"), None)
+        if target is None:
+            self.fail("TRN_SECTION30_CHOP3 fixture is missing from TRACKB61.LZC")
+
+        for block_index in range(50, 59):
+            with self.subTest(block_index=block_index):
+                block = target.blocks[block_index]
+                vertices = transformed_block_vertices(target, block)
+                self.assertEqual(len(vertices) % 4, 0)
+                self.assertEqual(block.expected_face_count, len(vertices) // 2)
+                self.assertEqual(primitive_stream_for_block(vertices, block).source_proof, "vif_control")
+                self.assertEqual(
+                    len(_indices_for_block(vertices, target.name, block)) // 3,
+                    block.expected_face_count,
+                )
 
     def test_should_export_vif_colors_honors_mode_override(self):
         self.assertTrue(_should_export_vif_colors("TEST_OBJECT", None, "always"))
@@ -1326,7 +1400,7 @@ class ObjWriterTests(unittest.TestCase):
             (1.0, 1.0),
         )
         block = DecodedBlock(
-            run=VifVertexRun(vertices, texcoords, (), (8, 1, 24, 0)),
+            run=VifVertexRun(vertices, texcoords, (), (8, 4, 60, 252), (0x00286666, 0, 0, 0x00433330)),
             primitive_mode="strip",
             expected_face_count=4,
         )
@@ -1348,7 +1422,7 @@ class ObjWriterTests(unittest.TestCase):
 
         self.assertEqual(
             face_lines,
-            ["f 1 2 3", "f 2 4 3", "f 5 6 7", "f 6 8 7"],
+            ["f 1 2 3", "f 4 3 2", "f 5 6 7", "f 8 7 6"],
         )
 
 

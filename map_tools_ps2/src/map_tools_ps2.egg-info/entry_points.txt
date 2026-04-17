@@ -1,0 +1,2 @@
+[console_scripts]
+map-tools-ps2 = map_tools_ps2.cli:main

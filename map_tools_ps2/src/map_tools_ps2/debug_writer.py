@@ -30,6 +30,7 @@ def write_ps2mesh_debug(scene: Scene, json_path: Path, bin_path: Path | None = N
                     "render_flag": block.render_flag,
                     "source_offset": block.source_offset,
                     "source_qword_size": block.source_qword_size,
+                    "strip_entry": _strip_entry_debug(block),
                     "vertex_count": len(block.run.vertices),
                     "texcoord_count": len(block.run.texcoords),
                     "packed_count": len(block.run.packed_values),
@@ -89,6 +90,25 @@ def _append_u32(payload: bytearray, values) -> dict[str, Any]:
     for value in values:
         payload.extend(struct.pack("<I", value))
     return _view(offset, len(payload) - offset, len(values), "SCALAR", "u32le")
+
+
+def _strip_entry_debug(block) -> dict[str, Any] | None:
+    entry = getattr(block, "strip_entry", None)
+    if entry is None:
+        return None
+    return {
+        "raw_hex": entry.raw.hex(),
+        "texture_index_raw": entry.texture_index_raw,
+        "vif_offset": entry.vif_offset,
+        "qword_count": entry.qword_count,
+        "qword_size": entry.qword_size,
+        "render_flags": entry.render_flags,
+        "word_1c": entry.word_1c,
+        "topology_code": entry.topology_code,
+        "vertex_count_byte": entry.vertex_count_byte,
+        "count_byte": entry.count_byte,
+        "packed_ff_or_zero": entry.packed_ff_or_zero,
+    }
 
 
 def _align_payload(payload: bytearray) -> int:

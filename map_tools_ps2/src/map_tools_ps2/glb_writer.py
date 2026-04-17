@@ -7,10 +7,10 @@ from typing import Any, Literal
 
 from .binary import Vec3
 from .model import DecodedBlock, MeshObject, Scene, instantiated_mesh_object, transformed_block_vertices
+from .primitive_stream import assemble_primitive_stream_indices, primitive_stream_for_block
 from .primitives import (
     fan_indices,
     quad_batch_indices,
-    metadata_strip_restart_boundaries as primitive_metadata_strip_restart_boundaries,
     strip_indices,
     triangle_list_indices,
 )
@@ -33,12 +33,9 @@ def _strip_indices(start_index: int, count: int) -> list[int]:
 
 
 def _strip_indices_for_vertices(vertices: tuple[Vec3, ...], object_name: str = "") -> list[int]:
+    del object_name
     if len(vertices) < 3:
         return []
-
-    boundary = _prop_tail_restart_boundary(vertices, object_name)
-    if boundary is not None:
-        return _strip_indices_with_boundaries(vertices, {boundary})
 
     indices = _strip_segment_indices(vertices, 0, len(vertices))
     boundaries = _strip_restart_boundaries(vertices) | _strip_duplicate_pair_boundaries(vertices)
@@ -93,24 +90,13 @@ def _native_strip_segments(
     block: DecodedBlock | None = None,
     object_name: str = "",
 ) -> tuple[tuple[int, int], ...]:
-    boundaries = _native_strip_restart_boundaries(vertices)
-    boundaries |= _metadata_strip_restart_boundaries(block, len(vertices))
-    target_boundary = _native_target_count_restart_boundary(vertices, block, object_name)
-    if target_boundary is not None:
-        boundaries.add(target_boundary)
-    sorted_boundaries = sorted(boundaries)
-    if not sorted_boundaries:
-        return ((0, len(vertices)),)
+    del object_name
+    if block is not None:
+        stream = primitive_stream_for_block(vertices, block)
+        if stream.source_proof != "fallback":
+            return stream.segments
 
-    segments: list[tuple[int, int]] = []
-    start_index = 0
-    for boundary in sorted_boundaries:
-        if boundary - start_index >= 3 and len(vertices) - boundary >= 3:
-            segments.append((start_index, boundary))
-            start_index = boundary
-    if len(vertices) - start_index >= 3:
-        segments.append((start_index, len(vertices)))
-    return tuple(segments) if segments else ((0, len(vertices)),)
+    return ((0, len(vertices)),)
 
 
 def _native_strip_restart_boundaries(vertices: tuple[Vec3, ...]) -> set[int]:
@@ -133,68 +119,6 @@ def _native_strip_restart_boundaries(vertices: tuple[Vec3, ...]) -> set[int]:
         if distance > max(global_baseline * 8.0, local_baseline * 5.0):
             boundaries.add(index + 1)
     return boundaries
-
-
-def _metadata_strip_restart_boundaries(block: DecodedBlock | None, vertex_count: int) -> set[int]:
-    if block is None:
-        return set()
-    return primitive_metadata_strip_restart_boundaries(
-        block.topology_code,
-        block.expected_face_count,
-        vertex_count,
-    )
-
-
-def _native_target_count_restart_boundary(
-    vertices: tuple[Vec3, ...],
-    block: DecodedBlock | None,
-    object_name: str,
-) -> int | None:
-    if block is None or block.expected_face_count is None:
-        return None
-    if not _is_xb_building_object(object_name):
-        return None
-    if len(vertices) < 6 or len(vertices) > 16:
-        return None
-
-    expected_faces = block.expected_face_count
-    raw_indices = _strip_segment_indices(vertices, 0, len(vertices))
-    raw_score = _topology_score(vertices, raw_indices)
-    if raw_score[2] <= expected_faces:
-        return None
-
-    best: tuple[float, int] | None = None
-    for boundary in range(3, len(vertices) - 2):
-        candidate_indices = _strip_indices_with_boundaries(vertices, {boundary})
-        candidate_score = _topology_score(vertices, candidate_indices)
-        if candidate_score[2] != expected_faces:
-            continue
-        if candidate_score[0] != 0:
-            continue
-        if candidate_score[1] + 1e-6 >= raw_score[1] * 0.85:
-            continue
-        candidate = (candidate_score[1], boundary)
-        if best is None or candidate < best:
-            best = candidate
-
-    return best[1] if best is not None else None
-
-
-def _prop_tail_restart_boundary(vertices: tuple[Vec3, ...], object_name: str) -> int | None:
-    if not _is_prop_object(object_name):
-        return None
-    if _has_degenerate_strip_triangles(vertices):
-        return None
-
-    boundaries = sorted(_strip_restart_boundaries(vertices))
-    if len(boundaries) != 1:
-        return None
-
-    boundary = boundaries[0]
-    tail = len(vertices) - boundary
-    if tail > 4:
-        return None
-    return boundary
 
 
 def _strip_restart_boundaries(vertices: tuple[Vec3, ...]) -> set[int]:
@@ -238,13 +162,6 @@ def _strip_duplicate_pair_boundaries(vertices: tuple[Vec3, ...]) -> set[int]:
     return boundaries
 
 
-def _has_degenerate_strip_triangles(vertices: tuple[Vec3, ...]) -> bool:
-    for index in range(len(vertices) - 2):
-        if _is_degenerate_triangle(vertices[index], vertices[index + 1], vertices[index + 2]):
-            return True
-    return False
-
-
 def _is_degenerate_triangle(a: Vec3, b: Vec3, c: Vec3) -> bool:
     abx = b.x - a.x
     aby = b.y - a.y
@@ -262,19 +179,13 @@ def _same_vertex(a: Vec3, b: Vec3, epsilon: float = 1e-5) -> bool:
     return abs(a.x - b.x) <= epsilon and abs(a.y - b.y) <= epsilon and abs(a.z - b.z) <= epsilon
 
 
-def _is_prop_object(name: str) -> bool:
-    return name.startswith(("XB_", "XS_", "XT_", "XW_", "XWU_", "TRACK_HELICOPTER"))
-
-
-def _is_xb_building_object(name: str) -> bool:
-    return name.startswith("XB_")
-
-
 def _should_prioritize_target_count(name: str) -> bool:
+    del name
     return False
 
 
 def _should_use_unknown_count_topology(name: str) -> bool:
+    del name
     return False
 
 
@@ -630,39 +541,17 @@ def _hybrid_indices_for_unknown_count(vertices: tuple[Vec3, ...], unknown_count:
 
 
 def _indices_for_run(vertices: tuple[Vec3, ...], object_name: str = "", unknown_count: int | None = None) -> list[int]:
-    vertex_count = len(vertices)
-    prefer_target_count = _should_prioritize_target_count(object_name)
-
-    indices = _strip_indices_for_vertices(vertices, object_name)
-    best_score = _topology_score(vertices, indices)
-
-    if unknown_count is None or not _should_use_unknown_count_topology(object_name):
-        return indices
-
-    raw_strip_indices = _strip_segment_indices(vertices, 0, vertex_count)
-    raw_strip_score = _topology_score(vertices, raw_strip_indices)
-    if _should_replace_topology(raw_strip_score, best_score, unknown_count, prefer_target_count):
-        indices = raw_strip_indices
-        best_score = raw_strip_score
-
-    segmented_strip_indices = _segmented_strip_indices_for_unknown_count(vertices, unknown_count)
-    if segmented_strip_indices:
-        segmented_strip_score = _topology_score(vertices, segmented_strip_indices)
-        if _should_replace_topology(segmented_strip_score, best_score, unknown_count, prefer_target_count):
-            indices = segmented_strip_indices
-            best_score = segmented_strip_score
-
-    if prefer_target_count and best_score[2] != unknown_count:
-        flexible_segmented_indices = _flexible_segmented_strip_indices_for_unknown_count(vertices, unknown_count)
-        if flexible_segmented_indices:
-            flexible_segmented_score = _topology_score(vertices, flexible_segmented_indices)
-            if _should_replace_topology(flexible_segmented_score, best_score, unknown_count, prefer_target_count):
-                indices = flexible_segmented_indices
-
-    return indices
+    del unknown_count
+    return _strip_indices_for_vertices(vertices, object_name)
 
 
 def _indices_for_block(vertices: tuple[Vec3, ...], object_name: str, block: DecodedBlock) -> list[int]:
+    del object_name
+    stream = primitive_stream_for_block(vertices, block)
+    stream_indices = assemble_primitive_stream_indices(stream)
+    if stream_indices or stream.prim_type is not None:
+        return stream_indices
+
     if block.primitive_mode == "triangles":
         return _triangle_list_indices(len(vertices))
     if block.primitive_mode == "quads":
@@ -670,40 +559,7 @@ def _indices_for_block(vertices: tuple[Vec3, ...], object_name: str, block: Deco
     if block.primitive_mode == "fan":
         return _fan_indices(len(vertices))
 
-    metadata_boundaries = _metadata_strip_restart_boundaries(block, len(vertices))
-    if metadata_boundaries:
-        return _strip_indices_with_boundaries(vertices, metadata_boundaries)
-
-    indices = _indices_for_run(vertices, object_name, block.expected_face_count)
-    topology_code = block.topology_code
-    if block.expected_face_count is None or topology_code is None or not _should_use_unknown_count_topology(object_name):
-        return indices
-
-    prefer_target_count = _should_prioritize_target_count(object_name)
-    best_score = _topology_score(vertices, indices)
-
-    if topology_code in {0x05, 0x07}:
-        hybrid_indices = _hybrid_indices_for_unknown_count(vertices, block.expected_face_count)
-        if hybrid_indices:
-            hybrid_score = _topology_score(vertices, hybrid_indices)
-            if (
-                topology_code == 0x05
-                and hybrid_score[2] == block.expected_face_count
-                and hybrid_score[0] <= best_score[0] + 1
-                and hybrid_score[1] <= 7.0
-            ):
-                return hybrid_indices
-            if _should_replace_topology(hybrid_score, best_score, block.expected_face_count, prefer_target_count):
-                return hybrid_indices
-
-    if topology_code == 0x12:
-        flexible_indices = _flexible_segmented_strip_indices_for_unknown_count(vertices, block.expected_face_count)
-        if flexible_indices:
-            flexible_score = _topology_score(vertices, flexible_indices)
-            if _should_replace_topology(flexible_score, best_score, block.expected_face_count, prefer_target_count):
-                return flexible_indices
-
-    return indices
+    return []
 
 
 FaceKey = tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
@@ -911,6 +767,7 @@ def write_glb(
             vertices = _ps2_to_gltf_vertices(transformed_block_vertices(obj, block))
             if len(vertices) < 3:
                 continue
+            block_stream = primitive_stream_for_block(vertices, block)
             gltf_mode = _native_gltf_mode_for_block(block) if primitive_assembly == "native" else None
             local_indices: list[int] | None = None
             if gltf_mode is None:
@@ -982,6 +839,8 @@ def write_glb(
                         "source_qword_size": block.source_qword_size,
                         "expected_face_count": block.expected_face_count,
                         "topology_code": block.topology_code,
+                        "primitive_stream_proof": block_stream.source_proof,
+                        "primitive_stream_segments": [list(segment) for segment in block_stream.segments],
                     },
                 }
                 if segment_indices is not None:

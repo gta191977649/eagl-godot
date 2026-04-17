@@ -10,6 +10,7 @@ from .comp import decompress_lzc, load_bundle_bytes
 from .debug_writer import write_ps2mesh_debug
 from .glb_writer import write_glb
 from .gs_transform_benchmark import benchmark_transform_against_gsdump
+from .gs_oracle import compare_track_to_gsdump
 from .gs_validate import validate_gsdump_against_track
 from .model import parse_scene
 from .obj_writer import write_obj
@@ -178,6 +179,20 @@ def _cmd_probe_primitive(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_oracle_gsdump(args: argparse.Namespace) -> int:
+    src = _resolve_track_input(args)
+    report = compare_track_to_gsdump(
+        src,
+        Path(args.gsdump),
+        object_filter=args.object,
+        st_precision=args.st_precision,
+        max_key_sources=args.max_key_sources,
+        max_key_draws=args.max_key_draws,
+    )
+    print(report.format_text(limit=args.limit))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="map-tools-ps2")
     subparsers = parser.add_subparsers(dest="command")
@@ -307,6 +322,21 @@ def build_parser() -> argparse.ArgumentParser:
     primitive_parser.add_argument("--draw", type=int, default=1761, help="GS draw packet index")
     primitive_parser.set_defaults(func=_cmd_probe_primitive)
 
+    oracle_parser = subparsers.add_parser(
+        "oracle-gsdump",
+        help="compare reconstructed primitive streams against GS dump draw packets",
+    )
+    oracle_parser.add_argument("gsdump", help="PCSX2 .gs or .gs.zst dump")
+    oracle_parser.add_argument("input", nargs="?")
+    oracle_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
+    oracle_parser.add_argument("--track", type=int, default=61, help="track number, default 61")
+    oracle_parser.add_argument("--object", default="", help="object-name substring to compare")
+    oracle_parser.add_argument("--st-precision", type=int, default=2, help="decimal precision used for normalized ST matching")
+    oracle_parser.add_argument("--max-key-sources", type=int, default=24, help="skip keys with more source candidates")
+    oracle_parser.add_argument("--max-key-draws", type=int, default=24, help="skip keys with more draw candidates")
+    oracle_parser.add_argument("--limit", type=int, default=80, help="maximum groups and sample rows to print")
+    oracle_parser.set_defaults(func=_cmd_oracle_gsdump)
+
     return parser
 
 
@@ -323,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark-bounds",
         "benchmark-topology",
         "probe-primitive",
+        "oracle-gsdump",
         "-h",
         "--help",
     }:

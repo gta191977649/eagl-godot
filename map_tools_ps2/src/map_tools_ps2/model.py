@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from .binary import IDENTITY4, Matrix4, Vec3, compose_matrix4, f32le, transform_point, u32le
 from .chunks import Chunk, walk_chunks
 from .primitives import PrimitiveMode
+from .strip_entries import StripEntryRecord, parse_strip_entry_record
 from .vif import VifVertexRun, extract_vif_vertex_runs
 
 
@@ -18,6 +19,7 @@ class DecodedBlock:
     render_flag: int | None = None
     source_offset: int | None = None
     source_qword_size: int | None = None
+    strip_entry: StripEntryRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -318,13 +320,13 @@ def _extract_blocks_from_strip_entries(
 
     blocks: list[DecodedBlock] = []
     for record in records:
-        texture_index = u32le(record, 0)
-        vif_offset = u32le(record, 0x08)
-        qword_size = (u32le(record, 0x0C) & 0xFFFF) * 16
-        render_flag = (u32le(record, 0x0C) >> 16) & 0xFFFF
-        packed = u32le(record, 0x1C)
-        topology_code = packed & 0xFF
-        expected_face_count = (packed >> 16) & 0xFF
+        strip_entry = parse_strip_entry_record(record)
+        texture_index = strip_entry.texture_index_raw
+        vif_offset = strip_entry.vif_offset
+        qword_size = strip_entry.qword_size
+        render_flag = strip_entry.render_flags
+        topology_code = strip_entry.topology_code
+        expected_face_count = strip_entry.count_byte
         if qword_size <= 0 or vif_offset < 0 or vif_offset + qword_size > len(vif_payload):
             return ()
         decoded = extract_vif_vertex_runs(vif_payload[vif_offset : vif_offset + qword_size])
@@ -341,6 +343,7 @@ def _extract_blocks_from_strip_entries(
                 render_flag=render_flag or None,
                 source_offset=vif_offset,
                 source_qword_size=qword_size,
+                strip_entry=strip_entry,
             )
         )
 

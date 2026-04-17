@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: map-tools-ps2
+Version: 0.1.0
+Summary: Experimental Need for Speed Hot Pursuit 2 PS2 track converter
+Requires-Python: >=3.10

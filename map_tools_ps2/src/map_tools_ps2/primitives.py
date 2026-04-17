@@ -11,7 +11,7 @@ def strip_indices(start_index: int, count: int) -> list[int]:
         a = start_index + i
         b = start_index + i + 1
         c = start_index + i + 2
-        face = (a, c, b) if i & 1 else (a, b, c)
+        face = (a, c, b) if (start_index + i) & 1 else (a, b, c)
         if len({face[0], face[1], face[2]}) == 3:
             indices.extend(face)
     return indices
@@ -49,17 +49,3 @@ def indices_for_primitive(mode: PrimitiveMode, count: int) -> list[int] | None:
     if mode == "quads":
         return quad_batch_indices(count)
     return None
-
-
-def metadata_strip_restart_boundaries(
-    topology_code: int | None,
-    expected_face_count: int | None,
-    vertex_count: int,
-) -> set[int]:
-    if topology_code != 0x05 or expected_face_count is None:
-        return set()
-    if vertex_count < 8 or vertex_count % 4:
-        return set()
-    if expected_face_count * 2 != vertex_count:
-        return set()
-    return set(range(4, vertex_count, 4))
