@@ -7,6 +7,25 @@ const TrackAssetScript := preload("res://eagl/assets/track/track_asset.gd")
 const POSITION_S16_SCALE := 1.0 / 4096.0
 const POSITION_S8_SCALE := 1.0 / 128.0
 
+const CHUNK_TRACK_METADATA := 0x00034200
+const CHUNK_SUN_FLARE_CONFIG := 0x00034202
+const CHUNK_FOG_CONFIG := 0x00034250
+
+const SUN_FLARE_TEXTURE_HASHES := [
+	0x47beb4b6, # SUNCENTER
+	0xd4d26c59, # SUNHALO
+	0x1744b82d, # SUNMAJORRAYS
+	0xad3c5239, # SUNMINORRAYS
+	0xd4d80a65, # SUNRING
+]
+const SUN_FLARE_TEXTURE_NAMES := [
+	"SUNCENTER",
+	"SUNHALO",
+	"SUNMAJORRAYS",
+	"SUNMINORRAYS",
+	"SUNRING",
+]
+
 
 func parse(files: Dictionary):
 	var asset = TrackAssetScript.new()
@@ -96,6 +115,7 @@ func _parse_scene_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray
 	asset.scenery_instances.clear()
 	for section in asset.scenery_sections:
 		asset.scenery_instances.append_array(section.get("instances", []))
+	asset.environment_config = _parse_environment_config(chunks, bundle)
 	asset.unknown_chunks = _collect_unknown_chunks(chunks)
 
 
@@ -606,6 +626,155 @@ func _read_scenery_instance_transform(payload: PackedByteArray, offset: int) -> 
 	return rows
 
 
+func _parse_environment_config(chunks: Array[Dictionary], bundle: PackedByteArray) -> Dictionary:
+	var config := {}
+	for chunk in _walk_chunks(chunks):
+		var chunk_id := int(chunk.get("id", 0))
+		if chunk_id == CHUNK_TRACK_METADATA and not config.has("track_metadata"):
+			config["track_metadata"] = _parse_track_metadata(_payload(bundle, chunk), chunk)
+		elif chunk_id == CHUNK_SUN_FLARE_CONFIG and not config.has("sun"):
+			var sun := _parse_sun_flare_config(_payload(bundle, chunk), chunk)
+			if not sun.is_empty():
+				config["sun"] = sun
+		elif chunk_id == CHUNK_FOG_CONFIG and not config.has("fog"):
+			config["fog"] = _parse_fog_config(_payload(bundle, chunk), chunk)
+	return config
+
+
+func _parse_track_metadata(payload: PackedByteArray, chunk: Dictionary) -> Dictionary:
+	var name_end := 0
+	while name_end < payload.size() and payload[name_end] != 0:
+		name_end += 1
+	return {
+		"name": Binary.ascii(payload, 0, name_end),
+		"source_chunk_offset": int(chunk.get("offset", -1)),
+		"chunk_size": int(chunk.get("size", 0)),
+	}
+
+
+func _parse_sun_flare_config(payload: PackedByteArray, chunk: Dictionary) -> Dictionary:
+	var aligned_offset := _aligned_payload_offset(chunk)
+	if aligned_offset + 0x1C > payload.size():
+		return {}
+	var version := Binary.u32(payload, aligned_offset)
+	if version != 2:
+		return {
+			"source_chunk_offset": int(chunk.get("offset", -1)),
+			"chunk_size": int(chunk.get("size", 0)),
+			"version": version,
+			"enabled": false,
+			"records": [],
+		}
+
+	var flare_records: Array[Dictionary] = []
+	var records_base := aligned_offset + 0x1C
+	for index in range(6):
+		var record_offset := records_base + index * 0x24
+		if record_offset + 0x24 > payload.size():
+			break
+		var texture_index := Binary.u32(payload, record_offset)
+		var mode := Binary.u32(payload, record_offset + 0x04)
+		var color := _rgba_color_from_u32(Binary.u32(payload, record_offset + 0x18))
+		var texture_hash: int = SUN_FLARE_TEXTURE_HASHES[texture_index] if texture_index < SUN_FLARE_TEXTURE_HASHES.size() else 0
+		var texture_name: String = SUN_FLARE_TEXTURE_NAMES[texture_index] if texture_index < SUN_FLARE_TEXTURE_NAMES.size() else ""
+		var record := {
+			"index": index,
+			"raw_offset": record_offset,
+			"texture_index": texture_index,
+			"texture_hash": texture_hash,
+			"texture_name": texture_name,
+			"mode": mode,
+			"intensity": Binary.f32(payload, record_offset + 0x08),
+			"size": Binary.f32(payload, record_offset + 0x0C),
+			"offset": Vector2(Binary.f32(payload, record_offset + 0x10), Binary.f32(payload, record_offset + 0x14)),
+			"color": color,
+			"angle_u16": Binary.u16(payload, record_offset + 0x1C),
+			"falloff": Binary.f32(payload, record_offset + 0x20),
+		}
+		record["enabled"] = _is_sun_flare_record_enabled(record)
+		flare_records.append(record)
+
+	var primary_vector := Vector3(
+		Binary.f32(payload, aligned_offset + 0x04),
+		Binary.f32(payload, aligned_offset + 0x08),
+		Binary.f32(payload, aligned_offset + 0x0C)
+	)
+	var direction_vector := Vector3(
+		Binary.f32(payload, aligned_offset + 0x10),
+		Binary.f32(payload, aligned_offset + 0x14),
+		Binary.f32(payload, aligned_offset + 0x18)
+	)
+	return {
+		"source_chunk_offset": int(chunk.get("offset", -1)),
+		"chunk_size": int(chunk.get("size", 0)),
+		"version": version,
+		"aligned_payload_offset": aligned_offset,
+		"primary_vector_ps2": primary_vector,
+		"direction_vector_ps2": direction_vector,
+		"direction_ps2": direction_vector.normalized() if direction_vector.length() > 0.0 else Vector3.ZERO,
+		"enabled": _has_enabled_sun_flare_record(flare_records),
+		"records": flare_records,
+	}
+
+
+func _parse_fog_config(payload: PackedByteArray, chunk: Dictionary) -> Dictionary:
+	var aligned_offset := _aligned_payload_offset(chunk)
+	if aligned_offset + 0x10 > payload.size():
+		return {}
+	var records: Array[Dictionary] = []
+	var version := Binary.u32(payload, aligned_offset)
+	var count := Binary.u32(payload, aligned_offset + 0x04)
+	var record_offset := aligned_offset + 0x10
+	for index in range(count):
+		if record_offset + 0x80 > payload.size():
+			break
+		var name_offset := record_offset + 0x10
+		var name_end := name_offset
+		while name_end < record_offset + 0x30 and name_end < payload.size() and payload[name_end] != 0:
+			name_end += 1
+		var color := _rgba_color_from_u32(Binary.u32(payload, record_offset + 0x54))
+		records.append({
+			"index": index,
+			"name": Binary.ascii(payload, name_offset, name_end),
+			"color": color,
+			"raw_offset": record_offset,
+		})
+		record_offset += 0x80
+	return {
+		"source_chunk_offset": int(chunk.get("offset", -1)),
+		"chunk_size": int(chunk.get("size", 0)),
+		"version": version,
+		"declared_count": count,
+		"records": records,
+	}
+
+
+func _rgba_color_from_u32(value: int) -> Color:
+	var red := float(value & 0xFF) / 255.0
+	var green := float((value >> 8) & 0xFF) / 255.0
+	var blue := float((value >> 16) & 0xFF) / 255.0
+	var alpha_byte := (value >> 24) & 0xFF
+	var alpha := clampf(float(alpha_byte) / 128.0, 0.0, 1.0)
+	return Color(red, green, blue, alpha)
+
+
+func _aligned_payload_offset(chunk: Dictionary, boundary: int = 0x10) -> int:
+	var chunk_offset := int(chunk.get("offset", 0))
+	var data_offset := int(chunk.get("data_offset", chunk_offset + 8))
+	return ((chunk_offset + 0x17) & ~(boundary - 1)) - data_offset
+
+
+func _is_sun_flare_record_enabled(record: Dictionary) -> bool:
+	return int(record.get("texture_hash", 0)) != 0 and float(record.get("intensity", 0.0)) > 0.0 and float(record.get("size", 0.0)) > 0.0
+
+
+func _has_enabled_sun_flare_record(records: Array[Dictionary]) -> bool:
+	for record in records:
+		if bool(record.get("enabled", false)):
+			return true
+	return false
+
+
 func _collect_unknown_chunks(chunks: Array[Dictionary], parent_id: int = 0, parent_offset: int = -1) -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	for chunk in chunks:
@@ -636,6 +805,10 @@ func _is_known_track_chunk(chunk_id: int) -> bool:
 		0x00034102,
 		0x00034103,
 		0x00034104,
+		CHUNK_TRACK_METADATA,
+		0x00034201,
+		CHUNK_SUN_FLARE_CONFIG,
+		CHUNK_FOG_CONFIG,
 	]
 
 

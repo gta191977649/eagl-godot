@@ -12,12 +12,13 @@ var texture_filter_mode := "linear_mipmap"
 
 
 func material_for_block(object_name: String, block: Dictionary, block_index: int, uses_vertex_colors: bool, texture_hash: int = 0) -> Material:
+	var use_lighting := _should_use_lit_material(object_name)
 	var key := "%s:%s:%s:%s:%s" % [
 		object_name,
 		texture_hash,
 		block.get("render_flag", 0),
 		texture_filter_mode,
-		"vc" if uses_vertex_colors else "flat",
+		("%s_%s" % ["lit" if use_lighting else "unlit", "vc" if uses_vertex_colors else "flat"]),
 	]
 	if _materials.has(key):
 		return _materials[key]
@@ -33,7 +34,7 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 			alpha_mode = ""
 		var double_sided := _should_double_side_alpha(object_name, info, int(block.get("render_flag", 0)))
 		var shader_material := ShaderMaterial.new()
-		shader_material.shader = _get_texture_shader(alpha_mode, double_sided)
+		shader_material.shader = _get_texture_shader(alpha_mode, double_sided, use_lighting)
 		shader_material.resource_name = "EAGL_%s" % info.get("name", "texture")
 		shader_material.set_shader_parameter("albedo_texture", texture)
 		shader_material.set_shader_parameter("albedo_tint", Color.WHITE)
@@ -46,6 +47,7 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 		shader_material.set_meta("eagl_alpha_cutoff", alpha_cutoff)
 		shader_material.set_meta("eagl_double_sided", double_sided)
 		shader_material.set_meta("eagl_texture_filter_mode", texture_filter_mode)
+		shader_material.set_meta("eagl_use_lighting", use_lighting)
 		shader_material.set_meta("eagl_force_opaque_road_edge", force_opaque_road_edge)
 		shader_material.set_meta("eagl_vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
 		shader_material.set_meta("eagl_is_any_semitransparency", info.get("is_any_semitransparency", 0))
@@ -56,7 +58,7 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 
 	var material := StandardMaterial3D.new()
 	material.resource_name = "EAGL_%s_%03d" % [object_name, block_index]
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL if use_lighting else BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	material.texture_filter = _base_material_texture_filter()
 	material.vertex_color_use_as_albedo = uses_vertex_colors
@@ -114,16 +116,22 @@ func _should_force_opaque_road_edge(object_name: String, texture_info: Dictionar
 	)
 
 
-func _get_texture_shader(alpha_mode: String, double_sided: bool) -> Shader:
+func _should_use_lit_material(object_name: String) -> bool:
+	var name := object_name.to_upper()
+	return not (name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER")
+
+
+func _get_texture_shader(alpha_mode: String, double_sided: bool, use_lighting: bool) -> Shader:
 	var sampler_filter := _sampler_filter_hint()
-	var key := "%s:%s:%s" % [alpha_mode, "double" if double_sided else "single", sampler_filter]
+	var key := "%s:%s:%s:%s" % [alpha_mode, "double" if double_sided else "single", "lit" if use_lighting else "unlit", sampler_filter]
 	if _texture_shaders.has(key):
 		return _texture_shaders[key]
 	var shader := Shader.new()
 	var cull_mode := "cull_disabled"
-	var render_mode := "unshaded, %s, depth_draw_opaque" % cull_mode
+	var lighting_mode := "" if use_lighting else "unshaded, "
+	var render_mode := "%s%s, depth_draw_opaque" % [lighting_mode, cull_mode]
 	if alpha_mode == "BLEND":
-		render_mode = "unshaded, %s, blend_mix, depth_prepass_alpha" % cull_mode
+		render_mode = "%s%s, blend_mix, depth_prepass_alpha" % [lighting_mode, cull_mode]
 	var alpha_lines := ""
 	if alpha_mode == "MASK":
 		alpha_lines = "\n\tALPHA = base.a;\n\tALPHA_SCISSOR_THRESHOLD = alpha_cutoff;"
@@ -146,6 +154,7 @@ void fragment() {
 		base.a *= COLOR.a;
 	}
 	ALBEDO = base.rgb;
+	ROUGHNESS = 1.0;
 %s
 }
 """ % [

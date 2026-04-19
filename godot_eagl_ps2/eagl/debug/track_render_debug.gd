@@ -8,6 +8,7 @@ const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_ban
 @export var load_on_ready := true
 @export var place_scenery_instances := true
 @export var expand_scenery_instances := false
+@export var cast_shadow := false
 @export_enum(
 	"linear_mipmap",
 	"linear",
@@ -26,15 +27,23 @@ var _is_loading := false
 @onready var _track_selector: OptionButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow/TrackSelector
 @onready var _reload_button: Button = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow/ReloadTrack
 @onready var _track_status_label: Label = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow/TrackStatus
+@onready var _cast_shadow_toggle: CheckButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow/CastShadowToggle
+@onready var _camera_position_label: Label = $DebugUI/DebugUILayout/CameraPositionPanel/CameraPositionLabel
 
 
 func _ready() -> void:
 	_loading_panel.visible = false
 	_track_selector.item_selected.connect(_on_track_selected)
 	_reload_button.pressed.connect(reload_track)
+	_cast_shadow_toggle.button_pressed = cast_shadow
+	_cast_shadow_toggle.toggled.connect(_on_cast_shadow_toggled)
 	_populate_track_selector()
 	if load_on_ready:
 		call_deferred("_load_debug_track")
+
+
+func _process(_delta: float) -> void:
+	_update_camera_position_label()
 
 
 func _load_debug_track() -> void:
@@ -104,6 +113,7 @@ func _load_debug_track() -> void:
 	await _set_loading_status("Finalizing view", 0.95, true)
 	_replace_track_node(next_track_node)
 	_ensure_debug_lighting()
+	_apply_cast_shadow()
 	_frame_camera(track_node)
 	await _set_loading_status("Loaded TRACK%s" % files.get("track_id", track_id), 1.0, true)
 	_hide_loading_ui_deferred()
@@ -235,6 +245,25 @@ func _on_track_selected(index: int) -> void:
 	_load_debug_track()
 
 
+func _on_cast_shadow_toggled(enabled: bool) -> void:
+	cast_shadow = enabled
+	_apply_cast_shadow()
+
+
+func _apply_cast_shadow() -> void:
+	if track_node == null:
+		return
+	for node in track_node.find_children("EAGL_Sun", "DirectionalLight3D", true, false):
+		var light := node as DirectionalLight3D
+		if light == null:
+			continue
+		if not light.has_meta("eagl_enabled_light_energy"):
+			light.set_meta("eagl_enabled_light_energy", light.light_energy)
+		light.shadow_enabled = cast_shadow
+		light.light_energy = float(light.get_meta("eagl_enabled_light_energy", light.light_energy)) if cast_shadow else 0.0
+		light.visible = cast_shadow
+
+
 func _set_track_controls_enabled(enabled: bool) -> void:
 	if _track_selector != null:
 		_track_selector.disabled = not enabled
@@ -296,12 +325,9 @@ func _hide_loading_ui_deferred() -> void:
 
 
 func _ensure_debug_lighting() -> void:
-	if get_node_or_null("Sun") == null:
-		var sun := DirectionalLight3D.new()
-		sun.name = "Sun"
-		sun.light_energy = 2.0
-		sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
-		add_child(sun)
+	var legacy_sun := get_node_or_null("Sun")
+	if legacy_sun is DirectionalLight3D:
+		(legacy_sun as DirectionalLight3D).visible = false
 
 	if camera == null:
 		push_warning("DebugCamera node is missing from the track debug scene")
@@ -332,6 +358,13 @@ func _look_at_with_free_camera(target: Vector3) -> void:
 		camera.call("look_at_target", target)
 	elif camera != null:
 		camera.look_at(target, Vector3.UP)
+
+
+func _update_camera_position_label() -> void:
+	if _camera_position_label == null or camera == null:
+		return
+	var pos := camera.global_position
+	_camera_position_label.text = "Camera\nX: %.2f\nY: %.2f\nZ: %.2f" % [pos.x, pos.y, pos.z]
 
 
 func _node_bounds(node: Node3D) -> AABB:

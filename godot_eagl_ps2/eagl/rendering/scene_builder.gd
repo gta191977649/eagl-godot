@@ -2,9 +2,13 @@ class_name EAGLSceneBuilder
 extends RefCounted
 
 const MeshBuilderScript := preload("res://eagl/rendering/mesh_builder.gd")
+const EnvironmentBuilderScript := preload("res://eagl/rendering/environment_builder.gd")
 const MathUtils := preload("res://eagl/utils/math_utils.gd")
 
+const SUN_LIGHT_CULL_MASK := 1 << 1
+
 var mesh_builder := MeshBuilderScript.new()
+var environment_builder := EnvironmentBuilderScript.new()
 var skipped: Dictionary = {}
 var warnings: Array[String] = []
 var scenery_multimesh_count := 0
@@ -77,6 +81,10 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	elif place_scenery:
 		placed = _add_multimesh_scenery(static_roots, scenery_roots, environment_root, marker_root, asset, mesh_cache)
 
+	_assign_sun_light_cull_layer(static_root)
+	_assign_sun_light_cull_layer(scenery_root)
+	root.set_meta("eagl_sun_light_cull_mask", SUN_LIGHT_CULL_MASK)
+	var environment_result := environment_builder.add_track_environment(root, asset)
 	_merge_builder_diagnostics()
 	var bounds := _node_bounds(root)
 	asset.bounds = bounds
@@ -93,6 +101,8 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_vertex_count", asset.vertex_count())
 	root.set_meta("eagl_scenery_instance_count", asset.scenery_instances.size())
 	root.set_meta("eagl_unknown_chunk_count", asset.unknown_chunks.size())
+	root.set_meta("eagl_has_environment_config", not asset.environment_config.is_empty())
+	root.set_meta("eagl_has_sun", not environment_result.is_empty())
 	root.set_meta("eagl_bounds", bounds)
 	root.set_meta("eagl_skipped", skipped.duplicate(true))
 	root.set_meta("eagl_textured_surface_count", mesh_builder.textured_surfaces)
@@ -191,7 +201,7 @@ func _add_static_object(static_roots: Dictionary, environment_root: Node3D, mark
 	node.set_meta("eagl_source_role", _source_role_for_object(obj))
 	node.set_meta("eagl_placement_kind", "DIRECT_SOLID")
 	node.set_meta("bun_category", category)
-	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
 	parent.add_child(node)
 	_count_semantic_node(category)
 	return true
@@ -247,6 +257,7 @@ func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dicti
 		node.set_meta("eagl_placement_kind", "SCENERY_INSTANCE")
 		node.set_meta("bun_category", category)
 		node.set_meta("eagl_scenery_bucket", scenery_bucket)
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
 		parent.add_child(node)
 		placed += 1
 		_count_semantic_node(category)
@@ -301,7 +312,7 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 		var node := MultiMeshInstance3D.new()
 		node.name = _safe_node_name(obj.get("name", "Scenery_%s" % key))
 		node.multimesh = multimesh
-		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
 		node.set_meta("eagl_object_name", obj.get("name", ""))
 		node.set_meta("eagl_object_hash", group.get("mesh_hash", 0))
 		node.set_meta("eagl_instance_count", transforms.size())
@@ -453,6 +464,14 @@ func _merge_builder_diagnostics() -> void:
 
 func _count_skip(reason: String) -> void:
 	skipped[reason] = skipped.get(reason, 0) + 1
+
+
+func _assign_sun_light_cull_layer(node: Node) -> void:
+	if node is GeometryInstance3D:
+		var geometry := node as GeometryInstance3D
+		geometry.layers = geometry.layers | SUN_LIGHT_CULL_MASK
+	for child in node.get_children():
+		_assign_sun_light_cull_layer(child)
 
 
 func _node_bounds(node: Node3D) -> AABB:

@@ -58,6 +58,7 @@ func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> 
 		arrays.resize(Mesh.ARRAY_MAX)
 		arrays[Mesh.ARRAY_VERTEX] = vertices
 		arrays[Mesh.ARRAY_INDEX] = indices
+		arrays[Mesh.ARRAY_NORMAL] = _normal_array(vertices, indices)
 
 		var uvs := _uv_array(block, vertices.size())
 		var has_uvs := uvs.size() == vertices.size()
@@ -94,7 +95,7 @@ func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> 
 	node.set_meta("eagl_object_name", object_name)
 	node.set_meta("eagl_chunk_offset", obj.get("chunk_offset", 0))
 	node.set_meta("eagl_surface_material_count", surface_materials.size())
-	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
 	return node
 
 
@@ -128,6 +129,34 @@ func _color_array(block: Dictionary, vertex_count: int) -> PackedColorArray:
 		return out
 	for i in range(vertex_count):
 		out.append(_decode_vif_color_5551(int(packed_values[i])))
+	return out
+
+
+func _normal_array(vertices: PackedVector3Array, indices: PackedInt32Array) -> PackedVector3Array:
+	var accum: Array[Vector3] = []
+	accum.resize(vertices.size())
+	for vertex_index in range(vertices.size()):
+		accum[vertex_index] = Vector3.ZERO
+
+	for index in range(0, indices.size() - 2, 3):
+		var a := int(indices[index])
+		var b := int(indices[index + 1])
+		var c := int(indices[index + 2])
+		if a < 0 or b < 0 or c < 0 or a >= vertices.size() or b >= vertices.size() or c >= vertices.size():
+			continue
+		var normal := (vertices[b] - vertices[a]).cross(vertices[c] - vertices[a])
+		if normal.length_squared() <= 0.000001:
+			continue
+		normal = normal.normalized()
+		accum[a] += normal
+		accum[b] += normal
+		accum[c] += normal
+
+	var out := PackedVector3Array()
+	out.resize(vertices.size())
+	for vertex_index in range(vertices.size()):
+		var normal := accum[vertex_index]
+		out[vertex_index] = normal.normalized() if normal.length_squared() > 0.000001 else Vector3.UP
 	return out
 
 
