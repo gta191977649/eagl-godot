@@ -6,15 +6,18 @@ from pathlib import Path
 from typing import Any
 
 from .model import Scene
+from .progress import progress_iter
 
 
-def write_ps2mesh_debug(scene: Scene, json_path: Path, bin_path: Path | None = None) -> Path:
+def write_ps2mesh_debug(scene: Scene, json_path: Path, bin_path: Path | None = None, progress: bool = False) -> Path:
     if bin_path is None:
         bin_path = json_path.with_suffix(".bin")
 
     payload = bytearray()
     objects: list[dict[str, Any]] = []
-    for object_index, obj in enumerate(scene.objects):
+    for object_index, obj in enumerate(
+        progress_iter(scene.objects, total=len(scene.objects), desc="Writing debug objects", enabled=progress)
+    ):
         blocks: list[dict[str, Any]] = []
         for block_index, block in enumerate(obj.blocks):
             vertex_view = _append_vec3(payload, block.run.vertices)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import math
 import sys
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from .gs_validate import validate_gsdump_against_track
 from .model import parse_scene
 from .obj_writer import write_obj
 from .primitive_probe import probe_primitive_rule
+from .progress import progress_iter
 from .textures import load_texture_library_for_track
 from .topology_benchmark import benchmark_topology
 
@@ -45,6 +48,44 @@ def _default_debug_path(out_path: Path) -> Path:
     if stem.endswith(".native"):
         stem = stem[: -len(".native")]
     return out_path.with_name(f"{stem}.ps2mesh.json")
+
+
+def _default_placement_path(track_path: Path) -> Path:
+    return track_path.with_suffix(".txt")
+
+
+def write_placement_txt(scene, out_path: Path, progress: bool = False) -> int:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(("NAME", "x", "y", "z", "sacle_x", "scale_y", "scale_z"))
+        for instance in progress_iter(
+            scene.scenery_instances,
+            total=len(scene.scenery_instances),
+            desc="Exporting placements",
+            enabled=progress,
+        ):
+            x, y, z, _w = instance.transform[3]
+            writer.writerow(
+                (
+                    instance.object_name,
+                    _format_float(x),
+                    _format_float(y),
+                    _format_float(z),
+                    _format_float(_axis_scale(instance.transform[0])),
+                    _format_float(_axis_scale(instance.transform[1])),
+                    _format_float(_axis_scale(instance.transform[2])),
+                )
+            )
+    return len(scene.scenery_instances)
+
+
+def _axis_scale(row: tuple[float, float, float, float]) -> float:
+    return math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2])
+
+
+def _format_float(value: float) -> str:
+    return f"{value:.9g}"
 
 
 def _cmd_decompress(args: argparse.Namespace) -> int:
@@ -84,12 +125,23 @@ def _cmd_export(args: argparse.Namespace) -> int:
             out_path,
             textures,
             vertex_colors=args.vertex_colors,
-            expand_instances=args.expand_instances,
+            expand_instances=args.with_placement,
             primitive_assembly=args.primitive_assembly,
+            progress=True,
         )
     else:
-        write_obj(scene, out_path)
+        write_obj(scene, out_path, progress=True)
     print(f"wrote {out_path} ({len(scene.objects)} objects, {scene.vertex_count} decoded vertices)")
+    return 0
+
+
+def _cmd_export_placement(args: argparse.Namespace) -> int:
+    src = _resolve_track_input(args)
+    data = load_bundle_bytes(src)
+    scene = parse_scene(parse_chunks(data), data)
+    out_path = Path(args.output) if args.output else _default_placement_path(src)
+    count = write_placement_txt(scene, out_path, progress=True)
+    print(f"wrote {out_path} ({count} placements)")
     return 0
 
 
@@ -108,12 +160,13 @@ def _cmd_export_dual(args: argparse.Namespace) -> int:
         out_path,
         textures,
         vertex_colors=args.vertex_colors,
-        expand_instances=args.expand_instances,
+        expand_instances=args.with_placement,
         primitive_assembly="native",
+        progress=True,
     )
 
     debug_path = Path(args.debug_output) if args.debug_output else _default_debug_path(out_path)
-    bin_path = write_ps2mesh_debug(scene, debug_path)
+    bin_path = write_ps2mesh_debug(scene, debug_path, progress=True)
     print(
         f"wrote {out_path} and {debug_path} + {bin_path} "
         f"({len(scene.objects)} objects, {scene.vertex_count} decoded vertices)"
@@ -204,14 +257,21 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--track", type=int, help="track number, for example 44 for TRACKB44")
     export_parser.add_argument("--texture-dir", help="directory containing TEX##TRACK.BIN and TEX##LOCATION.BIN")
     export_parser.add_argument(
-        "--expand-instances",
+        "--with-placement",
+        dest="with_placement",
         action="store_true",
-        help="expand scenery instance records into separate GLB nodes",
+        help="place scenery props using instance coordinate records",
+    )
+    export_parser.add_argument(
+        "--expand-instances",
+        dest="with_placement",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     export_parser.add_argument(
         "--vertex-colors",
         choices=("auto", "always", "off"),
-        default="auto",
+        default="always",
         help="vertex color export mode for GLB output",
     )
     export_parser.add_argument(
@@ -233,17 +293,34 @@ def build_parser() -> argparse.ArgumentParser:
     dual_parser.add_argument("--track", type=int, default=61, help="track number, default 61")
     dual_parser.add_argument("--texture-dir", help="directory containing TEX##TRACK.BIN and TEX##LOCATION.BIN")
     dual_parser.add_argument(
-        "--expand-instances",
+        "--with-placement",
+        dest="with_placement",
         action="store_true",
-        help="expand scenery instance records into separate GLB nodes",
+        help="place scenery props using instance coordinate records",
+    )
+    dual_parser.add_argument(
+        "--expand-instances",
+        dest="with_placement",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     dual_parser.add_argument(
         "--vertex-colors",
         choices=("auto", "always", "off"),
-        default="auto",
+        default="always",
         help="vertex color export mode for GLB output",
     )
     dual_parser.set_defaults(func=_cmd_export_dual)
+
+    placement_parser = subparsers.add_parser(
+        "export-placement",
+        help="export scenery prop placement coordinates",
+    )
+    placement_parser.add_argument("input", nargs="?")
+    placement_parser.add_argument("-o", "--output")
+    placement_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
+    placement_parser.add_argument("--track", type=int, help="track number, for example 44 for TRACKB44")
+    placement_parser.set_defaults(func=_cmd_export_placement)
 
     decompress_parser = subparsers.add_parser("decompress", help="decompress a COMP/LZC bundle")
     decompress_parser.add_argument("input")
@@ -346,6 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] not in {
         "export",
         "export-dual",
+        "export-placement",
         "decompress",
         "chunks",
         "validate-gsdump",

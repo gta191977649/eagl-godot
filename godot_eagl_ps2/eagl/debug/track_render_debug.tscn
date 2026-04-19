@@ -1,0 +1,17 @@
+[gd_scene format=3 uid="uid://cjimsfe5wm7bx"]
+
+[ext_resource type="Script" uid="uid://54ksxtqpoc74" path="res://eagl/debug/track_render_debug.gd" id="1_debug"]
+[ext_resource type="Script" uid="uid://8j6k08bqinvm" path="res://eagl/debug/free_camera.gd" id="2_free_camera"]
+
+[node name="TrackRenderDebug" type="Node3D" unique_id=1668483575]
+script = ExtResource("1_debug")
+track_id = "31"
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=1381713828]
+transform = Transform3D(0.819152, -0.329869, 0.469846, 0, 0.819152, 0.573576, -0.573576, -0.469846, 0.67101, 0, 0, 0)
+light_energy = 12.054
+shadow_enabled = true
+
+[node name="DebugCamera" type="Camera3D" parent="." unique_id=422384826]
+current = true
+script = ExtResource("2_free_camera")

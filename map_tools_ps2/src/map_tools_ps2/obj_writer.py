@@ -4,15 +4,18 @@ from pathlib import Path
 
 from .glb_writer import _indices_for_block
 from .model import Scene, transformed_block_vertices
+from .progress import progress_iter
 
 
-def write_obj(scene: Scene, out_path: Path) -> None:
+def write_obj(scene: Scene, out_path: Path, progress: bool = False) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     vertex_index = 1
     with out_path.open("w", encoding="utf-8") as fh:
         fh.write("# Experimental NFS HP2 PS2 OBJ export\n")
         fh.write("# Topology is reconstructed from strip-entry metadata and VIF vertex runs.\n")
-        for obj_index, obj in enumerate(scene.objects):
+        for obj_index, obj in enumerate(
+            progress_iter(scene.objects, total=len(scene.objects), desc="Exporting OBJ objects", enabled=progress)
+        ):
             safe_name = obj.name.replace(" ", "_").replace("/", "_").replace("\\", "_")
             for block_index, block in enumerate(obj.blocks):
                 vertices = transformed_block_vertices(obj, block)

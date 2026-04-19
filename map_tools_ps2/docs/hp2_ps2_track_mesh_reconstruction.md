@@ -37,13 +37,14 @@ TRACKB##.BUN or decompressed TRACKB##.LZC
     ├── track/section/support chunks
     ├── texture and material-related chunks
     ├── scenery instance chunks
-    │   └── 0x00034103  scenery instance records
-    │       └── references primary mesh object indices
+    │   └── 0x80034100  scenery section
+    │       ├── 0x00034102  scenery info table with mesh name hashes
+    │       └── 0x00034103  scenery instance records
     └── solid mesh chunks
         ├── 0x80034000  primary solid/object list container
         │   └── 0x80034002  mesh object
         │       ├── 0x00034003  object header
-        │       │   ├── ASCII object name
+        │       │   ├── ASCII object name and name hash
         │       │   └── local transform matrix
         │       ├── 0x00034004  strip-entry table
         │       │   ├── record 0, 0x40 bytes
@@ -103,6 +104,81 @@ TRN_SECTION30_CHOP3_0713
   source object name: TRN_SECTION30_CHOP3
   scene object index: 713
 ```
+
+## Scenery Placement Records
+
+Many small scenery props are stored as centered base mesh templates plus separate placement records.
+For example, names such as:
+
+```text
+XH_TIKICURVEDTOP_1_00_0053
+XH_TIKIOFFSIDE_1_00_0055
+XS_UNDERSIGNSBIG_00_0126
+```
+
+use exporter object-index suffixes. The suffix is not a unique placed instance.
+The actual map coordinates come from `0x00034103` records under `0x80034100` chunks in the same `TRACKB##` bundle.
+The mesh attached to each placement is resolved the same way as Modelulator's track-scene export: `0x34103` stores a `SceneryInfoNumber`, `0x34102` maps that info number to one or more name hashes, and the highest LOD hash is matched against the solid name hash in each `0x34003` header.
+
+Observed `0x00034102` record layout for HP2:
+
+```text
+offset  size     current meaning
+0x00    u32      highest LOD solid name hash
+0x04    u32      lower LOD solid name hash, often 0
+0x08    u32      lower LOD solid name hash, often 0
+0x0C    ...      remaining metadata not currently needed for export
+```
+
+Observed `0x00034103` record layout:
+
+```text
+offset  size     current meaning
+0x00    s16[6]   likely instance bounds / coarse bounds
+0x0C    s16      SceneryInfoNumber, an index into this section's 0x00034102 table
+0x0E    u16      unknown / flags
+0x10    f32      world X
+0x14    f32      world Y
+0x18    f32      world Z
+0x1C    s16[9]   3x3 rotation/scale matrix, divided by 16384.0
+0x2E    u16      padding / unknown
+```
+
+The parser exposes these as `Scene.scenery_instances`.
+For GLB output, use placement expansion:
+
+```bash
+PYTHONPATH=src python3 -m map_tools_ps2 export \
+  /Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA/TRACKS/TRACKB64.LZC \
+  -o out/TRACKB64.with-placement.glb \
+  --texture-dir /Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA/TRACKS \
+  --with-placement
+```
+
+Without `--with-placement`, the GLB exporter writes the base mesh templates only.
+With `--with-placement`, it uses each scenery instance transform as the placed object transform and bakes the result into GLB vertex positions.
+The referenced base mesh is selected by the `0x34102` name hash, not by treating `SceneryInfoNumber` as a direct mesh object index.
+The first solid palette is kept as a source mesh library for instancing but is not emitted as unplaced geometry when `--with-placement` is enabled.
+The base object's source transform is a template/reference placement and must not be multiplied into each instance, or repeated city/building pieces drift away from their recorded coordinates.
+CLI exports use `tqdm` progress bars for long object loops, placement loops, and final GLB byte writes.
+The VIF `V4_5` stream at `0xC034..0xC03F` is decoded as packed 5/5/5/1 vertex color data and written to GLB `COLOR_0` by default.
+Use `--vertex-colors off` to disable it, or `--vertex-colors auto` to limit it to road-like/render-flagged blocks.
+GLB materials use `KHR_materials_unlit` so Blender displays the baked PS2 texture and vertex-lighting mix without adding its own scene lighting on top.
+
+To inspect placement coordinates without exporting GLB geometry:
+
+```bash
+PYTHONPATH=src python3 -m map_tools_ps2 export-placement \
+  /Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA/TRACKS/TRACKB64.LZC
+```
+
+This writes `TRACKB64.txt` by default with:
+
+```text
+NAME,x,y,z,sacle_x,scale_y,scale_z
+```
+
+The `sacle_x` spelling is currently intentional because external scripts may depend on that requested header.
 
 ## Strip-Entry Records
 

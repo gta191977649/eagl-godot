@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .binary import IDENTITY4, Matrix4, Vec3, compose_matrix4, f32le, transform_point, u32le
+from .binary import IDENTITY4, Matrix4, Vec3, f32le, transform_point, u32le
 from .chunks import Chunk, walk_chunks
 from .primitives import PrimitiveMode
 from .strip_entries import StripEntryRecord, parse_strip_entry_record
@@ -29,6 +29,7 @@ class MeshObject:
     transform: Matrix4
     blocks: tuple[DecodedBlock, ...]
     texture_hashes: tuple[int, ...] = ()
+    name_hash: int | None = None
 
     @property
     def vertex_runs(self) -> tuple[VifVertexRun, ...]:
@@ -54,12 +55,15 @@ class SceneryInstance:
     transform: Matrix4
     source_chunk_offset: int
     record_index: int
+    scenery_info_index: int | None = None
+    object_hash: int | None = None
 
 
 @dataclass
 class Scene:
     objects: list[MeshObject] = field(default_factory=list)
     scenery_instances: list[SceneryInstance] = field(default_factory=list)
+    scenery_template_offsets: set[int] = field(default_factory=set)
 
     @property
     def vertex_count(self) -> int:
@@ -136,6 +140,7 @@ def parse_mesh_object(object_chunk: Chunk, bundle: bytes) -> MeshObject | None:
         transform=_read_transform(header_payload, name_start),
         blocks=blocks,
         texture_hashes=_read_texture_hashes(texture_refs.payload(bundle)) if texture_refs else (),
+        name_hash=u32le(header_payload, 0x08) if len(header_payload) >= 0x0C else None,
     )
 
 
@@ -159,7 +164,8 @@ def parse_scene(chunks: tuple[Chunk, ...], bundle: bytes) -> Scene:
                 for obj in [parse_mesh_object(child, bundle)]
                 if obj is not None
             ]
-    scene.scenery_instances.extend(_extract_scenery_instances(chunks, bundle, tuple(primary_object_list)))
+            scene.scenery_template_offsets = {obj.chunk_offset for obj in primary_object_list}
+    scene.scenery_instances.extend(_extract_scenery_instances(chunks, bundle, tuple(scene.objects), tuple(primary_object_list)))
     return scene
 
 
@@ -175,9 +181,10 @@ def instantiated_mesh_object(obj: MeshObject, instance: SceneryInstance) -> Mesh
     return MeshObject(
         name=f"{obj.name}_inst_{instance.source_chunk_offset:08x}_{instance.record_index:03d}",
         chunk_offset=obj.chunk_offset,
-        transform=compose_matrix4(obj.transform, instance.transform),
+        transform=instance.transform,
         blocks=obj.blocks,
         texture_hashes=obj.texture_hashes,
+        name_hash=obj.name_hash,
     )
 
 
@@ -190,30 +197,75 @@ def _walk(chunks: tuple[Chunk, ...]):
 def _extract_scenery_instances(
     chunks: tuple[Chunk, ...],
     bundle: bytes,
+    objects: tuple[MeshObject, ...],
     primary_objects: tuple[MeshObject, ...],
 ) -> tuple[SceneryInstance, ...]:
-    if not primary_objects:
+    if not objects and not primary_objects:
         return ()
 
+    object_indices_by_hash = _object_indices_by_hash(objects)
     instances: list[SceneryInstance] = []
     for chunk in walk_chunks(chunks):
-        if chunk.chunk_id != 0x00034103:
+        if chunk.chunk_id != 0x80034100:
             continue
-        payload = chunk.payload(bundle)
+        info_table = _read_scenery_info_table(chunk, bundle)
+        instance_chunk = next((child for child in chunk.children if child.chunk_id == 0x00034103), None)
+        if instance_chunk is None:
+            continue
+        payload = instance_chunk.payload(bundle)
         for record_index, offset in enumerate(range(0, len(payload) - 0x2F, 0x30)):
-            object_index = _signed_i16le(payload, offset + 0x0C)
-            if object_index < 0 or object_index >= len(primary_objects):
+            scenery_info_index = _signed_i16le(payload, offset + 0x0C)
+            object_index: int | None = None
+            object_hash: int | None = None
+            if 0 <= scenery_info_index < len(info_table):
+                for candidate_hash in info_table[scenery_info_index]:
+                    if candidate_hash in object_indices_by_hash:
+                        object_hash = candidate_hash
+                        object_index = object_indices_by_hash[candidate_hash]
+                        break
+            if object_index is None and not info_table and 0 <= scenery_info_index < len(primary_objects):
+                object_index = objects.index(primary_objects[scenery_info_index])
+            if object_index is None:
                 continue
+            obj = objects[object_index]
             instances.append(
                 SceneryInstance(
                     object_index=object_index,
-                    object_name=primary_objects[object_index].name,
+                    object_name=obj.name,
                     transform=_read_scenery_instance_transform(payload, offset),
-                    source_chunk_offset=chunk.offset,
+                    source_chunk_offset=instance_chunk.offset,
                     record_index=record_index,
+                    scenery_info_index=scenery_info_index,
+                    object_hash=object_hash,
                 )
             )
     return tuple(instances)
+
+
+def _object_indices_by_hash(objects: tuple[MeshObject, ...]) -> dict[int, int]:
+    indices: dict[int, int] = {}
+    for index, obj in enumerate(objects):
+        if obj.name_hash in (None, 0, 0x11111111):
+            continue
+        indices.setdefault(obj.name_hash, index)
+    return indices
+
+
+def _read_scenery_info_table(section_chunk: Chunk, bundle: bytes) -> tuple[tuple[int, int, int], ...]:
+    info_chunk = next((child for child in section_chunk.children if child.chunk_id == 0x00034102), None)
+    if info_chunk is None:
+        return ()
+    payload = info_chunk.payload(bundle)
+    table: list[tuple[int, int, int]] = []
+    for offset in range(0, len(payload) - 0x27, 0x28):
+        table.append(
+            (
+                u32le(payload, offset),
+                u32le(payload, offset + 4),
+                u32le(payload, offset + 8),
+            )
+        )
+    return tuple(table)
 
 
 def _signed_i16le(data: bytes, offset: int) -> int:

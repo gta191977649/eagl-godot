@@ -1,11 +1,12 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import hashlib
 import os
 import unittest
 
 from map_tools_ps2.binary import IDENTITY4, Vec3, Vec4, compose_matrix4, transform_point
 from map_tools_ps2.bounds_benchmark import _bounds_error, benchmark_bounds_against_metadata
-from map_tools_ps2.cli import _resolve_track_input
+from map_tools_ps2.cli import _default_placement_path, _resolve_track_input, write_placement_txt
 from map_tools_ps2.chunks import parse_chunks
 from map_tools_ps2.comp import decompress_lzc, load_bundle_bytes
 from map_tools_ps2.debug_writer import write_ps2mesh_debug
@@ -45,6 +46,7 @@ from map_tools_ps2.model import (
     DecodedBlock,
     MeshObject,
     Scene,
+    SceneryInstance,
     _extract_blocks_from_strip_entries,
     _find_ascii_name,
     instantiated_mesh_object,
@@ -57,7 +59,15 @@ from map_tools_ps2.model import (
 from map_tools_ps2.obj_writer import write_obj
 from map_tools_ps2.primitive_probe import probe_primitive_rule
 from map_tools_ps2.primitive_stream import primitive_stream_for_block
-from map_tools_ps2.textures import Texture, _alpha_mode_for_rgba, _alpha_properties_for_rgba, _decode_ps2_alpha, decode_indexed_texture, read_ps2_tpk
+from map_tools_ps2.textures import (
+    Texture,
+    _alpha_mode_for_rgba,
+    _alpha_properties_for_rgba,
+    _decode_ps2_alpha,
+    _material_alpha_properties_for_rgba,
+    decode_indexed_texture,
+    read_ps2_tpk,
+)
 from map_tools_ps2.topology_benchmark import benchmark_topology
 from map_tools_ps2.vif import VifVertexRun, extract_vif_vertex_runs
 from map_tools_ps2.vu1 import VU1_TRANSFORM_MATRIX_ADDR, transform_vu1_position
@@ -109,12 +119,12 @@ class CliTests(unittest.TestCase):
             Path("/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA/TRACKS/TRACKB44.BUN"),
         )
 
-    def test_export_parser_defaults_vertex_colors_to_auto(self):
+    def test_export_parser_defaults_vertex_colors_to_always(self):
         args = __import__("map_tools_ps2.cli", fromlist=["build_parser"]).build_parser().parse_args(
             ["export", "--game-dir", "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile", "--track", "44"]
         )
-        self.assertEqual(args.vertex_colors, "auto")
-        self.assertFalse(args.expand_instances)
+        self.assertEqual(args.vertex_colors, "always")
+        self.assertFalse(args.with_placement)
 
     def test_export_parser_accepts_vertex_colors_override(self):
         args = __import__("map_tools_ps2.cli", fromlist=["build_parser"]).build_parser().parse_args(
@@ -122,11 +132,50 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(args.vertex_colors, "always")
 
-    def test_export_parser_accepts_expand_instances_override(self):
+    def test_export_parser_accepts_with_placement_override(self):
         args = __import__("map_tools_ps2.cli", fromlist=["build_parser"]).build_parser().parse_args(
-            ["export", "--game-dir", "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile", "--track", "44", "--expand-instances"]
+            ["export", "--game-dir", "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile", "--track", "44", "--with-placement"]
         )
-        self.assertTrue(args.expand_instances)
+        self.assertTrue(args.with_placement)
+
+    def test_export_placement_parser_defaults_track_input(self):
+        args = __import__("map_tools_ps2.cli", fromlist=["build_parser"]).build_parser().parse_args(
+            ["export-placement", "--game-dir", "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile", "--track", "44"]
+        )
+        self.assertEqual(args.command, "export-placement")
+        self.assertIsNone(args.output)
+        self.assertEqual(args.track, 44)
+
+    def test_default_placement_path_uses_track_stem_txt(self):
+        self.assertEqual(_default_placement_path(Path("TRACKB64.LZC")), Path("TRACKB64.txt"))
+
+    def test_write_placement_txt_exports_instance_coordinates_and_scale(self):
+        scene = Scene(
+            scenery_instances=[
+                SceneryInstance(
+                    object_index=3,
+                    object_name="XS_TEST_PROP",
+                    transform=(
+                        (2.0, 0.0, 0.0, 0.0),
+                        (0.0, 3.0, 0.0, 0.0),
+                        (0.0, 0.0, 4.0, 0.0),
+                        (10.5, -2.25, 7.0, 1.0),
+                    ),
+                    source_chunk_offset=0x1234,
+                    record_index=5,
+                )
+            ]
+        )
+        with TemporaryDirectory() as tmp_dir:
+            out_path = Path(tmp_dir) / "placements.txt"
+            self.assertEqual(write_placement_txt(scene, out_path), 1)
+            self.assertEqual(
+                out_path.read_text().splitlines(),
+                [
+                    "NAME,x,y,z,sacle_x,scale_y,scale_z",
+                    "XS_TEST_PROP,10.5,-2.25,7,2,3,4",
+                ],
+            )
 
     def test_validate_gsdump_parser_defaults_to_track61(self):
         args = __import__("map_tools_ps2.cli", fromlist=["build_parser"]).build_parser().parse_args(
@@ -328,6 +377,16 @@ class TextureTests(unittest.TestCase):
         self.assertEqual(mode, "MASK")
         self.assertIsNotNone(cutoff)
 
+    def test_non_semitransparent_high_alpha_uses_mask_not_blend(self):
+        self.assertEqual(
+            _material_alpha_properties_for_rgba(bytes([1, 2, 3, 0, 4, 5, 6, 223, 7, 8, 9, 254]), 0),
+            ("MASK", 0.5),
+        )
+        self.assertEqual(
+            _material_alpha_properties_for_rgba(bytes([1, 2, 3, 0, 4, 5, 6, 128, 7, 8, 9, 254]), 1),
+            ("BLEND", None),
+        )
+
     def test_subpage_4bit_texture_indices_are_linear(self):
         palette = b"".join(bytes((index, 0, 0, 0x7F)) for index in range(16))
         rgba = decode_indexed_texture(4, 4, bytes([0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE]), palette)
@@ -397,6 +456,21 @@ class TextureTests(unittest.TestCase):
         self.assertIn("BILLBOARD-REAR", names)
         self.assertIn("BILLBOARD_04", names)
 
+    def test_fixture_swizzled_track_texture_uses_legacy_ps2_layout(self):
+        location_bin = TRACKS_ROOT / "TEX64LOCATION.BIN"
+        if not location_bin.exists():
+            self.skipTest("TEX64LOCATION.BIN fixture is not available")
+
+        textures = {texture.name: texture for texture in read_ps2_tpk(location_bin)}
+        self.assertEqual(
+            hashlib.sha256(textures["SH_CLIFF2SANDBLEND"].png).hexdigest(),
+            "25c65e8e4ffbe8edb0861aad53d29d120c0c52df8db32ce9d4e58f135b5f3cc5",
+        )
+        self.assertEqual(
+            hashlib.sha256(textures["SHLD_G"].png).hexdigest(),
+            "b89c98e0e3128d5c4d1bcae25b9054ac030a180f9a65b4c7dd20fdeae35f7ff9",
+        )
+
 
 class GlbMaterialTests(unittest.TestCase):
     def test_alpha_roads_are_not_exported_double_sided(self):
@@ -435,6 +509,24 @@ class GlbMaterialTests(unittest.TestCase):
         )
         self.assertTrue(_should_double_side_alpha(texture, "XT_LILLYPAD_LA_00", None))
 
+    def test_water_alpha_is_single_sided_to_avoid_coplanar_flicker(self):
+        texture = Texture(
+            name="WATER",
+            tex_hash=1,
+            width=4,
+            height=4,
+            data_offset=0,
+            palette_offset=0,
+            data_size=0,
+            palette_size=0,
+            source_path=Path("dummy"),
+            png=b"",
+            has_alpha=True,
+            alpha_mode="BLEND",
+            alpha_cutoff=None,
+        )
+        self.assertFalse(_should_double_side_alpha(texture, "WATER", None))
+
     def test_material_cache_splits_same_texture_by_alpha_usage_state(self):
         texture = Texture(
             name="W_ROADTUNNELB",
@@ -457,6 +549,10 @@ class GlbMaterialTests(unittest.TestCase):
         self.assertNotEqual(road_material, prop_material)
         self.assertFalse(builder.materials[road_material]["doubleSided"])
         self.assertTrue(builder.materials[prop_material]["doubleSided"])
+
+    def test_glb_materials_are_unlit_for_baked_vertex_lighting(self):
+        builder = GlbBuilder()
+        self.assertIn("KHR_materials_unlit", builder.materials[0]["extensions"])
 
     def test_dedupe_object_faces_drops_repeated_coplanar_triangle(self):
         vertices = (
@@ -1173,7 +1269,7 @@ class GlbMaterialTests(unittest.TestCase):
             (
                 item
                 for item in scene.scenery_instances
-                if item.object_name == target.name and item.source_chunk_offset == 0x70CFC8 and item.record_index == 4
+                if item.object_name == target.name and item.source_chunk_offset == 0x77F6A8 and item.record_index == 26
             ),
             None,
         )
@@ -1181,20 +1277,22 @@ class GlbMaterialTests(unittest.TestCase):
             self.fail("XB_CONTAINERTRKCABA_L1A scenery instance fixture is missing")
 
         self.assertEqual(instance.object_index, 4)
+        self.assertEqual(instance.scenery_info_index, 26)
+        self.assertEqual(instance.object_hash, 0x4E0A5E6F)
         self.assertEqual(
             instance.transform,
             (
-                (1.0, 0.0, 0.0, 0.0),
-                (0.0, 1.0, 0.0, 0.0),
-                (0.0, 0.0, 1.0, 0.0),
-                (1351.68212890625, 786.0047607421875, 7.418026447296143, 1.0),
+                (-0.5557861328125, 0.830810546875, -0.02923583984375, 0.0),
+                (-0.83026123046875, -0.5565185546875, -0.0302734375, 0.0),
+                (-0.04144287109375, 0.0074462890625, 0.99908447265625, 0.0),
+                (1555.7891845703125, -791.6409301757812, -37.539581298828125, 1.0),
             ),
         )
 
         instantiated = instantiated_mesh_object(target, instance)
         for actual, expected in zip(
             instantiated.transform[3],
-            (1351.5061914166436, 780.2207765579224, 7.418026447296143, 1.0),
+            (1555.7891845703125, -791.6409301757812, -37.539581298828125, 1.0),
         ):
             self.assertAlmostEqual(actual, expected, places=6)
 
@@ -1220,11 +1318,17 @@ class GlbMaterialTests(unittest.TestCase):
         export_objects = _objects_for_glb_export(scene, expand_instances=True)
 
         self.assertFalse(any(obj.name == "XB_CONTAINERTRKCABA_L1A" for obj in export_objects))
+        self.assertFalse(
+            any(
+                obj.chunk_offset in scene.scenery_template_offsets and "_inst_" not in obj.name
+                for obj in export_objects
+            )
+        )
         target = next(
             (
                 obj
                 for obj in export_objects
-                if obj.name.startswith("XB_CONTAINERTRKCABA_L1A_inst_0070cfc8_004")
+                if obj.name.startswith("XB_CONTAINERTRKCABA_L1A_inst_0077f6a8_026")
             ),
             None,
         )
@@ -1233,9 +1337,58 @@ class GlbMaterialTests(unittest.TestCase):
 
         for actual, expected in zip(
             target.transform[3],
-            (1351.5061914166436, 780.2207765579224, 7.418026447296143, 1.0),
+            (1555.7891845703125, -791.6409301757812, -37.539581298828125, 1.0),
         ):
             self.assertAlmostEqual(actual, expected, places=6)
+
+    def test_trackb64_placement_uses_instance_transform_not_template_world_offset(self):
+        bundle_path = TRACKS_ROOT / "TRACKB64.LZC"
+        if not bundle_path.exists():
+            self.skipTest("TRACKB64 fixture is not available")
+
+        bundle = load_bundle_bytes(bundle_path)
+        scene = parse_scene(parse_chunks(bundle), bundle)
+        base = next((obj for obj in scene.objects if obj.name == "XB_OFFICEBT_A1_00"), None)
+        if base is None:
+            self.fail("XB_OFFICEBT_A1_00 fixture is missing from TRACKB64.LZC")
+        instance = next(
+            (
+                item
+                for item in scene.scenery_instances
+                if item.object_name == base.name and item.source_chunk_offset == 0x88F428 and item.record_index == 45
+            ),
+            None,
+        )
+        if instance is None:
+            self.fail("XB_OFFICEBT_A1_00 scenery instance fixture is missing")
+
+        instantiated = instantiated_mesh_object(base, instance)
+        self.assertEqual(instance.scenery_info_index, 18)
+        self.assertEqual(instance.object_hash, 0x3280AEAA)
+        self.assertEqual(instantiated.transform, instance.transform)
+        self.assertNotAlmostEqual(instantiated.transform[3][2], base.transform[3][2] + instance.transform[3][2])
+
+    def test_trackb64_scenery_info_hash_resolves_prop_mesh_not_direct_index(self):
+        bundle_path = TRACKS_ROOT / "TRACKB64.LZC"
+        if not bundle_path.exists():
+            self.skipTest("TRACKB64 fixture is not available")
+
+        bundle = load_bundle_bytes(bundle_path)
+        scene = parse_scene(parse_chunks(bundle), bundle)
+        instance = next(
+            (
+                item
+                for item in scene.scenery_instances
+                if item.source_chunk_offset == 0x7F7548 and item.record_index == 4
+            ),
+            None,
+        )
+        if instance is None:
+            self.fail("TRACKB64 scenery instance fixture is missing")
+
+        self.assertEqual(instance.scenery_info_index, 4)
+        self.assertEqual(instance.object_hash, 0xF770A534)
+        self.assertEqual(instance.object_name, "XS_CHEVRCNRA_1_00")
 
     def test_trackb44_trn_section80_chop3_uses_vif_control_mask(self):
         bundle_path = TRACKS_ROOT / "TRACKB44.BUN"

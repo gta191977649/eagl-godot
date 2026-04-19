@@ -7,7 +7,7 @@ name = "map-tools-ps2"
 version = "0.1.0"
 description = "Experimental Need for Speed Hot Pursuit 2 PS2 track converter"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["tqdm>=4.0"]
 
 [project.scripts]
 map-tools-ps2 = "map_tools_ps2.cli:main"

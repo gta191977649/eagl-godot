@@ -115,7 +115,7 @@ def read_ps2_tpk(path: Path) -> tuple[Texture, ...]:
             )
         except ValueError:
             continue
-        alpha_mode, alpha_cutoff = _alpha_properties_for_rgba(rgba)
+        alpha_mode, alpha_cutoff = _material_alpha_properties_for_rgba(rgba, is_any_semitransparency)
         textures.append(
             Texture(
                 name=name,
@@ -229,53 +229,33 @@ def _decode_modelulator_indexed_texture(
     if width <= 0 or height <= 0 or buffer_width <= 0 or buffer_height <= 0:
         raise ValueError("invalid PS2 texture dimensions")
 
-    indices = [0] * (buffer_width * buffer_height)
-    width_remainder = (-buffer_width) & width
-    tight_rows = (width & 0x1F) != 0 or width_remainder != 0
-    for y in range(height):
-        for x in range(width):
-            source_index = _packed_index_at(image, x, y, width, depth)
-            if source_index is None:
-                continue
-            destination = x + y * buffer_width if tight_rows else x + (y & ~0x1) * buffer_width + (y & 0x1) * width
-            if 0 <= destination < len(indices):
-                indices[destination] = source_index
+    words = _u32_words(image)
+    if is_swizzled:
+        scale = 32 // depth
+        scale_mask = scale - 1
+        scale_x = (_adjust_with_mask(scale_mask, 1, 2, 1) | _adjust_with_mask(scale_mask, 1, 0, 0)) + 1
+        scale_y = (_adjust_with_mask(scale_mask, 1, 3, 1) | _adjust_with_mask(scale_mask, 1, 1, 0)) + 1
+        words = _legacy_ps2_rw_buffer(words, "write", 0, 32, width // scale_y, height // scale_x)
+        words = _legacy_ps2_rw_buffer(words, "read", pixel_storage_mode, depth, width, height)
 
-    output = [0] * len(indices)
-    if is_swizzled and ((width & 0x1F) == 0 or width_remainder == 0 or width == 0x10):
-        bh_mask = buffer_width - 1
-        for y in range(buffer_height):
-            temp_01 = ((y & 0x02) >> 1) | ((y & 0x02) << 3)
-            temp_02 = (y & 0x04) << 2
-            address1_base = ((y & -0x04) | ((y & 0x01) << 1)) << shift_width
-            for x in range(buffer_width):
-                address0 = (y << shift_width) | x
-                address0 = (address0 & ~bh_mask) | x
-                address1 = (
-                    (address1_base & ~bh_mask)
-                    | ((x & 0x07) << 2)
-                    | ((x & 0x08) >> 2)
-                    | ((x >> 4) << 5)
-                ) ^ temp_01 ^ temp_02
-                if address0 < len(output) and address1 < len(indices):
-                    output[address0] = indices[address1]
-    else:
-        output[:] = indices
+    indices: list[int] = []
+    scale = 32 // depth
+    index_mask = (1 << depth) - 1
+    for word in words:
+        for shift in range(0, 32, depth):
+            indices.append((word >> shift) & index_mask)
 
-    # Modelulator crops pages in two horizontal halves while flipping the PS2
-    # texture origin into the image origin expected by exported files.
+    if is_swizzled:
+        cropped_indices: list[int] = []
+        for y in range(height):
+            row = y * buffer_width
+            cropped_indices.extend(indices[row : row + width])
+        indices = cropped_indices
+
     final_indices: list[int] = []
-    half_width = width // 2
-    half_buffer_width = buffer_width // 2
-    if half_width > 0 and width % 2 == 0:
-        for y in range(height - 1, -1, -1):
-            row = y * buffer_width
-            final_indices.extend(output[row : row + half_width])
-            final_indices.extend(output[row + half_buffer_width : row + half_buffer_width + half_width])
-    else:
-        for y in range(height - 1, -1, -1):
-            row = y * buffer_width
-            final_indices.extend(output[row : row + width])
+    for y in range(height - 1, -1, -1):
+        row = y * width
+        final_indices.extend(indices[row : row + width])
 
     out = bytearray()
     for index in final_indices[: width * height]:
@@ -300,16 +280,210 @@ def _psm_type_index(pixel_storage_mode: int) -> int:
     return pixel_storage_mode & 0x07
 
 
-def _packed_index_at(image: bytes, x: int, y: int, width: int, bit_depth: int) -> int | None:
-    if bit_depth == 4:
-        offset = (x + y * width) >> 1
-        if offset >= len(image):
-            return None
-        return (image[offset] >> ((x & 0x01) * 4)) & 0x0F
-    offset = x + y * width
-    if offset >= len(image):
-        return None
-    return image[offset]
+def _u32_words(data: bytes) -> list[int]:
+    padded = data + (b"\0" * ((4 - (len(data) % 4)) % 4))
+    return [struct.unpack_from("<I", padded, offset)[0] for offset in range(0, len(padded), 4)]
+
+
+def _legacy_ps2_rw_buffer(
+    image_data: list[int],
+    mode: str,
+    pixel_storage_mode: int,
+    bit_depth: int,
+    width: int,
+    height: int,
+) -> list[int]:
+    scale = 32 // bit_depth
+    scale_mask = scale - 1
+    scale_x = (_adjust_with_mask(scale_mask, 1, 2, 1) | _adjust_with_mask(scale_mask, 1, 0, 0)) + 1
+    scale_y = (_adjust_with_mask(scale_mask, 1, 3, 1) | _adjust_with_mask(scale_mask, 1, 1, 0)) + 1
+
+    physical_width = width // scale_y
+    physical_height = height // scale_x
+    physical_buffer_width = _align_power_of_two_max(physical_width)
+    physical_buffer_height = _align_power_of_two_max(physical_height)
+    buffer_width = _align_power_of_two_max(width)
+    buffer_height = _align_power_of_two_max(height)
+    data = [0] * (physical_buffer_width * physical_buffer_height)
+
+    type_index = _adjust_with_mask(pixel_storage_mode, 3, 0)
+    type_mode = _adjust_with_mask(pixel_storage_mode, 2, 4)
+    type_flag = _adjust_with_mask(pixel_storage_mode, 1, 3) != 0
+
+    swap_xy = (((type_mode == 0) or (type_mode == 3)) and type_index == 2) or (type_mode == 1 and type_index == 4)
+    z_buffer = type_mode == 3
+    shifted = ((type_mode == 0) or (type_mode == 3)) and type_index == 2 and type_flag
+
+    column_width = 8 * scale_x
+    column_height = 2 * scale_y
+    page_height = 1 << (1 if swap_xy else 0)
+    page_width = (page_height ^ 0x03) << 2
+    page_height <<= 2
+    texture_buffer_width = width // (page_width * column_width)
+    if texture_buffer_width <= 0:
+        texture_buffer_width = 1
+
+    swizzle_function = _LEGACY_SWIZZLE_FUNCTIONS[bit_depth]
+    input_address = 0
+    from_offset_w = 0
+
+    for index in range(buffer_width * buffer_height):
+        y = index // buffer_width
+        x = index - y * buffer_width
+
+        page_x = x // (page_width * column_width)
+        page_y = y // (page_height * 4 * column_height)
+        page = page_x + page_y * texture_buffer_width
+
+        px = x - page_x * (page_width * column_width)
+        py = y - page_y * (page_height * 4 * column_height)
+        block_x = px // column_width
+        block_y = py // (4 * column_height)
+        block = _legacy_ps2_block_address(block_x + block_y * page_width, swap_xy, z_buffer, shifted)
+
+        bx = px - block_x * column_width
+        by = py - block_y * (4 * column_height)
+        column_y = by // column_height
+        column = column_y
+
+        cx = bx
+        cy = by - column_y * column_height
+        pixel = swizzle_function(cx + cy * column_width, True)
+
+        word = pixel // scale
+        offset = pixel & scale_mask
+        if bit_depth < 16:
+            word ^= (column & 0x01) << 2
+        word = (_rotate_bits(word >> 1, -1, 3) << 1) | (word & 0x01)
+
+        output_address = (page << 11) | (block << 6) | (column << 4) | word
+        if mode == "read":
+            address_a, address_b = input_address, output_address
+            source_shift = bit_depth * offset
+            target_shift = bit_depth * from_offset_w
+        elif mode == "write":
+            address_a, address_b = output_address, input_address
+            source_shift = bit_depth * from_offset_w
+            target_shift = bit_depth * offset
+        else:
+            raise ValueError(f"unsupported PS2 buffer mode {mode}")
+
+        input_value = image_data[address_b] if 0 <= address_b < len(image_data) else 0
+        pixel_data = _adjust_with_mask(input_value, bit_depth, source_shift, target_shift)
+        if 0 <= address_a < len(data):
+            data[address_a] |= pixel_data
+
+        from_offset_w += 1
+        if from_offset_w > 0 and (from_offset_w & scale_mask) == 0:
+            input_address += 1
+        from_offset_w &= scale_mask
+
+    return data
+
+
+def _adjust_with_mask(src: int, mask_width: int, mask_position: int = 0, adjustment: int = 0) -> int:
+    return ((src >> mask_position) & ((1 << mask_width) - 1)) << adjustment
+
+
+def _rotate_bits(value: int, shift: int, width: int) -> int:
+    shift %= width
+    mask = (1 << width) - 1
+    value &= mask
+    return ((value << shift) | (value >> (width - shift))) & mask
+
+
+def _align_power_of_two_max(value: int) -> int:
+    if value <= 1:
+        return 1
+    return 1 << (value - 1).bit_length()
+
+
+def _legacy_ps2_swizzle_psmt4(pixel_index: int, mode_flag: bool) -> int:
+    ax, ay = (pixel_index >> 0) & 0x01, (pixel_index >> 1) & 0x01
+    bx, by = (pixel_index >> 2) & 0x01, (pixel_index >> 3) & 0x01
+    cx, cy = (pixel_index >> 4) & 0x01, (pixel_index >> 5) & 0x01
+    dx = (pixel_index >> 6) & 0x01
+    result = 0
+    result ^= dx << 0
+    result ^= by << 1
+    result ^= cx << 2
+    result ^= ax << 3
+    result ^= ay << 4
+    result ^= bx << 5
+    result ^= ax << 7
+    result ^= cy << (3 + 3 * int(mode_flag))
+    result >>= 0 if mode_flag else 1
+    result ^= dx << 5
+    return result & 0x7F
+
+
+def _legacy_ps2_swizzle_psmt8(pixel_index: int, mode_flag: bool) -> int:
+    ax, ay = (pixel_index >> 0) & 0x01, (pixel_index >> 1) & 0x01
+    bx, by = (pixel_index >> 2) & 0x01, (pixel_index >> 3) & 0x01
+    cx, cy = (pixel_index >> 4) & 0x01, (pixel_index >> 5) & 0x01
+    result = 0
+    result ^= ax << 0
+    result ^= cy << 1
+    result = _rotate_bits(result, 5 + int(mode_flag), 7)
+    result ^= bx << (0 + 4 * int(mode_flag))
+    result ^= cx << (2 + 3 * int(mode_flag))
+    result ^= by << 1
+    result ^= ax << 2
+    result ^= ay << 3
+    result ^= cy << 4
+    return result & 0x3F
+
+
+def _legacy_ps2_swizzle_psmt16(pixel_index: int, mode_flag: bool) -> int:
+    ax, ay = (pixel_index >> 0) & 0x01, (pixel_index >> 1) & 0x01
+    bx, by = (pixel_index >> 2) & 0x01, (pixel_index >> 3) & 0x01
+    cx = (pixel_index >> 4) & 0x01
+    result = 0
+    result ^= ay << 0
+    result ^= bx << 1
+    result ^= by << 2
+    result ^= ax << 3
+    result = _rotate_bits(result, 2 * int(mode_flag), 4)
+    result ^= cx << 4
+    return result & 0x1F
+
+
+def _legacy_ps2_swizzle_psmt32(pixel_index: int, mode_flag: bool) -> int:
+    ax, ay = (pixel_index >> 0) & 0x01, (pixel_index >> 1) & 0x01
+    bx, by = (pixel_index >> 2) & 0x01, (pixel_index >> 3) & 0x01
+    result = 0
+    result ^= ay << 0
+    result ^= bx << 1
+    result ^= by << 2
+    result = _rotate_bits(result, 2 + int(mode_flag), 3)
+    result = (result << 1) ^ ax
+    return result & 0x0F
+
+
+_LEGACY_SWIZZLE_FUNCTIONS = {
+    4: _legacy_ps2_swizzle_psmt4,
+    8: _legacy_ps2_swizzle_psmt8,
+    16: _legacy_ps2_swizzle_psmt16,
+    24: _legacy_ps2_swizzle_psmt32,
+    32: _legacy_ps2_swizzle_psmt32,
+}
+
+
+def _legacy_ps2_block_address(block_index: int, swap_xy: bool, flip_xy: bool, shifted: bool) -> int:
+    swap = int(swap_xy)
+    swap = (swap << 0) ^ (swap << 1)
+    block_index = _rotate_bits(block_index, swap, 5)
+    ax, ay = (block_index >> 0) & 0x01, (block_index >> 3) & 0x01
+    bx, by = (block_index >> 1) & 0x01, (block_index >> 4) & 0x01
+    cx = (block_index >> 2) & 0x01
+    result = 0
+    result ^= bx << 0
+    result ^= by << 1
+    result ^= cx << 2
+    result = _rotate_bits(result, int(shifted), 3)
+    result ^= (0x03 * int(flip_xy)) << 1
+    result = (result << 2) ^ (ax << 0) ^ (ay << 1)
+    return result & 0x1F
 
 
 def _unswizzle_psmt4_indices(image: bytes, width: int, height: int) -> bytes:
@@ -380,6 +554,25 @@ def _alpha_properties_for_rgba(rgba: bytes) -> tuple[str | None, float | None]:
             cutoff = ((max(cutout) + min(opaque)) / 2.0) / 255.0
         return "MASK", cutoff
     return "BLEND", None
+
+
+def _material_alpha_properties_for_rgba(
+    rgba: bytes, is_any_semitransparency: int | None
+) -> tuple[str | None, float | None]:
+    mode, cutoff = _alpha_properties_for_rgba(rgba)
+    if mode != "BLEND" or is_any_semitransparency:
+        return mode, cutoff
+
+    # Some HP2 PS2 textures contain high decoded alpha values such as 0xdf
+    # even when the TPK entry says the texture is not semitransparent. Treat
+    # those high values as opaque for material mode selection to avoid
+    # unnecessary transparent sorting.
+    alphas = {rgba[offset + 3] for offset in range(0, len(rgba), 4)}
+    if alphas and all(alpha == 0 or alpha >= 0x80 for alpha in alphas):
+        if 0 in alphas:
+            return "MASK", 0.5
+        return None, None
+    return mode, cutoff
 
 
 def _alpha_mode_for_rgba(rgba: bytes) -> str | None:

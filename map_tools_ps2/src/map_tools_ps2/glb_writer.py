@@ -14,6 +14,7 @@ from .primitives import (
     strip_indices,
     triangle_list_indices,
 )
+from .progress import progress_byte_chunks, progress_iter
 from .textures import Texture, TextureLibrary
 
 
@@ -643,6 +644,8 @@ def _should_export_vif_colors(object_name: str, render_flag: int | None, mode: s
 def _should_double_side_alpha(texture: Texture, object_name: str, render_flag: int | None) -> bool:
     if texture.alpha_mode is None:
         return True
+    if object_name in {"WATER", "SKYDOME", "SKYDOME_ENVMAP"}:
+        return False
     if object_name.startswith(("RD_", "RDDRT_", "TRN_", "LI_", "TRACK_HELICOPTER")):
         return False
     if render_flag in {0x4041, 0xC180}:
@@ -659,7 +662,18 @@ class GlbBuilder:
         self.images: list[dict[str, Any]] = []
         self.samplers: list[dict[str, Any]] = [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}]
         self.gltf_textures: list[dict[str, Any]] = []
-        self.materials: list[dict[str, Any]] = [{"name": "default", "pbrMetallicRoughness": {"baseColorFactor": [0.8, 0.8, 0.8, 1.0], "roughnessFactor": 1.0, "metallicFactor": 0.0}}]
+        self.materials: list[dict[str, Any]] = [
+            _unlit_material(
+                {
+                    "name": "default",
+                    "pbrMetallicRoughness": {
+                        "baseColorFactor": [0.8, 0.8, 0.8, 1.0],
+                        "roughnessFactor": 1.0,
+                        "metallicFactor": 0.0,
+                    },
+                }
+            )
+        ]
         self._texture_materials: dict[tuple[int, str | None, float | None, bool], int] = {}
 
     def add_bytes(self, data: bytes, target: int | None = None) -> int:
@@ -721,15 +735,17 @@ class GlbBuilder:
         self.gltf_textures.append({"sampler": 0, "source": image_index, "name": texture.name})
         texture_index = len(self.gltf_textures) - 1
         self.materials.append(
-            {
-                "name": texture.name,
-                "pbrMetallicRoughness": {
-                    "baseColorTexture": {"index": texture_index},
-                    "roughnessFactor": 1.0,
-                    "metallicFactor": 0.0,
-                },
-                "doubleSided": double_sided,
-            }
+            _unlit_material(
+                {
+                    "name": texture.name,
+                    "pbrMetallicRoughness": {
+                        "baseColorTexture": {"index": texture_index},
+                        "roughnessFactor": 1.0,
+                        "metallicFactor": 0.0,
+                    },
+                    "doubleSided": double_sided,
+                }
+            )
         )
         if texture.alpha_mode == "BLEND":
             self.materials[-1]["alphaMode"] = "BLEND"
@@ -745,6 +761,12 @@ class GlbBuilder:
             self.bin.append(0)
 
 
+def _unlit_material(material: dict[str, Any]) -> dict[str, Any]:
+    extensions = material.setdefault("extensions", {})
+    extensions["KHR_materials_unlit"] = {}
+    return material
+
+
 def write_glb(
     scene: Scene,
     out_path: Path,
@@ -752,12 +774,16 @@ def write_glb(
     vertex_colors: str = "auto",
     expand_instances: bool = False,
     primitive_assembly: PrimitiveAssembly = "triangles",
+    progress: bool = False,
 ) -> None:
     builder = GlbBuilder(textures)
     meshes: list[dict[str, Any]] = []
     nodes: list[dict[str, Any]] = []
+    export_objects = _objects_for_glb_export(scene, expand_instances=expand_instances)
 
-    for object_index, obj in enumerate(_objects_for_glb_export(scene, expand_instances=expand_instances)):
+    for object_index, obj in enumerate(
+        progress_iter(export_objects, total=len(export_objects), desc="Exporting GLB objects", enabled=progress)
+    ):
         if _should_skip_object(obj.name):
             continue
         primitives: list[dict[str, Any]] = []
@@ -862,6 +888,7 @@ def write_glb(
 
     state: dict[str, Any] = {
         "asset": {"version": "2.0", "generator": "map_tools_ps2 experimental GLB writer"},
+        "extensionsUsed": ["KHR_materials_unlit"],
         "scene": 0,
         "scenes": [{"nodes": list(range(len(nodes)))}],
         "nodes": nodes,
@@ -882,13 +909,18 @@ def write_glb(
     bin_chunk = bytes(builder.bin)
 
     total_length = 12 + 8 + len(json_chunk) + 8 + len(bin_chunk)
+    chunks = (
+        struct.pack("<III", 0x46546C67, 2, total_length),
+        struct.pack("<I4s", len(json_chunk), b"JSON"),
+        json_chunk,
+        struct.pack("<I4s", len(bin_chunk), b"BIN\0"),
+        bin_chunk,
+    )
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("wb") as fh:
-        fh.write(struct.pack("<III", 0x46546C67, 2, total_length))
-        fh.write(struct.pack("<I4s", len(json_chunk), b"JSON"))
-        fh.write(json_chunk)
-        fh.write(struct.pack("<I4s", len(bin_chunk), b"BIN\0"))
-        fh.write(bin_chunk)
+        for chunk in progress_byte_chunks(chunks, total=total_length, desc="Writing GLB file", enabled=progress):
+            fh.write(chunk)
 
 
 def _objects_for_glb_export(scene: Scene, expand_instances: bool = False) -> tuple[MeshObject, ...]:
@@ -908,7 +940,11 @@ def _objects_for_glb_export(scene: Scene, expand_instances: bool = False) -> tup
         instanced_names.add(base_obj.name)
         instances.append(instantiated_mesh_object(base_obj, instance))
 
-    static_objects = [obj for obj in scene.objects if obj.name not in instanced_names]
+    static_objects = [
+        obj
+        for obj in scene.objects
+        if obj.name not in instanced_names and obj.chunk_offset not in scene.scenery_template_offsets
+    ]
     return tuple(static_objects + instances)
 
 
