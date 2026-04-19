@@ -31,6 +31,9 @@ func resolve_track(track_id: String) -> Dictionary:
 	var model_candidates: Array[String] = []
 	if prefix == "TRACKA":
 		model_candidates.append(tracks_dir.path_join("TRACKA%s.BUN" % numeric_id))
+		model_candidates.append(tracks_dir.path_join("TRACKA%s.LZC" % numeric_id))
+		model_candidates.append(tracks_dir.path_join("TRACKB%s.BUN" % numeric_id))
+		model_candidates.append(tracks_dir.path_join("TRACKB%s.LZC" % numeric_id))
 	elif prefix == "TRACKB":
 		model_candidates.append(tracks_dir.path_join("TRACKB%s.BUN" % numeric_id))
 		model_candidates.append(tracks_dir.path_join("TRACKB%s.LZC" % numeric_id))
@@ -38,14 +41,15 @@ func resolve_track(track_id: String) -> Dictionary:
 		model_candidates.append(tracks_dir.path_join("TRACKB%s.BUN" % numeric_id))
 		model_candidates.append(tracks_dir.path_join("TRACKB%s.LZC" % numeric_id))
 		model_candidates.append(tracks_dir.path_join("TRACKA%s.BUN" % numeric_id))
+		model_candidates.append(tracks_dir.path_join("TRACKA%s.LZC" % numeric_id))
 
 	var model_path := ""
 	for candidate in model_candidates:
-		if FileAccess.file_exists(candidate):
+		if _file_has_data(candidate):
 			model_path = candidate
 			break
 	if model_path == "":
-		last_error = "Could not find TRACKA/B%s bundle in %s" % [numeric_id, tracks_dir]
+		last_error = "Could not find non-empty TRACKA/B%s bundle in %s" % [numeric_id, tracks_dir]
 		push_error(last_error)
 		return {}
 
@@ -72,6 +76,13 @@ func _resolve_tracks_dir(root: String) -> String:
 			if DirAccess.dir_exists_absolute(candidate.path_join("TRACKS")):
 				return candidate.path_join("TRACKS")
 	return ""
+
+
+func _file_has_data(path: String) -> bool:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return false
+	return file.get_length() > 0
 
 
 func _normalize_track_id(track_id: String) -> Dictionary:

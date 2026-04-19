@@ -15,3 +15,120 @@ shadow_enabled = true
 [node name="DebugCamera" type="Camera3D" parent="." unique_id=422384826]
 current = true
 script = ExtResource("2_free_camera")
+speed_label_path = NodePath("../DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/FreeCameraHudPanel/FreeCameraHudContent/SpeedLabel")
+
+[node name="DebugUI" type="CanvasLayer" parent="."]
+
+[node name="DebugUILayout" type="Control" parent="DebugUI"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="SafeMargin" type="MarginContainer" parent="DebugUI/DebugUILayout"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+mouse_filter = 2
+
+[node name="VerticalBands" type="VBoxContainer" parent="DebugUI/DebugUILayout/SafeMargin"]
+layout_mode = 2
+theme_override_constants/separation = 12
+mouse_filter = 2
+
+[node name="TopControls" type="HFlowContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 0
+theme_override_constants/h_separation = 8
+theme_override_constants/v_separation = 8
+
+[node name="FreeCameraHudPanel" type="PanelContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls"]
+custom_minimum_size = Vector2(360, 0)
+layout_mode = 2
+size_flags_horizontal = 0
+mouse_filter = 2
+
+[node name="FreeCameraHudContent" type="VBoxContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/FreeCameraHudPanel"]
+layout_mode = 2
+theme_override_constants/separation = 4
+mouse_filter = 2
+
+[node name="SpeedLabel" type="Label" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/FreeCameraHudPanel/FreeCameraHudContent"]
+custom_minimum_size = Vector2(340, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.92, 0.95, 0.98, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.85)
+theme_override_constants/shadow_offset_x = 1
+theme_override_constants/shadow_offset_y = 1
+theme_override_font_sizes/font_size = 16
+text = "Free camera"
+autowrap_mode = 3
+mouse_filter = 2
+
+[node name="TrackSelectPanel" type="PanelContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls"]
+layout_mode = 2
+size_flags_horizontal = 0
+
+[node name="TrackSelectFlow" type="HFlowContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/h_separation = 8
+theme_override_constants/v_separation = 6
+
+[node name="TrackSelectLabel" type="Label" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow"]
+layout_mode = 2
+text = "Track"
+
+[node name="TrackSelector" type="OptionButton" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow"]
+custom_minimum_size = Vector2(160, 0)
+layout_mode = 2
+size_flags_horizontal = 0
+
+[node name="ReloadTrack" type="Button" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow"]
+layout_mode = 2
+text = "Reload"
+
+[node name="TrackStatus" type="Label" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow"]
+custom_minimum_size = Vector2(48, 0)
+layout_mode = 2
+clip_text = true
+
+[node name="ViewportSpacer" type="Control" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands"]
+layout_mode = 2
+size_flags_vertical = 3
+mouse_filter = 2
+
+[node name="BottomControls" type="CenterContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 8
+mouse_filter = 2
+
+[node name="LoadingPanel" type="PanelContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/BottomControls"]
+visible = false
+custom_minimum_size = Vector2(420, 0)
+layout_mode = 2
+size_flags_horizontal = 4
+
+[node name="LoadingBox" type="VBoxContainer" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/BottomControls/LoadingPanel"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="LoadingLabel" type="Label" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/BottomControls/LoadingPanel/LoadingBox"]
+layout_mode = 2
+text = "Idle"
+
+[node name="LoadingProgress" type="ProgressBar" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/BottomControls/LoadingPanel/LoadingBox"]
+custom_minimum_size = Vector2(380, 18)
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 100.0
