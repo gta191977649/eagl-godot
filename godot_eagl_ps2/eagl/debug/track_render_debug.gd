@@ -4,7 +4,7 @@ const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_ban
 
 @export var platform := "EAGL_HOTPUSUIT2_PS2"
 @export_global_dir var game_root := "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA"
-@export var track_id := "61"
+@export var track_id := "31"
 @export var load_on_ready := true
 @export var place_scenery_instances := true
 @export var expand_scenery_instances := false
