@@ -169,3 +169,27 @@ text = "Camera
 X: 0.00
 Y: 0.00
 Z: 0.00"
+
+[node name="FpsPanel" type="PanelContainer" parent="DebugUI/DebugUILayout" unique_id=565642127]
+custom_minimum_size = Vector2(116, 0)
+layout_mode = 0
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -132.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = 96.0
+grow_horizontal = 0
+mouse_filter = 2
+
+[node name="FpsLabel" type="Label" parent="DebugUI/DebugUILayout/FpsPanel" unique_id=1740145612]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.92, 0.95, 0.98, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.85)
+theme_override_constants/shadow_offset_x = 1
+theme_override_constants/shadow_offset_y = 1
+theme_override_font_sizes/font_size = 16
+text = "FPS: -
+LODs: -
+VSync: on"
+horizontal_alignment = 2

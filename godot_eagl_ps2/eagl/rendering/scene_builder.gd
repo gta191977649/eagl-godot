@@ -6,6 +6,8 @@ const EnvironmentBuilderScript := preload("res://eagl/rendering/environment_buil
 const MathUtils := preload("res://eagl/utils/math_utils.gd")
 
 const SUN_LIGHT_CULL_MASK := 1 << 1
+const DEFAULT_SHADOW_TEXTURE_VISIBILITY_DISTANCE := 420.0
+const DEFAULT_SHADOW_TEXTURE_VISIBILITY_MARGIN := 80.0
 
 var mesh_builder := MeshBuilderScript.new()
 var environment_builder := EnvironmentBuilderScript.new()
@@ -14,17 +16,24 @@ var warnings: Array[String] = []
 var scenery_multimesh_count := 0
 var environment_object_count := 0
 var track_marker_count := 0
+var shadow_texture_visibility_distance := DEFAULT_SHADOW_TEXTURE_VISIBILITY_DISTANCE
+var shadow_texture_visibility_margin := DEFAULT_SHADOW_TEXTURE_VISIBILITY_MARGIN
+var shadow_texture_visibility_count := 0
 
 
 func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	mesh_builder.texture_bank = asset.texture_bank
 	mesh_builder.texture_filter_mode = String(options.get("texture_filter_mode", "linear_mipmap"))
+	mesh_builder.generate_lods = bool(options.get("generate_lods", true))
+	shadow_texture_visibility_distance = float(options.get("shadow_texture_visibility_distance", DEFAULT_SHADOW_TEXTURE_VISIBILITY_DISTANCE))
+	shadow_texture_visibility_margin = float(options.get("shadow_texture_visibility_margin", DEFAULT_SHADOW_TEXTURE_VISIBILITY_MARGIN))
 	mesh_builder.reset()
 	skipped.clear()
 	warnings.clear()
 	scenery_multimesh_count = 0
 	environment_object_count = 0
 	track_marker_count = 0
+	shadow_texture_visibility_count = 0
 
 	var root := Node3D.new()
 	root.name = "TrackRoot"
@@ -109,6 +118,10 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_fallback_surface_count", mesh_builder.fallback_surfaces)
 	root.set_meta("eagl_uv_surface_count", mesh_builder.uv_surfaces)
 	root.set_meta("eagl_textured_missing_uv_surface_count", mesh_builder.textured_missing_uv_surfaces)
+	root.set_meta("eagl_generate_lods", mesh_builder.generate_lods)
+	root.set_meta("eagl_lod_surface_count", mesh_builder.lod_surface_count)
+	root.set_meta("eagl_shadow_texture_visibility_distance", shadow_texture_visibility_distance)
+	root.set_meta("eagl_shadow_texture_visibility_count", shadow_texture_visibility_count)
 	return root
 
 
@@ -188,7 +201,7 @@ func _add_static_object(static_roots: Dictionary, environment_root: Node3D, mark
 	if entry == null:
 		_count_skip("missing_static_mesh_def")
 		return false
-	var category := _semantic_category_for_object(obj)
+	var category := _category_for_mesh_entry(obj, entry)
 	var parent := _parent_for_category(category, static_roots, null, environment_root, marker_root)
 	var node := MeshInstance3D.new()
 	node.name = _safe_node_name(object_name)
@@ -202,6 +215,7 @@ func _add_static_object(static_roots: Dictionary, environment_root: Node3D, mark
 	node.set_meta("eagl_placement_kind", "DIRECT_SOLID")
 	node.set_meta("bun_category", category)
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+	_apply_shadow_texture_visibility(node, category)
 	parent.add_child(node)
 	_count_semantic_node(category)
 	return true
@@ -242,7 +256,7 @@ func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dicti
 		if not _should_render_object(obj):
 			_count_skip("non_visible_environment_source")
 			continue
-		var category := _semantic_category_for_object(obj, int(instance.get("section_number", -1)))
+		var category := _category_for_mesh_entry(obj, entry, int(instance.get("section_number", -1)))
 		var scenery_bucket := _scenery_bucket_for_name(obj.get("name", ""))
 		var parent := _parent_for_category(category, static_roots, scenery_roots, environment_root, marker_root, scenery_bucket)
 		var node := MeshInstance3D.new()
@@ -258,6 +272,7 @@ func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dicti
 		node.set_meta("bun_category", category)
 		node.set_meta("eagl_scenery_bucket", scenery_bucket)
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+		_apply_shadow_texture_visibility(node, category)
 		parent.add_child(node)
 		placed += 1
 		_count_semantic_node(category)
@@ -266,6 +281,7 @@ func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dicti
 
 func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, asset, mesh_cache: Dictionary) -> int:
 	var groups := {}
+	var placed := 0
 	for instance in asset.scenery_instances:
 		var entry = _mesh_entry_for_instance(instance, mesh_cache)
 		if entry == null:
@@ -276,7 +292,26 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 			_count_skip("non_visible_environment_source")
 			continue
 		var mesh_hash := int(instance.get("object_hash", obj.get("name_hash", 0)))
-		var category := _semantic_category_for_object(obj, int(instance.get("section_number", -1)))
+		var category := _category_for_mesh_entry(obj, entry, int(instance.get("section_number", -1)))
+		if category == "SHADOW":
+			var parent := _parent_for_category(category, static_roots, scenery_roots, environment_root, marker_root)
+			var node := MeshInstance3D.new()
+			node.name = "%s_inst_%03d" % [obj.get("name", "Scenery"), int(instance.get("record_index", 0))]
+			node.mesh = entry["mesh"]
+			_apply_surface_materials(node, entry.get("materials", []))
+			node.transform = MathUtils.ps2_rows_to_godot_transform(instance.get("transform", []))
+			node.set_meta("eagl_scenery_instance", true)
+			node.set_meta("eagl_scenery_info_index", instance.get("scenery_info_index", -1))
+			node.set_meta("eagl_section_number", instance.get("section_number", -1))
+			node.set_meta("eagl_source_role", _source_role_for_object(obj))
+			node.set_meta("eagl_placement_kind", "SCENERY_INSTANCE")
+			node.set_meta("bun_category", category)
+			node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+			_apply_shadow_texture_visibility(node, category)
+			parent.add_child(node)
+			placed += 1
+			_count_semantic_node(category)
+			continue
 		var scenery_bucket := _scenery_bucket_for_name(obj.get("name", ""))
 		var mesh_key: String = ("%08x" % mesh_hash) if mesh_hash != 0 else String(obj.get("name", ""))
 		var key := "%s:%s:%s" % [category, scenery_bucket, mesh_key]
@@ -291,7 +326,6 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 			}
 		groups[key]["transforms"].append(MathUtils.ps2_rows_to_godot_transform(instance.get("transform", [])))
 
-	var placed := 0
 	for key in groups.keys():
 		var group: Dictionary = groups[key]
 		var entry: Dictionary = group["entry"]
@@ -320,6 +354,7 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 		node.set_meta("eagl_placement_kind", "SCENERY_INSTANCE")
 		node.set_meta("bun_category", category)
 		node.set_meta("eagl_scenery_bucket", scenery_bucket)
+		_apply_shadow_texture_visibility(node, category)
 		parent.add_child(node)
 		placed += transforms.size()
 		scenery_multimesh_count += 1
@@ -385,7 +420,7 @@ func _semantic_category_for_object(obj: Dictionary, _section_number: int = -1) -
 		return "ROAD"
 	if name.begins_with("TRN_"):
 		return "TERRAIN"
-	if name.begins_with("SHD_") or name.begins_with("SH_"):
+	if name.begins_with("SHD_") or name.begins_with("SH_") or name.contains("SHAD"):
 		return "SHADOW"
 	if name.contains("BRIDGE") or name == "MARTINSPEAK":
 		return "LANDMARK"
@@ -394,6 +429,36 @@ func _semantic_category_for_object(obj: Dictionary, _section_number: int = -1) -
 	if name.begins_with("XS_") or name.begins_with("XT_") or name.begins_with("XW_") or name.begins_with("XB_") or name.begins_with("XH_") or name.begins_with("XF_"):
 		return "PROP"
 	return "STATIC_DETAIL"
+
+
+func _category_for_mesh_entry(obj: Dictionary, entry: Dictionary, section_number: int = -1) -> String:
+	var category := _semantic_category_for_object(obj, section_number)
+	if category == "SHADOW":
+		return category
+	if _entry_uses_only_shadow_textures(entry):
+		return "SHADOW"
+	return category
+
+
+func _entry_uses_only_shadow_textures(entry: Dictionary) -> bool:
+	var materials: Array = entry.get("materials", [])
+	if materials.is_empty():
+		return false
+	var found_texture := false
+	for material in materials:
+		if material == null:
+			return false
+		var texture_name := String(material.get_meta("eagl_texture_name", "")).to_upper()
+		if texture_name == "":
+			return false
+		found_texture = true
+		if not _is_shadow_texture_name(texture_name):
+			return false
+	return found_texture
+
+
+func _is_shadow_texture_name(texture_name: String) -> bool:
+	return texture_name.contains("SHAD")
 
 
 func _should_render_object(obj: Dictionary) -> bool:
@@ -464,6 +529,34 @@ func _merge_builder_diagnostics() -> void:
 
 func _count_skip(reason: String) -> void:
 	skipped[reason] = skipped.get(reason, 0) + 1
+
+
+func _apply_shadow_texture_visibility(node: GeometryInstance3D, category: String) -> void:
+	if category != "SHADOW" or shadow_texture_visibility_distance <= 0.0:
+		return
+	node.visibility_range_begin = 0.0
+	node.visibility_range_end = shadow_texture_visibility_distance + maxf(shadow_texture_visibility_margin, 0.0)
+	node.visibility_range_end_margin = 0.0
+	node.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+	node.set_meta("eagl_shadow_texture_visibility_distance", shadow_texture_visibility_distance)
+	node.set_meta("eagl_shadow_texture_fade_window", shadow_texture_visibility_margin)
+	_apply_shadow_distance_fade_materials(node)
+	shadow_texture_visibility_count += 1
+
+
+func _apply_shadow_distance_fade_materials(node: GeometryInstance3D) -> void:
+	var mesh_node := node as MeshInstance3D
+	if mesh_node == null:
+		return
+	var materials := _surface_materials(mesh_node)
+	for surface_index in range(materials.size()):
+		var material := materials[surface_index]
+		if material == null:
+			continue
+		mesh_node.set_surface_override_material(
+			surface_index,
+			mesh_builder.material_builder.distance_fade_material(material, shadow_texture_visibility_distance, shadow_texture_visibility_margin)
+		)
 
 
 func _assign_sun_light_cull_layer(node: Node) -> void:

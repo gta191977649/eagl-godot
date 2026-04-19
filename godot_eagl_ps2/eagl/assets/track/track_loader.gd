@@ -39,6 +39,8 @@ func load(track_id: String) -> Node3D:
 	stats["fallback_surface_count"] = node.get_meta("eagl_fallback_surface_count", 0)
 	stats["uv_surface_count"] = node.get_meta("eagl_uv_surface_count", 0)
 	stats["textured_missing_uv_surface_count"] = node.get_meta("eagl_textured_missing_uv_surface_count", 0)
+	stats["lod_surface_count"] = node.get_meta("eagl_lod_surface_count", 0)
+	stats["shadow_texture_visibility_count"] = node.get_meta("eagl_shadow_texture_visibility_count", 0)
 	return node
 
 

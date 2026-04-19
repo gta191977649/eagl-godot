@@ -17,12 +17,14 @@ var texture_filter_mode := "linear_mipmap":
 	set(value):
 		texture_filter_mode = value
 		material_builder.texture_filter_mode = value
+var generate_lods := true
 var skipped: Dictionary = {}
 var warnings: Array[String] = []
 var textured_surfaces := 0
 var fallback_surfaces := 0
 var uv_surfaces := 0
 var textured_missing_uv_surfaces := 0
+var lod_surface_count := 0
 
 
 func reset() -> void:
@@ -35,12 +37,13 @@ func reset() -> void:
 	fallback_surfaces = 0
 	uv_surfaces = 0
 	textured_missing_uv_surfaces = 0
+	lod_surface_count = 0
 
 
 func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> MeshInstance3D:
-	var mesh := ArrayMesh.new()
 	var object_name: String = obj.get("name", "EAGL_Object")
 	var emitted_surfaces := 0
+	var surface_arrays: Array[Array] = []
 	var surface_materials: Array[Material] = []
 	var blocks: Array = obj.get("blocks", [])
 	for block_index in range(blocks.size()):
@@ -70,8 +73,6 @@ func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> 
 		if colors.size() == vertices.size():
 			arrays[Mesh.ARRAY_COLOR] = colors
 
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-		var surface_index := mesh.get_surface_count() - 1
 		var texture_hash := _texture_hash_for_block(obj, block_index)
 		if texture_bank != null and texture_hash != 0 and texture_bank.has_texture(texture_hash):
 			textured_surfaces += 1
@@ -80,12 +81,13 @@ func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> 
 		else:
 			fallback_surfaces += 1
 		var material := material_builder.material_for_block(object_name, block, block_index, colors.size() == vertices.size(), texture_hash)
-		mesh.surface_set_material(surface_index, material)
+		surface_arrays.append(arrays)
 		surface_materials.append(material)
 		emitted_surfaces += 1
 
 	if emitted_surfaces == 0:
 		return null
+	var mesh := _build_array_mesh(surface_arrays, surface_materials, object_name)
 
 	var node := MeshInstance3D.new()
 	node.name = _safe_node_name(object_name)
@@ -97,6 +99,31 @@ func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> 
 	node.set_meta("eagl_surface_material_count", surface_materials.size())
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
 	return node
+
+
+func _build_array_mesh(surface_arrays: Array[Array], surface_materials: Array[Material], object_name: String) -> ArrayMesh:
+	if generate_lods:
+		var importer_mesh := ImporterMesh.new()
+		for surface_index in range(surface_arrays.size()):
+			importer_mesh.add_surface(
+				Mesh.PRIMITIVE_TRIANGLES,
+				surface_arrays[surface_index],
+				[],
+				{},
+				surface_materials[surface_index],
+				"%s_%03d" % [object_name, surface_index]
+			)
+		importer_mesh.generate_lods(deg_to_rad(25.0), deg_to_rad(60.0), [])
+		for surface_index in range(importer_mesh.get_surface_count()):
+			if importer_mesh.get_surface_lod_count(surface_index) > 0:
+				lod_surface_count += 1
+		return importer_mesh.get_mesh()
+
+	var mesh := ArrayMesh.new()
+	for surface_index in range(surface_arrays.size()):
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surface_arrays[surface_index])
+		mesh.surface_set_material(surface_index, surface_materials[surface_index])
+	return mesh
 
 
 func _transformed_vertices(obj: Dictionary, block: Dictionary, apply_object_transform: bool = true) -> PackedVector3Array:

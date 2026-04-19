@@ -73,6 +73,26 @@ func clear() -> void:
 	_texture_shaders.clear()
 
 
+func distance_fade_material(base_material: Material, end_distance: float, fade_window: float) -> Material:
+	var shader_material := base_material as ShaderMaterial
+	if shader_material == null:
+		return base_material
+	var material := shader_material.duplicate() as ShaderMaterial
+	material.shader = _get_texture_shader(
+		"BLEND",
+		bool(shader_material.get_meta("eagl_double_sided", true)),
+		bool(shader_material.get_meta("eagl_use_lighting", true)),
+		true
+	)
+	material.set_shader_parameter("distance_fade_enabled", true)
+	material.set_shader_parameter("distance_fade_end", end_distance)
+	material.set_shader_parameter("distance_fade_window", fade_window)
+	material.set_meta("eagl_distance_fade", true)
+	material.set_meta("eagl_distance_fade_end", end_distance)
+	material.set_meta("eagl_distance_fade_window", fade_window)
+	return material
+
+
 func _fallback_color(object_name: String, block: Dictionary, block_index: int) -> Color:
 	var seed := hash(object_name) ^ int(block.get("texture_index", 0)) ^ (int(block.get("render_flag", 0)) << 8) ^ block_index
 	return MathUtils.deterministic_color(seed)
@@ -121,21 +141,21 @@ func _should_use_lit_material(object_name: String) -> bool:
 	return not (name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER")
 
 
-func _get_texture_shader(alpha_mode: String, double_sided: bool, use_lighting: bool) -> Shader:
+func _get_texture_shader(alpha_mode: String, double_sided: bool, use_lighting: bool, distance_fade: bool = false) -> Shader:
 	var sampler_filter := _sampler_filter_hint()
-	var key := "%s:%s:%s:%s" % [alpha_mode, "double" if double_sided else "single", "lit" if use_lighting else "unlit", sampler_filter]
+	var key := "%s:%s:%s:%s:%s" % [alpha_mode, "double" if double_sided else "single", "lit" if use_lighting else "unlit", sampler_filter, "distance_fade" if distance_fade else "static"]
 	if _texture_shaders.has(key):
 		return _texture_shaders[key]
 	var shader := Shader.new()
 	var cull_mode := "cull_disabled"
 	var lighting_mode := "" if use_lighting else "unshaded, "
 	var render_mode := "%s%s, depth_draw_opaque" % [lighting_mode, cull_mode]
-	if alpha_mode == "BLEND":
+	if alpha_mode == "BLEND" or distance_fade:
 		render_mode = "%s%s, blend_mix, depth_prepass_alpha" % [lighting_mode, cull_mode]
 	var alpha_lines := ""
 	if alpha_mode == "MASK":
 		alpha_lines = "\n\tALPHA = base.a;\n\tALPHA_SCISSOR_THRESHOLD = alpha_cutoff;"
-	elif alpha_mode == "BLEND":
+	elif alpha_mode == "BLEND" or distance_fade:
 		alpha_lines = "\n\tALPHA = base.a;"
 	shader.code = """
 shader_type spatial;
@@ -146,12 +166,28 @@ uniform vec4 albedo_tint : source_color = vec4(1.0);
 uniform bool use_vertex_color = true;
 uniform float vertex_color_modulate_scale = 1.9921875;
 uniform float alpha_cutoff = 0.5;
+uniform bool distance_fade_enabled = false;
+uniform float distance_fade_end = 0.0;
+uniform float distance_fade_window = 0.0;
+
+varying vec3 world_position;
+
+void vertex() {
+	world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
 
 void fragment() {
 	vec4 base = albedo_tint * texture(albedo_texture, UV);
 	if (use_vertex_color) {
 		base.rgb = min(base.rgb * COLOR.rgb * vertex_color_modulate_scale, vec3(1.0));
 		base.a *= COLOR.a;
+	}
+	if (distance_fade_enabled && distance_fade_end > 0.0) {
+		float camera_distance = distance(CAMERA_POSITION_WORLD, world_position);
+		float fade_alpha = camera_distance <= distance_fade_end
+			? 1.0
+			: clamp((distance_fade_end + max(distance_fade_window, 0.0) - camera_distance) / max(distance_fade_window, 0.0001), 0.0, 1.0);
+		base.a *= fade_alpha;
 	}
 	ALBEDO = base.rgb;
 	ROUGHNESS = 1.0;

@@ -8,6 +8,10 @@ const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_ban
 @export var load_on_ready := true
 @export var place_scenery_instances := true
 @export var expand_scenery_instances := false
+@export var generate_lods := true
+@export var use_vsync := true
+@export var shadow_texture_visibility_distance := 300.0
+@export var shadow_texture_visibility_margin := 80.0
 @export var cast_shadow := false
 @export_enum(
 	"linear_mipmap",
@@ -20,6 +24,7 @@ const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_ban
 
 var track_node: Node3D
 var _is_loading := false
+var _fps_update_elapsed := 0.0
 @onready var camera: Camera3D = $DebugCamera
 @onready var _loading_panel: PanelContainer = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/BottomControls/LoadingPanel
 @onready var _loading_label: Label = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/BottomControls/LoadingPanel/LoadingBox/LoadingLabel
@@ -29,9 +34,11 @@ var _is_loading := false
 @onready var _track_status_label: Label = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow/TrackStatus
 @onready var _cast_shadow_toggle: CheckButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow/CastShadowToggle
 @onready var _camera_position_label: Label = $DebugUI/DebugUILayout/CameraPositionPanel/CameraPositionLabel
+@onready var _fps_label: Label = $DebugUI/DebugUILayout/FpsPanel/FpsLabel
 
 
 func _ready() -> void:
+	_apply_vsync()
 	_loading_panel.visible = false
 	_track_selector.item_selected.connect(_on_track_selected)
 	_reload_button.pressed.connect(reload_track)
@@ -42,8 +49,9 @@ func _ready() -> void:
 		call_deferred("_load_debug_track")
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_camera_position_label()
+	_update_fps_label(delta)
 
 
 func _load_debug_track() -> void:
@@ -57,6 +65,9 @@ func _load_debug_track() -> void:
 	var ok: bool = EAGLManager.initialize(platform, game_root, {
 		"place_scenery_instances": place_scenery_instances,
 		"expand_scenery_instances": expand_scenery_instances,
+		"generate_lods": generate_lods,
+		"shadow_texture_visibility_distance": shadow_texture_visibility_distance,
+		"shadow_texture_visibility_margin": shadow_texture_visibility_margin,
 		"texture_filter_mode": texture_filter_mode,
 	})
 	if not ok:
@@ -108,6 +119,8 @@ func _load_debug_track() -> void:
 	stats["fallback_surface_count"] = next_track_node.get_meta("eagl_fallback_surface_count", 0)
 	stats["uv_surface_count"] = next_track_node.get_meta("eagl_uv_surface_count", 0)
 	stats["textured_missing_uv_surface_count"] = next_track_node.get_meta("eagl_textured_missing_uv_surface_count", 0)
+	stats["lod_surface_count"] = next_track_node.get_meta("eagl_lod_surface_count", 0)
+	stats["shadow_texture_visibility_count"] = next_track_node.get_meta("eagl_shadow_texture_visibility_count", 0)
 	loader.stats = stats
 
 	await _set_loading_status("Finalizing view", 0.95, true)
@@ -121,7 +134,7 @@ func _load_debug_track() -> void:
 	_set_track_controls_enabled(true)
 	_is_loading = false
 	print("EAGL debug track loaded: ", EAGLManager.get_stats())
-	print("EAGL debug scene rendered: objects=%s placed_scenery=%s scenery_multimeshes=%s environment=%s markers=%s textured_surfaces=%s fallback_surfaces=%s uv_surfaces=%s textured_missing_uv=%s skipped=%s" % [
+	print("EAGL debug scene rendered: objects=%s placed_scenery=%s scenery_multimeshes=%s environment=%s markers=%s textured_surfaces=%s fallback_surfaces=%s uv_surfaces=%s textured_missing_uv=%s lod_surfaces=%s shadow_texture_visibility=%s skipped=%s" % [
 		track_node.get_meta("eagl_rendered_object_count", 0),
 		track_node.get_meta("eagl_placed_scenery_instance_count", 0),
 		track_node.get_meta("eagl_scenery_multimesh_count", 0),
@@ -131,6 +144,8 @@ func _load_debug_track() -> void:
 		track_node.get_meta("eagl_fallback_surface_count", 0),
 		track_node.get_meta("eagl_uv_surface_count", 0),
 		track_node.get_meta("eagl_textured_missing_uv_surface_count", 0),
+		track_node.get_meta("eagl_lod_surface_count", 0),
+		track_node.get_meta("eagl_shadow_texture_visibility_count", 0),
 		track_node.get_meta("eagl_skipped", {}),
 	])
 
@@ -365,6 +380,28 @@ func _update_camera_position_label() -> void:
 		return
 	var pos := camera.global_position
 	_camera_position_label.text = "Camera\nX: %.2f\nY: %.2f\nZ: %.2f" % [pos.x, pos.y, pos.z]
+
+
+func _update_fps_label(delta: float) -> void:
+	if _fps_label == null:
+		return
+	_fps_update_elapsed += delta
+	if _fps_update_elapsed < 0.25:
+		return
+	_fps_update_elapsed = 0.0
+	var fps := int(round(Engine.get_frames_per_second()))
+	var lod_text := "LODs: -"
+	if track_node != null:
+		if bool(track_node.get_meta("eagl_generate_lods", false)):
+			lod_text = "LODs: %d" % int(track_node.get_meta("eagl_lod_surface_count", 0))
+		else:
+			lod_text = "LODs: off"
+	_fps_label.text = "FPS: %d\n%s\nVSync: %s" % [fps, lod_text, "on" if use_vsync else "off"]
+
+
+func _apply_vsync() -> void:
+	var mode := DisplayServer.VSYNC_ENABLED if use_vsync else DisplayServer.VSYNC_DISABLED
+	DisplayServer.window_set_vsync_mode(mode)
 
 
 func _node_bounds(node: Node3D) -> AABB:
