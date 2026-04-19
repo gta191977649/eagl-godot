@@ -3,6 +3,8 @@ extends RefCounted
 
 const MathUtils := preload("res://eagl/utils/math_utils.gd")
 
+const PS2_VERTEX_COLOR_MODULATE_SCALE := 255.0 / 128.0
+
 var _materials: Dictionary = {}
 var texture_bank = null
 var _texture_shaders: Dictionary = {}
@@ -36,6 +38,7 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 		shader_material.set_shader_parameter("albedo_texture", texture)
 		shader_material.set_shader_parameter("albedo_tint", Color.WHITE)
 		shader_material.set_shader_parameter("use_vertex_color", uses_vertex_colors)
+		shader_material.set_shader_parameter("vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
 		shader_material.set_shader_parameter("alpha_cutoff", alpha_cutoff)
 		shader_material.set_meta("eagl_texture_name", info.get("name", ""))
 		shader_material.set_meta("eagl_alpha_mode", source_alpha_mode)
@@ -44,6 +47,7 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 		shader_material.set_meta("eagl_double_sided", double_sided)
 		shader_material.set_meta("eagl_texture_filter_mode", texture_filter_mode)
 		shader_material.set_meta("eagl_force_opaque_road_edge", force_opaque_road_edge)
+		shader_material.set_meta("eagl_vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
 		shader_material.set_meta("eagl_is_any_semitransparency", info.get("is_any_semitransparency", 0))
 		shader_material.set_meta("eagl_alpha_bits", info.get("alpha_bits", 0))
 		shader_material.set_meta("eagl_alpha_fix", info.get("alpha_fix", 0))
@@ -132,12 +136,14 @@ render_mode %s;
 uniform sampler2D albedo_texture : source_color, repeat_enable, %s;
 uniform vec4 albedo_tint : source_color = vec4(1.0);
 uniform bool use_vertex_color = true;
+uniform float vertex_color_modulate_scale = 1.9921875;
 uniform float alpha_cutoff = 0.5;
 
 void fragment() {
 	vec4 base = albedo_tint * texture(albedo_texture, UV);
 	if (use_vertex_color) {
-		base *= COLOR;
+		base.rgb = min(base.rgb * COLOR.rgb * vertex_color_modulate_scale, vec3(1.0));
+		base.a *= COLOR.a;
 	}
 	ALBEDO = base.rgb;
 %s

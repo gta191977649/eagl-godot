@@ -241,9 +241,9 @@ func _gs_prim_type_for_mode(mode: String) -> int:
 
 
 func _decode_vif_color_5551(value: int) -> Color:
-	var red := float(value & 0x1F) / 31.0
-	var green := float((value >> 5) & 0x1F) / 31.0
-	var blue := float((value >> 10) & 0x1F) / 31.0
+	var red := float((value & 0x1F) << 3) / 255.0
+	var green := float(((value >> 5) & 0x1F) << 3) / 255.0
+	var blue := float(((value >> 10) & 0x1F) << 3) / 255.0
 	return Color(red, green, blue, 1.0)
 
 
