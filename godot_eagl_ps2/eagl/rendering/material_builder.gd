@@ -11,12 +11,12 @@ var _texture_shaders: Dictionary = {}
 var texture_filter_mode := "linear_mipmap"
 
 
-func material_for_block(object_name: String, block: Dictionary, block_index: int, uses_vertex_colors: bool, texture_hash: int = 0) -> Material:
-	var use_lighting := _should_use_lit_material(object_name)
+func material_for_block(object_name: String, block: Dictionary, block_index: int, uses_vertex_colors: bool, texture_hash: int = 0, light_material_hash: int = 0, material_role: String = "") -> Material:
+	var use_lighting := _should_use_lit_material(object_name, material_role)
 	var key := "%s:%s:%s:%s:%s" % [
 		object_name,
 		texture_hash,
-		block.get("render_flag", 0),
+		"%s:%s:%s" % [block.get("render_flag", 0), light_material_hash, material_role],
 		texture_filter_mode,
 		("%s_%s" % ["lit" if use_lighting else "unlit", "vc" if uses_vertex_colors else "flat"]),
 	]
@@ -40,8 +40,12 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 		shader_material.set_shader_parameter("albedo_tint", Color.WHITE)
 		shader_material.set_shader_parameter("use_vertex_color", uses_vertex_colors)
 		shader_material.set_shader_parameter("vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
+		shader_material.set_shader_parameter("vertex_color_floor", _vertex_color_floor_for_role(material_role))
 		shader_material.set_shader_parameter("alpha_cutoff", alpha_cutoff)
+		shader_material.set_shader_parameter("surface_roughness", _roughness_for_role(material_role))
 		shader_material.set_meta("eagl_texture_name", info.get("name", ""))
+		shader_material.set_meta("eagl_light_material_hash", light_material_hash)
+		shader_material.set_meta("eagl_material_role", material_role)
 		shader_material.set_meta("eagl_alpha_mode", source_alpha_mode)
 		shader_material.set_meta("eagl_effective_alpha_mode", alpha_mode)
 		shader_material.set_meta("eagl_alpha_cutoff", alpha_cutoff)
@@ -56,14 +60,31 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 		_materials[key] = shader_material
 		return shader_material
 
+	if material_role.begins_with("hp2_car") and uses_vertex_colors:
+		var fallback_shader_material := ShaderMaterial.new()
+		fallback_shader_material.shader = _get_flat_color_shader(use_lighting)
+		fallback_shader_material.resource_name = "EAGL_%s_%03d" % [object_name, block_index]
+		fallback_shader_material.set_shader_parameter("albedo_tint", _fallback_color(object_name, block, block_index, material_role, light_material_hash))
+		fallback_shader_material.set_shader_parameter("use_vertex_color", uses_vertex_colors)
+		fallback_shader_material.set_shader_parameter("vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
+		fallback_shader_material.set_shader_parameter("vertex_color_floor", _vertex_color_floor_for_role(material_role))
+		fallback_shader_material.set_shader_parameter("surface_roughness", _roughness_for_role(material_role))
+		fallback_shader_material.set_meta("eagl_light_material_hash", light_material_hash)
+		fallback_shader_material.set_meta("eagl_material_role", material_role)
+		fallback_shader_material.set_meta("eagl_missing_texture_hash", texture_hash)
+		_materials[key] = fallback_shader_material
+		return fallback_shader_material
+
 	var material := StandardMaterial3D.new()
 	material.resource_name = "EAGL_%s_%03d" % [object_name, block_index]
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL if use_lighting else BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	material.texture_filter = _base_material_texture_filter()
 	material.vertex_color_use_as_albedo = uses_vertex_colors
-	material.albedo_color = Color.WHITE if uses_vertex_colors else _fallback_color(object_name, block, block_index)
-	material.roughness = 1.0
+	material.albedo_color = Color.WHITE if uses_vertex_colors else _fallback_color(object_name, block, block_index, material_role, light_material_hash)
+	material.roughness = _roughness_for_role(material_role)
+	material.set_meta("eagl_light_material_hash", light_material_hash)
+	material.set_meta("eagl_material_role", material_role)
 	_materials[key] = material
 	return material
 
@@ -93,8 +114,18 @@ func distance_fade_material(base_material: Material, end_distance: float, fade_w
 	return material
 
 
-func _fallback_color(object_name: String, block: Dictionary, block_index: int) -> Color:
-	var seed := hash(object_name) ^ int(block.get("texture_index", 0)) ^ (int(block.get("render_flag", 0)) << 8) ^ block_index
+func _fallback_color(object_name: String, block: Dictionary, block_index: int, material_role: String = "", light_material_hash: int = 0) -> Color:
+	if material_role.begins_with("hp2_car"):
+		var name := object_name.to_upper()
+		if name.contains("TIRE"):
+			return Color(0.42, 0.42, 0.4, 1.0)
+		if name.contains("BRAKE"):
+			return Color(0.18, 0.18, 0.17, 1.0)
+		if name.contains("GLASS") or name.contains("WINDOW"):
+			return Color(0.08, 0.1, 0.12, 0.85)
+		if name.begins_with("MCLAREN") or name.begins_with("F50"):
+			return Color(0.78, 0.06, 0.08, 1.0)
+	var seed := hash(object_name) ^ int(block.get("texture_index", 0)) ^ (int(block.get("render_flag", 0)) << 8) ^ block_index ^ light_material_hash
 	return MathUtils.deterministic_color(seed)
 
 
@@ -136,9 +167,55 @@ func _should_force_opaque_road_edge(object_name: String, texture_info: Dictionar
 	)
 
 
-func _should_use_lit_material(object_name: String) -> bool:
+func _should_use_lit_material(object_name: String, material_role: String = "") -> bool:
+	if material_role.begins_with("hp2_car"):
+		return false
 	var name := object_name.to_upper()
 	return not (name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER")
+
+
+func _roughness_for_role(material_role: String) -> float:
+	if material_role.begins_with("hp2_car"):
+		return 0.45
+	return 1.0
+
+
+func _vertex_color_floor_for_role(material_role: String) -> float:
+	if material_role.begins_with("hp2_car"):
+		return 0.22
+	return 0.0
+
+
+func _get_flat_color_shader(use_lighting: bool) -> Shader:
+	var key := "flat:%s" % ["lit" if use_lighting else "unlit"]
+	if _texture_shaders.has(key):
+		return _texture_shaders[key]
+	var shader := Shader.new()
+	var lighting_mode := "" if use_lighting else "unshaded, "
+	shader.code = """
+shader_type spatial;
+render_mode %scull_disabled, depth_draw_opaque;
+
+uniform vec4 albedo_tint : source_color = vec4(1.0);
+uniform bool use_vertex_color = true;
+uniform float vertex_color_modulate_scale = 1.9921875;
+uniform float vertex_color_floor = 0.0;
+uniform float surface_roughness = 1.0;
+
+void fragment() {
+	vec4 base = albedo_tint;
+	if (use_vertex_color) {
+		vec3 lit_color = min(base.rgb * COLOR.rgb * vertex_color_modulate_scale, vec3(1.0));
+		base.rgb = max(lit_color, base.rgb * vertex_color_floor);
+		base.a *= COLOR.a;
+	}
+	ALBEDO = base.rgb;
+	ALPHA = base.a;
+	ROUGHNESS = surface_roughness;
+}
+""" % lighting_mode
+	_texture_shaders[key] = shader
+	return shader
 
 
 func _get_texture_shader(alpha_mode: String, double_sided: bool, use_lighting: bool, distance_fade: bool = false) -> Shader:
@@ -165,10 +242,12 @@ uniform sampler2D albedo_texture : source_color, repeat_enable, %s;
 uniform vec4 albedo_tint : source_color = vec4(1.0);
 uniform bool use_vertex_color = true;
 uniform float vertex_color_modulate_scale = 1.9921875;
+uniform float vertex_color_floor = 0.0;
 uniform float alpha_cutoff = 0.5;
 uniform bool distance_fade_enabled = false;
 uniform float distance_fade_end = 0.0;
 uniform float distance_fade_window = 0.0;
+uniform float surface_roughness = 1.0;
 
 varying vec3 world_position;
 
@@ -179,7 +258,8 @@ void vertex() {
 void fragment() {
 	vec4 base = albedo_tint * texture(albedo_texture, UV);
 	if (use_vertex_color) {
-		base.rgb = min(base.rgb * COLOR.rgb * vertex_color_modulate_scale, vec3(1.0));
+		vec3 lit_color = min(base.rgb * COLOR.rgb * vertex_color_modulate_scale, vec3(1.0));
+		base.rgb = max(lit_color, base.rgb * vertex_color_floor);
 		base.a *= COLOR.a;
 	}
 	if (distance_fade_enabled && distance_fade_end > 0.0) {
@@ -190,7 +270,7 @@ void fragment() {
 		base.a *= fade_alpha;
 	}
 	ALBEDO = base.rgb;
-	ROUGHNESS = 1.0;
+	ROUGHNESS = surface_roughness;
 %s
 }
 """ % [

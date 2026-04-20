@@ -4,6 +4,7 @@ extends RefCounted
 var config
 var root_path := ""
 var tracks_dir := ""
+var cars_dir := ""
 var last_error := ""
 
 
@@ -16,6 +17,7 @@ func initialize(_config) -> void:
 	config = _config
 	root_path = String(config.game_root).trim_suffix("/")
 	tracks_dir = _resolve_tracks_dir(root_path)
+	cars_dir = _resolve_cars_dir(root_path)
 
 
 func resolve_track(track_id: String) -> Dictionary:
@@ -63,6 +65,44 @@ func resolve_track(track_id: String) -> Dictionary:
 	}
 
 
+func resolve_car(car_id: String) -> Dictionary:
+	last_error = ""
+	if cars_dir == "":
+		last_error = "Could not locate ZZDATA/CARS under game root: %s" % root_path
+		push_error(last_error)
+		return {}
+
+	var normalized := _normalize_car_id(car_id)
+	var car_dir := _find_car_dir(normalized)
+	if car_dir == "":
+		last_error = "Could not find car directory for %s in %s" % [normalized, cars_dir]
+		push_error(last_error)
+		return {}
+
+	var geometry := car_dir.path_join("GEOMETRY.BIN")
+	if not _file_has_data(geometry):
+		geometry = car_dir.path_join("GEOMETRY.LZC")
+	if not _file_has_data(geometry):
+		last_error = "Could not find non-empty GEOMETRY.BIN/LZC for %s in %s" % [normalized, car_dir]
+		push_error(last_error)
+		return {}
+
+	var dashboard := ""
+	for candidate in [car_dir.path_join("DASHGEOM.BIN"), car_dir.path_join("DASHGEOM.LZC")]:
+		if _file_has_data(candidate):
+			dashboard = candidate
+			break
+
+	return {
+		"car_id": car_dir.get_file().to_upper(),
+		"source_id": car_id,
+		"geometry": geometry,
+		"dashboard": dashboard,
+		"cars_dir": cars_dir,
+		"texture_car": cars_dir.path_join("TEXTURES.BIN"),
+	}
+
+
 func _resolve_tracks_dir(root: String) -> String:
 	var candidates := [
 		root.path_join("ZZDATA").path_join("TRACKS"),
@@ -75,6 +115,21 @@ func _resolve_tracks_dir(root: String) -> String:
 				return candidate
 			if DirAccess.dir_exists_absolute(candidate.path_join("TRACKS")):
 				return candidate.path_join("TRACKS")
+	return ""
+
+
+func _resolve_cars_dir(root: String) -> String:
+	var candidates := [
+		root.path_join("ZZDATA").path_join("CARS"),
+		root.path_join("CARS"),
+		root,
+	]
+	for candidate in candidates:
+		if DirAccess.dir_exists_absolute(candidate):
+			if candidate.get_file().to_upper() == "CARS":
+				return candidate
+			if DirAccess.dir_exists_absolute(candidate.path_join("CARS")):
+				return candidate.path_join("CARS")
 	return ""
 
 
@@ -113,3 +168,30 @@ func _normalize_track_id(track_id: String) -> Dictionary:
 	elif digits.length() > 2:
 		digits = digits.substr(digits.length() - 2)
 	return {"numeric_id": digits, "prefix": prefix}
+
+
+func _normalize_car_id(car_id: String) -> String:
+	var value := car_id.strip_edges().to_upper()
+	value = value.replace("\\", "/")
+	if value.contains("/"):
+		value = value.get_file()
+	return value
+
+
+func _find_car_dir(car_id: String) -> String:
+	var direct := cars_dir.path_join(car_id)
+	if DirAccess.dir_exists_absolute(direct):
+		return direct
+	var dir := DirAccess.open(cars_dir)
+	if dir == null:
+		return ""
+	dir.list_dir_begin()
+	while true:
+		var entry := dir.get_next()
+		if entry == "":
+			break
+		if dir.current_is_dir() and not entry.begins_with(".") and entry.to_upper() == car_id:
+			dir.list_dir_end()
+			return cars_dir.path_join(entry)
+	dir.list_dir_end()
+	return ""

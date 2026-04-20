@@ -124,6 +124,7 @@ func _parse_mesh_object(object_chunk: Dictionary, bundle: PackedByteArray) -> Di
 	var run_metadata_chunk := _child_with_id(object_chunk, 0x00034004)
 	var vif_data_chunk := _child_with_id(object_chunk, 0x00034005)
 	var texture_refs_chunk := _child_with_id(object_chunk, 0x00034006)
+	var light_material_refs_chunk := _child_with_id(object_chunk, 0x0003401D)
 	if header_chunk.is_empty() or vif_data_chunk.is_empty():
 		return {}
 
@@ -157,6 +158,9 @@ func _parse_mesh_object(object_chunk: Dictionary, bundle: PackedByteArray) -> Di
 	var texture_hashes: Array[int] = []
 	if not texture_refs_chunk.is_empty():
 		texture_hashes = _read_texture_hashes(_payload(bundle, texture_refs_chunk))
+	var light_material_hashes: Array[int] = []
+	if not light_material_refs_chunk.is_empty():
+		light_material_hashes = _read_texture_hashes(_payload(bundle, light_material_refs_chunk))
 
 	return {
 		"name": name_info["name"],
@@ -164,6 +168,7 @@ func _parse_mesh_object(object_chunk: Dictionary, bundle: PackedByteArray) -> Di
 		"transform": _read_transform(header_payload, name_info["start"]),
 		"blocks": blocks,
 		"texture_hashes": texture_hashes,
+		"light_material_hashes": light_material_hashes,
 		"name_hash": Binary.u32(header_payload, 0x08) if header_payload.size() >= 0x0C else 0,
 	}
 
@@ -234,10 +239,14 @@ func _parse_strip_entry_record(record: PackedByteArray) -> Dictionary:
 		"qword_size": qword_count * 16,
 		"render_flags": (qword_word >> 16) & 0xFFFF,
 		"word_1c": word_1c,
+		"poly_group_number": word_1c & 0xFF,
 		"topology_code": word_1c & 0xFF,
 		"packed_material_or_render_index": word_1c & 0xFF,
+		"num_verts": (word_1c >> 8) & 0xFF,
 		"vertex_count_byte": (word_1c >> 8) & 0xFF,
+		"num_polys": (word_1c >> 16) & 0xFF,
 		"count_byte": (word_1c >> 16) & 0xFF,
+		"light_material_index": Binary.s8(record, 0x1F),
 		"packed_ff_or_zero": (word_1c >> 24) & 0xFF,
 	}
 

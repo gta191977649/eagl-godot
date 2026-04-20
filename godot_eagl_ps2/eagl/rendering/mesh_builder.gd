@@ -70,17 +70,22 @@ func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> 
 			uv_surfaces += 1
 
 		var colors := _color_array(block, vertices.size())
-		if colors.size() == vertices.size():
+		var use_vertex_colors := colors.size() == vertices.size() and not bool(obj.get("disable_vertex_color", false))
+		if use_vertex_colors:
 			arrays[Mesh.ARRAY_COLOR] = colors
 
 		var texture_hash := _texture_hash_for_block(obj, block_index)
+		var light_material_hash := _light_material_hash_for_block(obj, block_index)
+		if bool(obj.get("skip_missing_texture_surfaces", false)) and texture_hash != 0 and texture_bank != null and not texture_bank.has_texture(texture_hash):
+			_count_skip("missing_texture_surface")
+			continue
 		if texture_bank != null and texture_hash != 0 and texture_bank.has_texture(texture_hash):
 			textured_surfaces += 1
 			if not has_uvs:
 				textured_missing_uv_surfaces += 1
 		else:
 			fallback_surfaces += 1
-		var material := material_builder.material_for_block(object_name, block, block_index, colors.size() == vertices.size(), texture_hash)
+		var material := material_builder.material_for_block(object_name, block, block_index, use_vertex_colors, texture_hash, light_material_hash, String(obj.get("material_role", "")))
 		surface_arrays.append(arrays)
 		surface_materials.append(material)
 		emitted_surfaces += 1
@@ -129,11 +134,33 @@ func _build_array_mesh(surface_arrays: Array[Array], surface_materials: Array[Ma
 func _transformed_vertices(obj: Dictionary, block: Dictionary, apply_object_transform: bool = true) -> PackedVector3Array:
 	var out := PackedVector3Array()
 	var transform_rows: Array = obj.get("transform", [])
+	var vertex_scale := float(obj.get("vertex_scale", 1.0))
 	var run: Dictionary = block.get("run", {})
 	for vertex in run.get("vertices", []):
-		var ps2_vertex: Vector3 = MathUtils.transform_point_rows(vertex, transform_rows) if apply_object_transform else vertex
-		out.append(MathUtils.ps2_to_godot_vec3(ps2_vertex))
+		var source_vertex: Vector3 = vertex * vertex_scale
+		var ps2_vertex: Vector3 = MathUtils.transform_point_rows(source_vertex, transform_rows) if apply_object_transform else source_vertex
+		out.append(_object_vertex_to_godot(obj, ps2_vertex))
 	return out
+
+
+func _object_vertex_to_godot(obj: Dictionary, value: Vector3) -> Vector3:
+	var coordinate_space := String(obj.get("coordinate_space", "ps2_world_z_up"))
+	if coordinate_space == "hp2_car_local_x_forward_z_up":
+		return Vector3(value.y, value.z, -value.x)
+	return MathUtils.ps2_to_godot_vec3(value)
+
+
+func _light_material_hash_for_block(obj: Dictionary, block_index: int) -> int:
+	var blocks: Array = obj.get("blocks", [])
+	if block_index < 0 or block_index >= blocks.size():
+		return 0
+	var block: Dictionary = blocks[block_index]
+	var strip_entry: Dictionary = block.get("strip_entry", {})
+	var material_index := int(strip_entry.get("light_material_index", -1))
+	var material_hashes: Array = obj.get("light_material_hashes", [])
+	if material_index >= 0 and material_index < material_hashes.size():
+		return int(material_hashes[material_index])
+	return 0
 
 
 func _uv_array(block: Dictionary, vertex_count: int) -> PackedVector2Array:

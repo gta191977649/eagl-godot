@@ -19,6 +19,16 @@ func load_track_asset(_track_id: String):
 	return null
 
 
+func load_car(_car_id: String) -> Node3D:
+	return _error_node("load_car is not implemented for this platform")
+
+
+func load_car_asset(_car_id: String):
+	last_error = "load_car_asset is not implemented for this platform"
+	push_error(last_error)
+	return null
+
+
 func clear_cache() -> void:
 	pass
 

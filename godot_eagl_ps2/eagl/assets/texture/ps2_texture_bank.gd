@@ -18,6 +18,21 @@ func load_for_track(files: Dictionary) -> void:
 			_read_ps2_tpk(path)
 
 
+func load_paths(paths: Array[String]) -> void:
+	clear()
+	for path in paths:
+		if path != "" and FileAccess.file_exists(path):
+			_read_ps2_tpk(path)
+
+
+func load_for_car(files: Dictionary) -> void:
+	var paths: Array[String] = []
+	var texture_path: String = files.get("texture_car", "")
+	if texture_path != "":
+		paths.append(texture_path)
+	load_paths(paths)
+
+
 func clear() -> void:
 	textures.clear()
 	texture_info.clear()

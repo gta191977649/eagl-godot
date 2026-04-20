@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://dcqr040lvn71x"]
+
+[ext_resource type="Script" uid="uid://bj4c65gi3quqe" path="res://eagl/debug/car_drive_debug.gd" id="1_car_debug"]
+
+[node name="CarDriveDebug" type="Node3D" unique_id=938466864]
+script = ExtResource("1_car_debug")

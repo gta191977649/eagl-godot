@@ -52,6 +52,20 @@ func load_track_asset(track_id: String):
 	return platform.load_track_asset(track_id)
 
 
+func load_car(car_id: String) -> Node3D:
+	if platform == null:
+		return _error_node("EAGLManager is not initialized")
+	return platform.load_car(car_id)
+
+
+func load_car_asset(car_id: String):
+	if platform == null:
+		last_error = "EAGLManager is not initialized"
+		push_error(last_error)
+		return null
+	return platform.load_car_asset(car_id)
+
+
 func get_stats() -> Dictionary:
 	if platform == null or not platform.has_method("get_stats"):
 		return {}
