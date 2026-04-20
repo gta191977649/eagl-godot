@@ -3,6 +3,11 @@ extends Node3D
 
 @export var visual_root_path: NodePath
 @export var enabled := true
+@export var debug_free_drive := false
+@export var debug_free_drive_speed := 28.0
+@export var debug_free_drive_boost_speed := 64.0
+@export var debug_free_drive_accel := 72.0
+@export var debug_free_drive_yaw_speed := 2.4
 
 var tuning: Dictionary = {}
 var handling_data: Dictionary = {}
@@ -24,6 +29,9 @@ var last_brake_force := 0.0
 var last_lateral_force := 0.0
 var last_drag_force := 0.0
 
+var _free_drive_input := Vector2.ZERO
+var _free_drive_yaw_input := 0.0
+var _free_drive_boost := false
 var _spin_pivots: Array[Node3D] = []
 var _steer_pivots: Array[Node3D] = []
 var _visual_root: Node3D
@@ -50,6 +58,9 @@ func reset_motion() -> void:
 	last_brake_force = 0.0
 	last_lateral_force = 0.0
 	last_drag_force = 0.0
+	_free_drive_input = Vector2.ZERO
+	_free_drive_yaw_input = 0.0
+	_free_drive_boost = false
 
 
 func _physics_process(delta: float) -> void:
@@ -62,11 +73,21 @@ func _physics_process(delta: float) -> void:
 		_cache_visual_parts()
 
 	_read_input(delta)
-	_integrate_body(body, delta)
+	if debug_free_drive:
+		_integrate_free_drive_body(body, delta)
+	else:
+		_integrate_body(body, delta)
 	_update_wheel_visuals(delta)
 
 
 func _read_input(delta: float) -> void:
+	if debug_free_drive:
+		_read_free_drive_input(delta)
+	else:
+		_read_vehicle_input(delta)
+
+
+func _read_vehicle_input(delta: float) -> void:
 	var target_steer := 0.0
 	if Input.is_key_pressed(KEY_A) or Input.get_action_strength("ui_left") > 0.0:
 		target_steer += 1.0
@@ -78,6 +99,33 @@ func _read_input(delta: float) -> void:
 
 	var rate := float(tuning.get("steer_rate", 2.6)) if absf(target_steer) > absf(steer) else float(tuning.get("steer_return_rate", 5.0))
 	steer = move_toward(steer, target_steer, rate * delta)
+
+
+func _read_free_drive_input(delta: float) -> void:
+	var horizontal := 0.0
+	var vertical := 0.0
+	if Input.is_key_pressed(KEY_A) or Input.get_action_strength("ui_left") > 0.0:
+		horizontal -= 1.0
+	if Input.is_key_pressed(KEY_D) or Input.get_action_strength("ui_right") > 0.0:
+		horizontal += 1.0
+	if Input.is_key_pressed(KEY_W) or Input.get_action_strength("ui_up") > 0.0:
+		vertical += 1.0
+	if Input.is_key_pressed(KEY_S) or Input.get_action_strength("ui_down") > 0.0:
+		vertical -= 1.0
+
+	_free_drive_input = Vector2(horizontal, vertical)
+	_free_drive_yaw_input = 0.0
+	if Input.is_key_pressed(KEY_Q):
+		_free_drive_yaw_input += 1.0
+	if Input.is_key_pressed(KEY_E):
+		_free_drive_yaw_input -= 1.0
+	_free_drive_boost = Input.is_key_pressed(KEY_SHIFT)
+
+	throttle = maxf(vertical, 0.0)
+	brake = maxf(-vertical, 0.0)
+	handbrake = Input.is_key_pressed(KEY_SPACE)
+	var rate := float(tuning.get("steer_rate", 2.6)) if absf(_free_drive_yaw_input) > absf(steer) else float(tuning.get("steer_return_rate", 5.0))
+	steer = move_toward(steer, _free_drive_yaw_input, rate * delta)
 
 
 func _integrate_body(body: Node3D, delta: float) -> void:
@@ -135,6 +183,45 @@ func _integrate_body(body: Node3D, delta: float) -> void:
 
 	body.global_position += velocity * delta
 	_update_ground_contact(body, delta)
+
+
+func _integrate_free_drive_body(body: Node3D, delta: float) -> void:
+	var basis := body.global_transform.basis.orthonormalized()
+	var forward := -basis.z.normalized()
+	var right := basis.x.normalized()
+	var up := Vector3.UP
+	var input_length := _free_drive_input.length()
+	var target_velocity := Vector3.ZERO
+	var max_speed := debug_free_drive_boost_speed if _free_drive_boost else debug_free_drive_speed
+
+	last_drive_force = 0.0
+	last_brake_force = 0.0
+	last_lateral_force = 0.0
+	last_drag_force = 0.0
+	if input_length > 0.001:
+		var move_dir := (right * _free_drive_input.x + forward * _free_drive_input.y).normalized()
+		target_velocity = move_dir * max_speed
+		last_drive_force = debug_free_drive_accel
+		movement_mode = "free drive"
+	else:
+		movement_mode = "free idle"
+		last_drag_force = debug_free_drive_accel
+
+	velocity = velocity.move_toward(target_velocity, debug_free_drive_accel * delta)
+	velocity.y = 0.0
+	yaw_rate = _free_drive_yaw_input * debug_free_drive_yaw_speed
+	if absf(yaw_rate) > 0.0001:
+		body.global_transform.basis = Basis(up, yaw_rate * delta) * body.global_transform.basis
+
+	body.global_position += velocity * delta
+	_update_ground_contact(body, delta)
+
+	basis = body.global_transform.basis.orthonormalized()
+	forward = -basis.z.normalized()
+	right = basis.x.normalized()
+	local_longitudinal_speed = velocity.dot(forward)
+	local_lateral_speed = velocity.dot(right)
+	slip = absf(local_lateral_speed) / maxf(absf(local_longitudinal_speed), 1.0)
 
 
 func _update_yaw(body: Node3D, up: Vector3, delta: float) -> void:
@@ -239,6 +326,9 @@ func debug_state() -> Dictionary:
 		"brake_force": last_brake_force,
 		"lateral_force": last_lateral_force,
 		"drag_force": last_drag_force,
+		"debug_free_drive": debug_free_drive,
+		"debug_free_drive_boost": _free_drive_boost,
+		"debug_free_drive_input": _free_drive_input,
 		"handling_source": handling_data.get("handling_source", tuning.get("source", "unknown")),
 		"exact_handling_status": handling_data.get("exact_handling_status", tuning.get("exact_handling_status", "unknown")),
 		"decoded_car_id": handling_data.get("car_id", tuning.get("car_id", "")),

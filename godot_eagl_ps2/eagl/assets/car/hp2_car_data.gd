@@ -3,7 +3,7 @@ extends RefCounted
 
 const REVERSE_FACTS := {
 	"status": "partial",
-	"notes": "Recovered from Ghidra pass; runtime global table pointer prevents exact per-car constants without more data-flow recovery.",
+	"notes": "Recovered from Ghidra pass plus GLOBALB.BUN/CARS geometry chunks; handling constants are still partial, but wheel visual dummies are decoded from car geometry.",
 	"functions": {
 		"car_assembly": "FUN_0011e860",
 		"car_light_setup": "FUN_0011fe60",
@@ -13,9 +13,21 @@ const REVERSE_FACTS := {
 		"physics_forces_string": "PhysicsCar::ResolveForces()",
 	},
 	"runtime_table": {
-		"symbol": "iGpffffaf78",
+		"symbol": "uGpffffaf78",
+		"init_function": "FUN_00187f98",
+		"source_chunk": "GLOBAL/GLOBALB.BUN chunk 0x00034600",
 		"row_stride": 0x560,
 		"wheel_vector_offsets": [0x120, 0x140, 0x160, 0x180],
+	},
+	"wheel_visual_dummies": {
+		"source_chunk": "CARS/*/GEOMETRY.BIN chunk 0x00034013",
+		"source_function": "FUN_00120360",
+		"hashes": {
+			"front_left": 0xACEC665C,
+			"front_right": 0x4AE7F96F,
+			"rear_left": [0x7EFCF06F, 0xBEA9AEE6],
+			"rear_right": [0x5F09C5E2, 0x944E5339],
+		},
 	},
 	"runtime_part_names": {
 		"tires": [
@@ -87,23 +99,27 @@ const HEAVY_TRAFFIC := {
 }
 
 
-static func data_for_car(car_id: String, fallback_slots: Array) -> Dictionary:
+static func data_for_car(car_id: String, fallback_slots: Array, runtime_slots: Array = []) -> Dictionary:
 	var id := car_id.to_upper()
-	var slots := _normalise_slots(fallback_slots)
+	var decoded_slots := _normalise_slots(runtime_slots)
+	var fallback_normalised := _normalise_slots(fallback_slots)
+	var slots := decoded_slots if decoded_slots.size() >= 4 else fallback_normalised
+	var handling := _handling_for_car(id)
+	_apply_runtime_wheel_radius(handling, decoded_slots)
 	return {
 		"car_id": id,
 		"reverse_facts": REVERSE_FACTS.duplicate(true),
-		"handling": _handling_for_car(id),
-		"exact_handling_status": "partial_reverse_estimated_constants",
+		"handling": handling,
+		"exact_handling_status": "globalb_runtime_wheel_vectors_partial_handling" if decoded_slots.size() >= 4 else "partial_reverse_estimated_constants",
 		"handling_source": "Ghidra runtime layout facts plus estimated controller constants",
 		"wheel_slots": slots,
 		"brake_slots": slots.duplicate(true),
 		"wheel_slot_source": _wheel_slot_source(slots),
-		"decoded_wheel_slot_count": 0,
-		"fallback_wheel_slot_count": slots.size(),
+		"decoded_wheel_slot_count": decoded_slots.size(),
+		"fallback_wheel_slot_count": fallback_normalised.size(),
 		"source_confidence": {
 			"runtime_part_names": "high",
-			"wheel_table_offsets": "medium",
+			"wheel_table_offsets": "high" if decoded_slots.size() >= 4 else "medium",
 			"wheel_slot_positions": _wheel_slot_source(slots),
 			"handling_constants": "estimated",
 		},
@@ -177,10 +193,28 @@ static func _normalise_slots(slots: Array) -> Array[Dictionary]:
 	return out
 
 
+static func _apply_runtime_wheel_radius(handling: Dictionary, slots: Array[Dictionary]) -> void:
+	var total := 0.0
+	var count := 0
+	for slot in slots:
+		var radius := float(slot.get("wheel_radius", 0.0))
+		if radius <= 0.0:
+			continue
+		total += radius
+		count += 1
+	if count > 0:
+		handling["wheel_radius"] = total / float(count)
+		handling["wheel_radius_source"] = "globalb_0x00034600_runtime_wheel_table"
+
+
 static func _wheel_slot_source(slots: Array[Dictionary]) -> String:
 	if slots.is_empty():
 		return "unresolved"
 	var source := String(slots[0].get("source", "geometry_locator_0x00034013"))
+	for slot in slots:
+		var slot_source := String(slot.get("source", "geometry_locator_0x00034013"))
+		if slot_source != source:
+			return "mixed_binary_wheel_slots"
 	if source == "geometry_bounds_estimated":
 		return "geometry_bounds_estimated_fallback"
 	if source == "geometry_locator_0x00034013":

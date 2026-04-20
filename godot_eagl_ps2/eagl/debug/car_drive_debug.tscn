@@ -1,6 +1,36 @@
-[gd_scene format=3 uid="uid://dcqr040lvn71x"]
+[gd_scene load_steps=3 format=3 uid="uid://dcqr040lvn71x"]
 
 [ext_resource type="Script" uid="uid://bj4c65gi3quqe" path="res://eagl/debug/car_drive_debug.gd" id="1_car_debug"]
 
+[sub_resource type="Environment" id="Environment_car_debug"]
+background_mode = 1
+background_color = Color(0.56, 0.6, 0.58, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.64, 0.68, 0.66, 1)
+ambient_light_energy = 0.75
+reflected_light_source = 1
+tonemap_mode = 2
+adjustment_enabled = true
+adjustment_brightness = 1.04
+adjustment_contrast = 1.05
+adjustment_saturation = 1.02
+
 [node name="CarDriveDebug" type="Node3D" unique_id=938466864]
 script = ExtResource("1_car_debug")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1412956690]
+environment = SubResource("Environment_car_debug")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=906559211]
+transform = Transform3D(0.819152, -0.329869, 0.469846, 0, 0.819152, 0.573576, -0.573576, -0.469846, 0.67101, 0, 0, 0)
+light_color = Color(1, 0.96, 0.84, 1)
+light_energy = 8.0
+shadow_enabled = true
+directional_shadow_mode = 0
+
+[node name="FillLight" type="OmniLight3D" parent="." unique_id=263555637]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 4, 5)
+light_color = Color(0.62, 0.74, 0.82, 1)
+light_energy = 0.85
+omni_range = 16.0
+shadow_enabled = false

@@ -99,6 +99,7 @@ func resolve_car(car_id: String) -> Dictionary:
 		"geometry": geometry,
 		"dashboard": dashboard,
 		"cars_dir": cars_dir,
+		"globalb": _resolve_global_file("GLOBALB"),
 		"texture_car": cars_dir.path_join("TEXTURES.BIN"),
 	}
 
@@ -130,6 +131,22 @@ func _resolve_cars_dir(root: String) -> String:
 				return candidate
 			if DirAccess.dir_exists_absolute(candidate.path_join("CARS")):
 				return candidate.path_join("CARS")
+	return ""
+
+
+func _resolve_global_file(base_name: String) -> String:
+	var candidates := [
+		root_path.path_join("ZZDATA").path_join("GLOBAL"),
+		root_path.path_join("GLOBAL"),
+		root_path,
+	]
+	for dir_path in candidates:
+		if not DirAccess.dir_exists_absolute(dir_path):
+			continue
+		for extension in ["BUN", "LZC"]:
+			var path: String = dir_path.path_join("%s.%s" % [base_name, extension])
+			if _file_has_data(path):
+				return path
 	return ""
 
 

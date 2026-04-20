@@ -6,6 +6,10 @@ static func ps2_to_godot_vec3(value: Vector3) -> Vector3:
 	return Vector3(value.x, value.z, -value.y)
 
 
+static func hp2_car_to_godot_vec3(value: Vector3) -> Vector3:
+	return Vector3(value.y, value.z, -value.x)
+
+
 static func transform_point_rows(point: Vector3, matrix_rows: Array) -> Vector3:
 	if matrix_rows.size() < 4:
 		return point
@@ -36,6 +40,22 @@ static func ps2_rows_to_godot_transform(matrix_rows: Array) -> Transform3D:
 		Vector3(-float(r1[0]), -float(r1[2]), float(r1[1]))
 	)
 	var origin := Vector3(float(r3[0]), float(r3[2]), -float(r3[1]))
+	return Transform3D(basis, origin)
+
+
+static func hp2_car_rows_to_godot_transform(matrix_rows: Array) -> Transform3D:
+	if matrix_rows.size() < 4:
+		return Transform3D.IDENTITY
+	var r0: Array = matrix_rows[0]
+	var r1: Array = matrix_rows[1]
+	var r2: Array = matrix_rows[2]
+	var r3: Array = matrix_rows[3]
+	var basis := Basis(
+		Vector3(float(r1[1]), float(r1[2]), -float(r1[0])),
+		Vector3(float(r2[1]), float(r2[2]), -float(r2[0])),
+		Vector3(-float(r0[1]), -float(r0[2]), float(r0[0]))
+	)
+	var origin := hp2_car_to_godot_vec3(Vector3(float(r3[0]), float(r3[1]), float(r3[2])))
 	return Transform3D(basis, origin)
 
 

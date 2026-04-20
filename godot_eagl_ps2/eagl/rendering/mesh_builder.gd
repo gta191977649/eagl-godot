@@ -17,6 +17,10 @@ var texture_filter_mode := "linear_mipmap":
 	set(value):
 		texture_filter_mode = value
 		material_builder.texture_filter_mode = value
+var material_library := {}:
+	set(value):
+		material_library = value
+		material_builder.material_library = value
 var generate_lods := true
 var skipped: Dictionary = {}
 var warnings: Array[String] = []
@@ -33,6 +37,7 @@ func reset() -> void:
 	material_builder.clear()
 	material_builder.texture_bank = texture_bank
 	material_builder.texture_filter_mode = texture_filter_mode
+	material_builder.material_library = material_library
 	skipped.clear()
 	warnings.clear()
 	textured_surfaces = 0
@@ -152,7 +157,7 @@ func _transformed_vertices(obj: Dictionary, block: Dictionary, apply_object_tran
 func _object_vertex_to_godot(obj: Dictionary, value: Vector3) -> Vector3:
 	var coordinate_space := String(obj.get("coordinate_space", "ps2_world_z_up"))
 	if coordinate_space == "hp2_car_local_x_forward_z_up":
-		return Vector3(value.y, value.z, -value.x)
+		return MathUtils.hp2_car_to_godot_vec3(value)
 	return MathUtils.ps2_to_godot_vec3(value)
 
 
@@ -352,6 +357,8 @@ func _texture_hash_for_block(obj: Dictionary, block_index: int) -> int:
 func _resolve_texture_hash_alias(obj: Dictionary, texture_hash: int) -> int:
 	if texture_hash == 0:
 		return 0
+	if texture_bank != null and texture_bank.has_texture(texture_hash):
+		return texture_hash
 	var aliases: Dictionary = obj.get("texture_hash_aliases", {})
 	if aliases.is_empty():
 		return texture_hash

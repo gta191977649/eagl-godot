@@ -13,6 +13,7 @@ var warnings: Array[String] = []
 func build_car_scene(asset, options: Dictionary = {}) -> Node3D:
 	mesh_builder.texture_bank = asset.texture_bank
 	mesh_builder.texture_filter_mode = String(options.get("texture_filter_mode", "linear_mipmap"))
+	mesh_builder.material_library = asset.material_library
 	mesh_builder.generate_lods = bool(options.get("generate_lods", true))
 	mesh_builder.reset()
 	skipped.clear()
@@ -94,6 +95,7 @@ func build_car_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_texture_ref_count", asset.texture_ref_count())
 	root.set_meta("eagl_texture_count", asset.texture_bank.decoded_count if asset.texture_bank != null else 0)
 	root.set_meta("eagl_locator_count", asset.locators.size())
+	root.set_meta("eagl_locators", asset.locators.duplicate(true))
 	root.set_meta("eagl_part_groups", asset.part_groups.duplicate(true))
 	root.set_meta("eagl_bounds", bounds)
 	root.set_meta("eagl_skipped", skipped.duplicate(true))
@@ -140,7 +142,7 @@ func _add_object_node(group_roots: Dictionary, obj: Dictionary) -> bool:
 	node.mesh = mesh_node.mesh
 	for surface_index in range(mesh_node.mesh.get_surface_count()):
 		node.set_surface_override_material(surface_index, mesh_node.get_surface_override_material(surface_index))
-	node.transform = MathUtils.ps2_rows_to_godot_transform(obj.get("transform", []))
+	node.transform = MathUtils.hp2_car_rows_to_godot_transform(obj.get("transform", []))
 	node.set_meta("eagl_object_name", object_name)
 	node.set_meta("eagl_chunk_offset", obj.get("chunk_offset", 0))
 	node.set_meta("eagl_solid_pack_index", obj.get("solid_pack_index", -1))
@@ -216,9 +218,7 @@ func _add_wheel_instance(group_roots: Dictionary, obj: Dictionary, slot: Diction
 
 	var node := _mesh_instance_from_source(mesh_node, "Mesh")
 	var mesh_bounds := node.get_aabb()
-	node.position = -(mesh_bounds.position + mesh_bounds.size * 0.5)
-	if bool(slot.get("is_right", String(slot.get("side", "")) == "right")):
-		node.scale.x = -1.0
+	_orient_runtime_mesh(node, slot, mesh_bounds)
 	node.set_meta("eagl_runtime_part", "wheel_mesh")
 	node.set_meta("eagl_wheel_slot_id", slot_id)
 	spin_pivot.add_child(node)
@@ -277,9 +277,7 @@ func _add_brake_instance(group_roots: Dictionary, obj: Dictionary, slot: Diction
 
 	var node := _mesh_instance_from_source(mesh_node, "Mesh")
 	var mesh_bounds := node.get_aabb()
-	node.position = -(mesh_bounds.position + mesh_bounds.size * 0.5)
-	if bool(slot.get("is_right", String(slot.get("side", "")) == "right")):
-		node.scale.x = -1.0
+	_orient_runtime_mesh(node, slot, mesh_bounds)
 	node.set_meta("eagl_runtime_part", "brake_mesh")
 	node.set_meta("eagl_wheel_slot_id", slot_id)
 	steer_pivot.add_child(node)
@@ -339,6 +337,17 @@ func _mesh_instance_from_source(mesh_node: MeshInstance3D, node_name: String) ->
 	return node
 
 
+func _orient_runtime_mesh(node: MeshInstance3D, slot: Dictionary, mesh_bounds: AABB) -> void:
+	var side := String(slot.get("side", "")).to_lower()
+	var rotate_outer_face := side == "left"
+	node.rotation.y = -PI if rotate_outer_face else 0.0
+	node.scale = Vector3.ONE
+	var mesh_center := mesh_bounds.position + mesh_bounds.size * 0.5
+	node.position = -(node.transform.basis * mesh_center)
+	node.set_meta("eagl_runtime_mesh_outer_face_rotation_y", node.rotation.y)
+	node.set_meta("eagl_runtime_mesh_center_offset", node.position)
+
+
 func _slot_id(slot: Dictionary) -> String:
 	var existing := String(slot.get("slot_id", ""))
 	if existing != "":
@@ -395,20 +404,31 @@ func _assembled_instance_count(visual_root: Node, variant_role: String) -> int:
 
 
 func _node_bounds(root: Node) -> AABB:
+	var result := _node_bounds_recursive(root, Transform3D.IDENTITY)
+	return result.get("bounds", AABB()) if bool(result.get("has_bounds", false)) else AABB()
+
+
+func _node_bounds_recursive(node: Node, parent_transform: Transform3D) -> Dictionary:
+	var node_transform := parent_transform
+	if node is Node3D:
+		node_transform = parent_transform * (node as Node3D).transform
 	var has_bounds := false
 	var bounds := AABB()
-	for child in root.find_children("*", "VisualInstance3D", true, false):
-		var visual := child as VisualInstance3D
-		if visual == null:
+	if node is VisualInstance3D:
+		var visual := node as VisualInstance3D
+		bounds = node_transform * visual.get_aabb()
+		has_bounds = true
+	for child in node.get_children():
+		var child_result := _node_bounds_recursive(child, node_transform)
+		if not bool(child_result.get("has_bounds", false)):
 			continue
-		var aabb := visual.get_aabb()
-		var transformed := visual.transform * aabb
+		var child_bounds: AABB = child_result["bounds"]
 		if not has_bounds:
-			bounds = transformed
+			bounds = child_bounds
 			has_bounds = true
 		else:
-			bounds = bounds.merge(transformed)
-	return bounds if has_bounds else AABB()
+			bounds = bounds.merge(child_bounds)
+	return {"has_bounds": has_bounds, "bounds": bounds}
 
 
 func _safe_node_name(value: String) -> String:

@@ -27,6 +27,9 @@ func load_paths(paths: Array[String]) -> void:
 
 func load_for_car(files: Dictionary) -> void:
 	var paths: Array[String] = []
+	var global_path: String = files.get("globalb", "")
+	if global_path != "":
+		paths.append(global_path)
 	var texture_path: String = files.get("texture_car", "")
 	if texture_path != "":
 		paths.append(texture_path)

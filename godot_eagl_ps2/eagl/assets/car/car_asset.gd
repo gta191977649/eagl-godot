@@ -15,6 +15,7 @@ var handling_data: Dictionary = {}
 var wheel_slots: Array[Dictionary] = []
 var brake_slots: Array[Dictionary] = []
 var runtime_parts: Dictionary = {}
+var material_library: Dictionary = {}
 var missing_texture_hashes: Array[int] = []
 var missing_texture_surfaces: Array[Dictionary] = []
 var exact_handling_status := "unknown"
@@ -77,6 +78,7 @@ func summary() -> Dictionary:
 		"wheel_slot_count": wheel_slots.size(),
 		"wheel_slot_source": wheel_slot_source,
 		"runtime_part_counts": runtime_parts.get("counts", {}).duplicate(true),
+		"material_record_count": material_library.size(),
 		"missing_texture_hash_count": missing_texture_hashes.size(),
 		"missing_texture_hashes": missing_texture_hashes.duplicate(),
 		"missing_texture_surface_count": missing_texture_surfaces.size(),
