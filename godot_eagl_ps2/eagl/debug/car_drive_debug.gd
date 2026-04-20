@@ -11,8 +11,6 @@ var _status_label: Label
 var _stats_label: Label
 var _camera_label: Label
 var _debug_camera: Camera3D
-var _drive_toggle: CheckButton
-var _free_drive_toggle: CheckButton
 var _all_variants_toggle: CheckButton
 var _assembly_debug_toggle: CheckButton
 var _dummy_label_mode_button: OptionButton
@@ -310,16 +308,6 @@ func _ensure_ui() -> void:
 	frame.text = "Frame"
 	frame.pressed.connect(_frame_car)
 	top.add_child(frame)
-	_drive_toggle = CheckButton.new()
-	_drive_toggle.text = "Drive"
-	_drive_toggle.button_pressed = true
-	_drive_toggle.toggled.connect(func(_pressed: bool) -> void: _apply_debug_toggles())
-	top.add_child(_drive_toggle)
-	_free_drive_toggle = CheckButton.new()
-	_free_drive_toggle.text = "Free drive"
-	_free_drive_toggle.button_pressed = true
-	_free_drive_toggle.toggled.connect(func(_pressed: bool) -> void: _apply_debug_toggles())
-	top.add_child(_free_drive_toggle)
 	_all_variants_toggle = CheckButton.new()
 	_all_variants_toggle.text = "All variants"
 	_all_variants_toggle.button_pressed = false
@@ -395,21 +383,41 @@ func _update_debug_labels() -> void:
 	var warnings: Array = EAGLManager.get_stats().get("car", {}).get("warnings", [])
 	var bounds: AABB = _car_root.get_meta("eagl_bounds", AABB())
 	var offset: Vector3 = _car_root.get_meta("eagl_visual_offset", Vector3.ZERO)
-	var free_drive_enabled := bool(state.get("debug_free_drive", false))
-	var drive_mode := "free drive" if free_drive_enabled else "vehicle"
-	var control_hint := "W/S forward/back, A/D strafe, Q/E rotate, Shift boost, mouse orbit, P pivots, L labels, R reset, F frame camera" if free_drive_enabled else "W/S throttle/brake, A/D steer, Space handbrake, mouse orbit, P pivots, L labels, R reset, F frame camera"
-	_stats_label.text = "Car: %s\nSpeed: %.1f km/h  Mode: %s  Drive: %s  Grounded: %s  Slip: %.2f\nLocal: %.2f forward / %.2f side  Yaw: %.3f  Steer: %.2f (%.2f rad)\nObjects: %s rendered / %s parsed / %s hidden  Wheels: %s  Brakes: %s  Pivots: %s spin / %s steer\nTextures: %s bank / %s textured surfaces / %s fallback / %s missing hashes  Locators: %s\nBounds: %.2f x %.2f x %.2f  Visual offset: %.2f, %.2f, %.2f\nGeometry: %s  Tuning: %s (%s)  Exact: %s\nWarnings: %s\nDebug pivots: %s  Dummy labels: %s  Legend: slot yellow, steer cyan, spin magenta, mesh white, brake orange, dummies violet\nControls: %s" % [
+	var control_hint := "W/S throttle/brake, A/D steer, Space handbrake, mouse orbit, P pivots, L labels, R reset, F frame camera"
+	_stats_label.text = "Car: %s\nSpeed: %.1f km/h  Mode: %s  Grounded: %s  Slip: %.2f\nEngine: gear %s/%s  %.0f rpm  clutch %.2f  %s  ratio %.2f x %.2f  shift %.0f rpm %.0f/%.0f kmh\nInput: throttle %.2f -> %.2f  reverse %.2f  brake %.2f  torque %.0f engine / %.0f wheel  engine brake %.0f\nLocal: %.2f forward / %.2f side  Yaw: %.3f  Steer: %.2f (%.2f rad)\nForces: drive %.0f  brake %.0f  lateral %.0f  drag %.0f  normal %.0f  suspension %.0f\nObjects: %s rendered / %s parsed / %s hidden  Wheels: %s  Brakes: %s  Pivots: %s spin / %s steer\nTextures: %s bank / %s textured surfaces / %s fallback / %s missing hashes  Locators: %s\nBounds: %.2f x %.2f x %.2f  Visual offset: %.2f, %.2f, %.2f\nGeometry: %s  Tuning: %s (%s)  Exact: %s\nWarnings: %s\nDebug pivots: %s  Dummy labels: %s  Legend: slot yellow, steer cyan, spin magenta, mesh white, brake orange, dummies violet\nControls: %s" % [
 		_car_root.get_meta("eagl_car_id", ""),
 		float(state.get("speed_kmh", 0.0)),
 		state.get("movement_mode", "coast"),
-		drive_mode,
 		str(state.get("grounded", false)),
 		float(state.get("slip", 0.0)),
+		state.get("gear_label", "1"),
+		state.get("gear_count", 5),
+		float(state.get("engine_rpm", 0.0)),
+		float(state.get("clutch_engagement", 1.0)),
+		state.get("drivetrain_mode", "coast"),
+		float(state.get("gear_ratio", 0.0)),
+		float(state.get("final_drive_ratio", 0.0)),
+		float(state.get("shift_up_rpm", 0.0)),
+		float(state.get("shift_down_speed", 0.0)) * 3.6,
+		float(state.get("shift_up_speed", 0.0)) * 3.6,
+		float(state.get("throttle", 0.0)),
+		float(state.get("filtered_throttle", 0.0)),
+		float(state.get("filtered_reverse_throttle", 0.0)),
+		float(state.get("brake", 0.0)),
+		float(state.get("engine_torque", 0.0)),
+		float(state.get("wheel_torque", 0.0)),
+		float(state.get("engine_brake_force", 0.0)),
 		float(state.get("longitudinal_speed", 0.0)),
 		float(state.get("lateral_speed", 0.0)),
 		float(state.get("yaw_rate", 0.0)),
 		float(state.get("steer", 0.0)),
 		float(state.get("steering_angle", 0.0)),
+		float(state.get("drive_force", 0.0)),
+		float(state.get("brake_force", 0.0)),
+		float(state.get("lateral_force", 0.0)),
+		float(state.get("drag_force", 0.0)),
+		float(state.get("normal_force", 0.0)),
+		float(state.get("suspension_force", 0.0)),
 		_car_root.get_meta("eagl_rendered_object_count", 0),
 		_car_root.get_meta("eagl_object_count", 0),
 		_car_root.get_meta("eagl_hidden_variant_count", 0),
@@ -455,10 +463,9 @@ func _cars_dir() -> String:
 
 
 func _apply_debug_toggles() -> void:
-	if _controller != null and _drive_toggle != null:
-		_controller.enabled = _drive_toggle.button_pressed
-		if _free_drive_toggle != null:
-			_controller.debug_free_drive = _free_drive_toggle.button_pressed
+	if _controller != null:
+		_controller.enabled = true
+		_controller.debug_free_drive = false
 	if _car_root == null:
 		return
 	var visual := _car_root.get_node_or_null("Visual")

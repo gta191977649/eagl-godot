@@ -25,6 +25,7 @@ func build_car_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_car_id", asset.car_id)
 	root.set_meta("eagl_source_path", asset.source_path)
 	root.set_meta("eagl_physics_tuning", asset.physics_tuning.duplicate(true))
+	root.set_meta("eagl_handling_data", asset.handling_data.duplicate(true))
 
 	var visual_root := Node3D.new()
 	visual_root.name = "Visual"

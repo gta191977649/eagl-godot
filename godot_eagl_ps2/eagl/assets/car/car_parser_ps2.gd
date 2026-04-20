@@ -21,6 +21,60 @@ const HP2_GLOBALB_WHEEL_VECTOR_OFFSETS := {
 	"RR": 0x160,
 	"RL": 0x180,
 }
+const HP2_GLOBALB_MAX_ROWS := 64
+const HP2_GLOBALB_VERIFIED_OFFSETS := {
+	"name": 0x20,
+	"wheel_fl": 0x120,
+	"wheel_fr": 0x140,
+	"wheel_rr": 0x160,
+	"wheel_rl": 0x180,
+	"vehicle_type": 0x538,
+}
+const HP2_GLOBALB_INFERRED_FLOAT_OFFSETS := {
+	"body_center_x": 0x0F0,
+	"body_center_y": 0x0F4,
+	"body_center_z": 0x0F8,
+	"front_suspension_travel": 0x1AC,
+	"front_suspension_rest": 0x1B0,
+	"rear_suspension_travel": 0x1CC,
+	"rear_suspension_rest": 0x1D0,
+	"body_length": 0x1E4,
+	"body_width": 0x1E8,
+	"body_height": 0x1EC,
+	"aero_reference": 0x1F0,
+	"front_tire_stiffness": 0x230,
+	"front_tire_grip": 0x234,
+	"front_brake_bias": 0x238,
+	"front_lateral_grip": 0x23C,
+	"front_longitudinal_grip": 0x240,
+	"rear_tire_stiffness": 0x250,
+	"rear_tire_grip": 0x254,
+	"rear_brake_bias": 0x258,
+	"rear_lateral_grip": 0x25C,
+	"rear_longitudinal_grip": 0x260,
+	"steering_response": 0x278,
+	"steering_return": 0x27C,
+	"steering_lock_scale": 0x280,
+	"rolling_resistance": 0x284,
+	"final_drive_ratio": 0x28C,
+	"reverse_gear_ratio": 0x290,
+	"neutral_gear_ratio": 0x294,
+	"gear_ratio_1": 0x298,
+	"gear_ratio_2": 0x29C,
+	"gear_ratio_3": 0x2A0,
+	"gear_ratio_4": 0x2A4,
+	"gear_ratio_5": 0x2A8,
+	"gear_ratio_6": 0x2AC,
+	"mass": 0x2B0,
+	"engine_peak_rpm": 0x2B4,
+	"engine_redline_rpm": 0x2B8,
+	"aero_drag": 0x2BC,
+}
+const HP2_GLOBALB_INFERRED_INT_OFFSETS := {
+	"gear_count": 0x288,
+}
+const HP2_GLOBALB_TIRE_CURVE_FRONT_OFFSETS := [0x2C0, 0x2C4, 0x2C8, 0x2CC, 0x2D0, 0x2D4, 0x2D8, 0x2DC, 0x2E0]
+const HP2_GLOBALB_TIRE_CURVE_REAR_OFFSETS := [0x2E4, 0x2E8, 0x2EC, 0x2F0, 0x2F4, 0x2F8]
 const HP2_TIRE_DUMMY_SOURCE := "geometry_metadata_0x00034013_runtime_tire_dummies"
 const HP2_TIRE_DUMMY_FRONT_LEFT := 0xACEC665C
 const HP2_TIRE_DUMMY_FRONT_RIGHT := 0x4AE7F96F
@@ -88,8 +142,9 @@ func parse(files: Dictionary):
 		locator_wheel_slots,
 		bounds_wheel_slots,
 	])
-	var runtime_wheel_slots := _parse_globalb_runtime_wheel_slots(files, asset.car_id)
-	_apply_hp2_car_data(asset, fallback_wheel_slots, runtime_wheel_slots)
+	var globalb_row := _parse_globalb_handling_row(files, asset.car_id)
+	var runtime_wheel_slots: Array[Dictionary] = _typed_dictionary_array(globalb_row.get("wheel_slots", []))
+	_apply_hp2_car_data(asset, fallback_wheel_slots, runtime_wheel_slots, globalb_row)
 	asset.unknown_chunks.append_array(_collect_unknown_chunks(chunks))
 
 	var dashboard_path: String = files.get("dashboard", "")
@@ -115,8 +170,8 @@ func parse(files: Dictionary):
 	return asset
 
 
-func _apply_hp2_car_data(asset, fallback_wheel_slots: Array[Dictionary], runtime_wheel_slots: Array[Dictionary]) -> void:
-	asset.handling_data = _hp2_car_data.data_for_car(asset.car_id, fallback_wheel_slots, runtime_wheel_slots)
+func _apply_hp2_car_data(asset, fallback_wheel_slots: Array[Dictionary], runtime_wheel_slots: Array[Dictionary], globalb_row: Dictionary = {}) -> void:
+	asset.handling_data = _hp2_car_data.data_for_car(asset.car_id, fallback_wheel_slots, runtime_wheel_slots, globalb_row)
 	asset.physics_tuning = asset.handling_data.get("handling", _default_physics_tuning(asset.car_id)).duplicate(true)
 	asset.exact_handling_status = String(asset.handling_data.get("exact_handling_status", "partial_reverse_estimated_constants"))
 	asset.wheel_slots = _typed_dictionary_array(asset.handling_data.get("wheel_slots", []))
@@ -128,6 +183,7 @@ func _apply_hp2_car_data(asset, fallback_wheel_slots: Array[Dictionary], runtime
 	asset.metadata["exact_handling_status"] = asset.exact_handling_status
 	asset.metadata["hp2_reverse_facts"] = asset.handling_data.get("reverse_facts", {}).duplicate(true)
 	asset.metadata["runtime_wheel_slots"] = runtime_wheel_slots.duplicate(true)
+	asset.metadata["globalb_handling_row"] = globalb_row.duplicate(true)
 
 
 func _typed_dictionary_array(value: Array) -> Array[Dictionary]:
@@ -257,29 +313,28 @@ func _parse_locator_records(chunks: Array[Dictionary], bundle: PackedByteArray) 
 	return out
 
 
-func _parse_globalb_runtime_wheel_slots(files: Dictionary, car_id: String) -> Array[Dictionary]:
+func _parse_globalb_handling_row(files: Dictionary, car_id: String) -> Dictionary:
 	var globalb_path := String(files.get("globalb", ""))
 	if globalb_path == "" or not FileAccess.file_exists(globalb_path):
-		return []
+		return {}
 	var bundle := Binary.load_bundle_bytes(globalb_path)
 	if bundle.is_empty():
-		return []
+		return {}
 	var chunks: Array[Dictionary] = _track_parser._parse_chunks(bundle)
 	var chunk := _first_chunk(chunks, CHUNK_GLOBAL_CAR_TABLE)
 	if chunk.is_empty():
-		return []
+		return {}
 	var table_base := (int(chunk.get("offset", 0)) + 0x17) & ~0xF
 	var table_end := int(chunk.get("end_offset", bundle.size()))
 	var car_row := -1
-	for row_index in range(64):
+	var row_count := _globalb_row_count(bundle, table_base, table_end)
+	for row_index in range(row_count):
 		var row_offset := table_base + row_index * HP2_GLOBALB_ROW_STRIDE
-		if row_offset + HP2_GLOBALB_ROW_STRIDE > table_end:
-			break
 		if _globalb_car_name(bundle, row_offset) == car_id.to_upper():
 			car_row = row_index
 			break
 	if car_row < 0:
-		return []
+		return {}
 	var row_base := table_base + car_row * HP2_GLOBALB_ROW_STRIDE
 	var out: Array[Dictionary] = []
 	for slot_id in ["FL", "FR", "RL", "RR"]:
@@ -306,9 +361,141 @@ func _parse_globalb_runtime_wheel_slots(files: Dictionary, car_id: String) -> Ar
 			"runtime_table_chunk_offset": int(chunk.get("offset", -1)),
 			"runtime_table_row_offset": row_base,
 			"runtime_vector_offset": vector_offset,
-			"runtime_source_function": "FUN_0011e860",
+			"runtime_source_function": "HP2_CarRenderPhysicsAttachmentSetup_FUN_0011e860",
 		})
+	var row := {
+		"schema": "hp2_globalb_car_row_0x560",
+		"source": "GLOBAL/GLOBALB.BUN chunk 0x00034600",
+		"source_path": globalb_path,
+		"chunk_offset": int(chunk.get("offset", -1)),
+		"chunk_end_offset": int(chunk.get("end_offset", -1)),
+		"table_base": table_base,
+		"table_end": table_end,
+		"row_stride": HP2_GLOBALB_ROW_STRIDE,
+		"row_count": row_count,
+		"row_index": car_row,
+		"row_offset": row_base,
+		"car_id": car_id.to_upper(),
+		"name": _globalb_field(_globalb_car_name(bundle, row_base), 0x20, "verified", "HP2_CarRenderPhysicsAttachmentSetup_FUN_0011e860 row lookup"),
+		"vehicle_type": _globalb_field(Binary.u32(bundle, row_base + 0x538), 0x538, "verified", "HP2_CarRenderPhysicsAttachmentSetup_FUN_0011e860 checks row+0x538 for variant assembly"),
+		"wheel_slots": out,
+		"verified_offsets": HP2_GLOBALB_VERIFIED_OFFSETS.duplicate(true),
+		"inferred_float_fields": _globalb_inferred_float_fields(bundle, row_base),
+		"raw_float_fields": _globalb_raw_float_fields(bundle, row_base),
+		"tire_curve_front": _globalb_curve_fields(bundle, row_base, HP2_GLOBALB_TIRE_CURVE_FRONT_OFFSETS),
+		"tire_curve_rear": _globalb_curve_fields(bundle, row_base, HP2_GLOBALB_TIRE_CURVE_REAR_OFFSETS),
+		"decode_status": "globalb_row_verified_layout_inferred_physics_fields",
+	}
+	row["vehicle_dimensions"] = _globalb_vehicle_dimensions(out, row)
+	return row
+
+
+func _parse_globalb_runtime_wheel_slots(files: Dictionary, car_id: String) -> Array[Dictionary]:
+	return _typed_dictionary_array(_parse_globalb_handling_row(files, car_id).get("wheel_slots", []))
+
+
+func _globalb_row_count(bundle: PackedByteArray, table_base: int, table_end: int) -> int:
+	var count := 0
+	for row_index in range(HP2_GLOBALB_MAX_ROWS):
+		var row_offset := table_base + row_index * HP2_GLOBALB_ROW_STRIDE
+		if row_offset + HP2_GLOBALB_ROW_STRIDE > table_end:
+			break
+		count += 1
+	return count
+
+
+func _globalb_field(value, offset: int, confidence: String, note: String = "") -> Dictionary:
+	return {
+		"value": value,
+		"offset": offset,
+		"offset_hex": "0x%03X" % offset,
+		"source": "GLOBAL/GLOBALB.BUN chunk 0x00034600 row + offset",
+		"confidence": confidence,
+		"note": note,
+	}
+
+
+func _globalb_inferred_float_fields(bundle: PackedByteArray, row_base: int) -> Dictionary:
+	var out := {}
+	for name in HP2_GLOBALB_INFERRED_FLOAT_OFFSETS.keys():
+		var offset := int(HP2_GLOBALB_INFERRED_FLOAT_OFFSETS[name])
+		out[name] = _globalb_field(Binary.f32(bundle, row_base + offset), offset, "inferred", "Decoded from stable GLOBALB row float cluster; formula not yet proven in Ghidra")
+	for name in HP2_GLOBALB_INFERRED_INT_OFFSETS.keys():
+		var offset := int(HP2_GLOBALB_INFERRED_INT_OFFSETS[name])
+		out[name] = _globalb_field(Binary.u32(bundle, row_base + offset), offset, "inferred", "Decoded as integer from drivetrain cluster; HP2_BuildAccelerationOrShiftCurve_FUN_00188df0 reads row+0x288 as the gear loop count")
 	return out
+
+
+func _globalb_raw_float_fields(bundle: PackedByteArray, row_base: int) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for offset in range(0, HP2_GLOBALB_ROW_STRIDE, 4):
+		var value := Binary.f32(bundle, row_base + offset)
+		if not is_finite(value):
+			continue
+		if absf(value) <= 0.000001 or absf(value) >= 100000.0:
+			continue
+		out.append(_globalb_field(value, offset, "unknown", "Finite float in 0x560 row; retained for reverse comparison"))
+	return out
+
+
+func _globalb_curve_fields(bundle: PackedByteArray, row_base: int, offsets: Array) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for offset_value in offsets:
+		var offset := int(offset_value)
+		out.append(_globalb_field(Binary.f32(bundle, row_base + offset), offset, "inferred", "Curve-like contiguous float cluster; tire/slip use not yet proven"))
+	return out
+
+
+func _globalb_vehicle_dimensions(wheel_slots: Array[Dictionary], row: Dictionary) -> Dictionary:
+	var by_id := {}
+	for slot in wheel_slots:
+		var dict: Dictionary = slot
+		by_id[String(dict.get("slot_id", ""))] = dict
+	if not (by_id.has("FL") and by_id.has("FR") and by_id.has("RL") and by_id.has("RR")):
+		return {}
+	var fl: Vector3 = by_id["FL"].get("position_ps2", Vector3.ZERO)
+	var fr: Vector3 = by_id["FR"].get("position_ps2", Vector3.ZERO)
+	var rl: Vector3 = by_id["RL"].get("position_ps2", Vector3.ZERO)
+	var rr: Vector3 = by_id["RR"].get("position_ps2", Vector3.ZERO)
+	var front_center := (fl + fr) * 0.5
+	var rear_center := (rl + rr) * 0.5
+	var center := (front_center + rear_center) * 0.5
+	var source_offsets := [0x120, 0x140, 0x160, 0x180]
+	var inferred_fields: Dictionary = row.get("inferred_float_fields", {})
+	return {
+		"wheelbase": _derived_globalb_field(absf(front_center.x - rear_center.x), source_offsets, "verified", "Derived directly from verified wheel vector offsets"),
+		"front_track": _derived_globalb_field(absf(fl.y - fr.y), source_offsets, "verified", "Derived directly from verified front wheel vector offsets"),
+		"rear_track": _derived_globalb_field(absf(rl.y - rr.y), source_offsets, "verified", "Derived directly from verified rear wheel vector offsets"),
+		"front_axle_center_ps2": _derived_globalb_field(front_center, source_offsets, "verified", "Average of verified FL/FR wheel vectors"),
+		"rear_axle_center_ps2": _derived_globalb_field(rear_center, source_offsets, "verified", "Average of verified RL/RR wheel vectors"),
+		"wheel_center_ps2": _derived_globalb_field(center, source_offsets, "verified", "Average of verified axle centers"),
+		"body_center_hint_ps2": _derived_globalb_field(Vector3(
+			_float_field_value(inferred_fields, "body_center_x", center.x),
+			_float_field_value(inferred_fields, "body_center_y", center.y),
+			_float_field_value(inferred_fields, "body_center_z", center.z)
+		), [0x0F0, 0x0F4, 0x0F8], "inferred", "Decoded body center hint; exact runtime use not yet proven"),
+	}
+
+
+func _derived_globalb_field(value, offsets: Array, confidence: String, note: String) -> Dictionary:
+	var offset_hexes: Array[String] = []
+	for offset in offsets:
+		offset_hexes.append("0x%03X" % int(offset))
+	return {
+		"value": value,
+		"offsets": offsets.duplicate(),
+		"offset_hex": offset_hexes,
+		"source": "GLOBAL/GLOBALB.BUN chunk 0x00034600 derived row data",
+		"confidence": confidence,
+		"note": note,
+	}
+
+
+func _float_field_value(fields: Dictionary, name: String, fallback: float) -> float:
+	if not fields.has(name):
+		return fallback
+	var field: Dictionary = fields[name]
+	return float(field.get("value", fallback))
 
 
 func _globalb_car_name(bundle: PackedByteArray, row_offset: int) -> String:
@@ -610,7 +797,7 @@ func _infer_wheel_slots_from_runtime_dummies(locators: Array[Dictionary]) -> Arr
 			"dummy_locator_count": matches.size(),
 			"dummy_hashes": hashes,
 			"dummy_locator_positions_ps2": positions,
-			"runtime_source_function": "FUN_00120360",
+			"runtime_source_function": "HP2_AttachedPartLocatorScan_FUN_00120360",
 			"runtime_source_hash_group": "front_tire" if String(spec["axle"]) == "front" else "rear_tire",
 		})
 	return out

@@ -74,6 +74,8 @@ func _validate_asset(car_id: String, asset) -> bool:
 	if String(asset.summary().get("exact_handling_status", "")) == "":
 		ok = false
 		push_error("VALIDATION %s expected handling status metadata" % car_id)
+	if not _validate_globalb_handling_asset(car_id, asset):
+		ok = false
 	if ok:
 		print("VALIDATION car %s objects=%d dashboard=%s blocks=%d vertices=%d texture_refs=%d textures=%s locators=%s slots=%s slot_source=%s handling=%s" % [
 			car_id,
@@ -173,6 +175,78 @@ func _validate_scene(car_id: String, scene: Node) -> bool:
 			part_groups.keys(),
 		])
 	return ok
+
+
+func _validate_globalb_handling_asset(car_id: String, asset) -> bool:
+	var ok := true
+	var handling: Dictionary = asset.summary().get("handling_data", {})
+	var row: Dictionary = handling.get("globalb_row", {})
+	if row.is_empty():
+		push_error("VALIDATION %s expected decoded GLOBALB handling row" % car_id)
+		return false
+	if int(row.get("row_stride", 0)) != 0x560:
+		ok = false
+		push_error("VALIDATION %s GLOBALB row stride mismatch: %s" % [car_id, row.get("row_stride", 0)])
+	if int(row.get("row_count", 0)) != 64:
+		ok = false
+		push_error("VALIDATION %s expected 64 GLOBALB rows, got %s" % [car_id, row.get("row_count", 0)])
+	if String(row.get("schema", "")) != "hp2_globalb_car_row_0x560":
+		ok = false
+		push_error("VALIDATION %s unexpected GLOBALB schema: %s" % [car_id, row.get("schema", "")])
+	if String(handling.get("exact_handling_status", "")).find("globalb_row") < 0:
+		ok = false
+		push_error("VALIDATION %s expected globalb row handling status, got %s" % [car_id, handling.get("exact_handling_status", "")])
+	var name_field: Dictionary = row.get("name", {})
+	if String(name_field.get("confidence", "")) != "verified" or int(name_field.get("offset", -1)) != 0x20:
+		ok = false
+		push_error("VALIDATION %s GLOBALB name field missing verified offset metadata" % car_id)
+	var vehicle_type: Dictionary = row.get("vehicle_type", {})
+	if String(vehicle_type.get("confidence", "")) != "verified" or int(vehicle_type.get("offset", -1)) != 0x538:
+		ok = false
+		push_error("VALIDATION %s GLOBALB vehicle_type missing verified offset metadata" % car_id)
+	var fields: Dictionary = row.get("inferred_float_fields", {})
+	for required in ["mass", "engine_peak_rpm", "engine_redline_rpm", "aero_drag", "steering_response", "gear_count", "final_drive_ratio", "reverse_gear_ratio", "gear_ratio_1"]:
+		var field: Dictionary = fields.get(required, {})
+		if field.is_empty() or String(field.get("confidence", "")) == "" or int(field.get("offset", -1)) < 0:
+			ok = false
+			push_error("VALIDATION %s decoded field %s missing source/confidence metadata" % [car_id, required])
+	var dimensions: Dictionary = row.get("vehicle_dimensions", {})
+	for required in ["wheelbase", "front_track", "rear_track"]:
+		var field: Dictionary = dimensions.get(required, {})
+		if field.is_empty() or String(field.get("confidence", "")) == "":
+			ok = false
+			push_error("VALIDATION %s decoded dimension %s missing confidence metadata" % [car_id, required])
+	if car_id == "MCLAREN":
+		var slots: Array = row.get("wheel_slots", [])
+		var front_radius := _row_slot_radius(slots, "FL")
+		var rear_radius := _row_slot_radius(slots, "RL")
+		if absf(front_radius - 0.322) > 0.002:
+			ok = false
+			push_error("VALIDATION MCLAREN expected front GLOBALB radius 0.322, got %.4f" % front_radius)
+		if absf(rear_radius - 0.358) > 0.002:
+			ok = false
+			push_error("VALIDATION MCLAREN expected rear GLOBALB radius 0.358, got %.4f" % rear_radius)
+		var gear_count_field: Dictionary = fields.get("gear_count", {})
+		var final_drive_field: Dictionary = fields.get("final_drive_ratio", {})
+		var sixth_ratio_field: Dictionary = fields.get("gear_ratio_6", {})
+		if int(gear_count_field.get("value", 0)) != 6:
+			ok = false
+			push_error("VALIDATION MCLAREN expected integer gear_count 6 at row+0x288, got %s" % gear_count_field)
+		if absf(float(final_drive_field.get("value", 0.0)) - 4.0) > 0.001:
+			ok = false
+			push_error("VALIDATION MCLAREN expected drivetrain scalar/final drive 4.0 at row+0x28c, got %s" % final_drive_field)
+		if absf(float(sixth_ratio_field.get("value", 0.0)) - 0.93) > 0.002:
+			ok = false
+			push_error("VALIDATION MCLAREN expected sixth gear ratio 0.93, got %s" % sixth_ratio_field)
+	return ok
+
+
+func _row_slot_radius(slots: Array, slot_id: String) -> float:
+	for slot in slots:
+		var dict: Dictionary = slot
+		if String(dict.get("slot_id", "")) == slot_id:
+			return float(dict.get("wheel_radius", 0.0))
+	return 0.0
 
 
 func _validate_hp2_car_transform_math() -> bool:
@@ -454,6 +528,103 @@ func _validate_controller_smoke(scene: Node) -> bool:
 	controller._update_wheel_visuals(0.1)
 	if absf(first_spin.rotation.x) <= 0.001 or absf(first_steer.rotation.y) <= 0.001:
 		push_error("VALIDATION controller smoke expected spin and steer pivot movement, got spin=%.4f steer=%.4f" % [first_spin.rotation.x, first_steer.rotation.y])
+		return false
+	state = controller.debug_state()
+	var wheel_states: Dictionary = state.get("wheel_states", {})
+	if wheel_states.size() != 4:
+		push_error("VALIDATION controller expected 4 decoded wheel states, got %s" % wheel_states.keys())
+		return false
+	var ackermann: Dictionary = state.get("ackermann", {})
+	var fl_angle := absf(float(ackermann.get("FL", 0.0)))
+	var fr_angle := absf(float(ackermann.get("FR", 0.0)))
+	if fl_angle <= fr_angle:
+		push_error("VALIDATION controller Ackermann expected left/inner wheel angle > right/outer angle for left steer, got FL=%.4f FR=%.4f" % [fl_angle, fr_angle])
+		return false
+	for required in ["normal_force", "aero_force", "rolling_force", "suspension_force", "engine_rpm", "gear", "gear_ratio", "drivetrain_mode", "engine_torque", "wheel_torque", "engine_brake_force"]:
+		if not state.has(required):
+			push_error("VALIDATION controller missing force telemetry %s: %s" % [required, state])
+			return false
+	if not _validate_controller_drivetrain(controller):
+		return false
+	if not _validate_controller_tire_force_budget(controller):
+		return false
+	return true
+
+
+func _validate_controller_drivetrain(controller) -> bool:
+	controller.reset_motion()
+	controller.throttle = 1.0
+	controller.brake = 0.0
+	controller.local_longitudinal_speed = 16.0
+	controller.engine_rpm = controller._engine_redline_rpm() * 0.96
+	controller.current_gear = 1
+	controller.shift_timer = 0.0
+	controller._update_drivetrain(1.0 / 60.0)
+	if int(controller.current_gear) <= 1:
+		push_error("VALIDATION controller drivetrain expected automatic upshift near redline, got gear=%s rpm=%.1f" % [controller.current_gear, controller.engine_rpm])
+		return false
+	controller.reset_motion()
+	controller.throttle = 1.0
+	controller.current_gear = 1
+	var target_gear := mini(4, controller._gear_count())
+	for gear in range(1, target_gear):
+		controller.shift_timer = 0.0
+		controller.local_longitudinal_speed = controller._gear_upshift_speed(controller.current_gear, controller._gear_count()) + 1.0
+		controller.engine_rpm = controller._engine_peak_rpm()
+		controller._update_drivetrain(1.0 / 60.0)
+	if int(controller.current_gear) < target_gear:
+		push_error("VALIDATION controller drivetrain expected speed-window upshift to gear %d, got gear=%s" % [target_gear, controller.current_gear])
+		return false
+	controller.reset_motion()
+	controller.throttle = 0.0
+	controller.brake = 1.0
+	controller.local_longitudinal_speed = 0.0
+	controller.reverse_hold_timer = float(controller.tuning.get("reverse_hold_delay", 0.10))
+	controller._update_drivetrain(1.0 / 60.0)
+	if int(controller.current_gear) != -1:
+		push_error("VALIDATION controller drivetrain expected reverse engagement, got gear=%s mode=%s" % [controller.current_gear, controller.drivetrain_mode])
+		return false
+	var state: Dictionary = controller.debug_state()
+	if String(state.get("gear_label", "")) != "R" or float(state.get("engine_rpm", 0.0)) <= 0.0:
+		push_error("VALIDATION controller drivetrain debug state missing reverse/RPM telemetry: %s" % state)
+		return false
+	return true
+
+
+func _validate_controller_tire_force_budget(controller) -> bool:
+	controller.reset_motion()
+	controller._init_wheel_states()
+	controller.velocity = Vector3(24.0, 0.0, -50.0)
+	controller.angular_velocity = Vector3.ZERO
+	controller.throttle = 1.0
+	controller.brake = 0.25
+	controller.handbrake = false
+	controller.steer = 0.85
+	controller._update_ackermann_steering()
+	var wheel_states: Dictionary = controller.wheel_states
+	var state: Dictionary = wheel_states.get("FL", {})
+	if state.is_empty():
+		push_error("VALIDATION controller tire budget missing FL wheel state")
+		return false
+	state["grounded"] = true
+	state["contact_normal"] = Vector3.UP
+	state["normal_force"] = 3500.0
+	state["longitudinal_force"] = 0.0
+	state["lateral_force"] = 0.0
+	wheel_states["FL"] = state
+	controller.wheel_states = wheel_states
+	var result: Dictionary = controller._resolve_wheel_force("FL", Basis.IDENTITY, controller._mass(), 1.0 / 60.0)
+	state = controller.wheel_states.get("FL", {})
+	var longitudinal_grip := float(controller.tuning.get("front_longitudinal_grip", controller.tuning.get("rear_longitudinal_grip", 7.0)))
+	var lateral_grip := float(controller.tuning.get("front_lateral_grip", controller.tuning.get("lateral_grip", 8.0)))
+	var long_limit := maxf(float(state.get("normal_force", 0.0)) * longitudinal_grip, 1.0)
+	var lat_limit := maxf(float(state.get("normal_force", 0.0)) * lateral_grip * float(state.get("tire_slip_falloff", 1.0)), 1.0)
+	var saturation := sqrt(pow(float(state.get("longitudinal_force", 0.0)) / long_limit, 2.0) + pow(float(state.get("lateral_force", 0.0)) / lat_limit, 2.0))
+	if saturation > 1.001:
+		push_error("VALIDATION controller tire force exceeded combined grip budget: %.4f state=%s result=%s" % [saturation, state, result])
+		return false
+	if absf(float(result.get("yaw_torque", 0.0))) > 10000000.0:
+		push_error("VALIDATION controller tire yaw torque is unstable: %s" % result)
 		return false
 	return true
 
