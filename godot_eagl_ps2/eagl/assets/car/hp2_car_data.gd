@@ -173,6 +173,8 @@ static func _handling_from_globalb(car_id: String, slots: Array[Dictionary], glo
 	var rear_tire_grip := _field_value(fields, "rear_tire_grip", front_tire_grip)
 	var avg_tire_grip := maxf(1.0, (front_tire_grip + rear_tire_grip) * 0.5)
 	var lateral_curve_avg := maxf(0.25, (_curve_average(tire_front, 0.65) + _curve_average(tire_rear, 0.65)) * 0.5)
+	var shift_up_rpm := redline * 0.94
+	var shift_table_rpm_scale := clampf(shift_up_rpm / maxf(redline - 200.0, 1.0), 0.85, 1.0)
 	var forward_speed_hint := maxf(20.0, redline / 100.0)
 	var reverse_speed_hint := maxf(8.0, forward_speed_hint * clampf(absf(reverse_ratio) / maxf(absf(float(gear_ratios[0])), 0.1), 0.55, 1.2) * 0.32)
 	var steering_response := clampf(_field_value(fields, "steering_response", 3.0), 1.0, 8.0)
@@ -205,7 +207,8 @@ static func _handling_from_globalb(car_id: String, slots: Array[Dictionary], glo
 	handling["gear_ratios"] = gear_ratios
 	handling["reverse_gear_ratio"] = reverse_ratio
 	handling["final_drive_ratio"] = final_drive_ratio
-	handling["shift_up_rpm"] = redline * 0.94
+	handling["shift_up_rpm"] = shift_up_rpm
+	handling["shift_table_rpm_scale"] = shift_table_rpm_scale
 	handling["shift_down_rpm"] = peak_rpm * 0.58
 	handling["shift_strategy"] = "hp2_torque_crossing_recovered_from_FUN_0018ac38"
 	handling["shift_scan_step_rpm"] = 50.0
@@ -247,7 +250,7 @@ static func _handling_from_globalb(car_id: String, slots: Array[Dictionary], glo
 	handling["drivetrain"] = {
 		"schema": "hp2_globalb_drivetrain_inferred",
 		"confidence": "inferred",
-		"note": "PhysicsCar constructs Engine from row+0x2b0 and DriveTrain from row+0x270. Gear count at row+0x288 and ratios at row+0x290.. are confirmed by HP2_BuildAccelerationOrShiftCurve_FUN_00188df0; upshift RPM follows the torque-crossing scan recovered from HP2_DriveTrain_BuildShiftTables_FUN_0018ac38.",
+		"note": "PhysicsCar constructs Engine from row+0x2b0 and DriveTrain from row+0x270. Gear count at row+0x288 and ratios at row+0x290.. are confirmed by HP2_BuildAccelerationOrShiftCurve_FUN_00188df0; upshift RPM follows the torque-crossing scan and drivetrain RPM scale recovered from HP2_DriveTrain_BuildShiftTables_FUN_0018ac38.",
 		"mass": _copy_field(fields, "mass"),
 		"engine_idle_rpm": _derived_field(idle_rpm, ["engine_redline_rpm"], "inferred"),
 		"engine_peak_rpm": _copy_field(fields, "engine_peak_rpm"),
@@ -258,6 +261,7 @@ static func _handling_from_globalb(car_id: String, slots: Array[Dictionary], glo
 		"neutral_gear_ratio": _copy_field(fields, "neutral_gear_ratio"),
 		"final_drive_ratio": _copy_field(fields, "final_drive_ratio"),
 		"shift_up_rpm": _derived_field(handling["shift_up_rpm"], ["engine_redline_rpm", "gear_ratios"], "inferred"),
+		"shift_table_rpm_scale": _derived_field(handling["shift_table_rpm_scale"], ["engine_redline_rpm", "shift_up_rpm"], "inferred"),
 		"shift_down_rpm": _derived_field(handling["shift_down_rpm"], ["engine_peak_rpm"], "inferred"),
 		"shift_strategy": _derived_field(handling["shift_strategy"], ["gear_ratios", "engine_peak_rpm", "engine_redline_rpm"], "inferred"),
 		"max_forward_speed": _derived_field(forward_speed_hint, ["engine_redline_rpm"], "inferred"),

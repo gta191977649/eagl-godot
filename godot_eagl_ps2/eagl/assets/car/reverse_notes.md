@@ -54,10 +54,24 @@ The drivetrain cluster at `0x288..0x2ac` has now been decoded from sample rows a
 
 For example, `MCLAREN` decodes to six forward gears: `3.23`, `2.19`, `1.71`, `1.39`, `1.16`, `0.93`, plus reverse `-3.23` and drivetrain scalar `4.0`.
 
-`HP2_PhysicsCar_Construct_FUN_00137100` constructs the engine from `row + 0x2b0` and the drivetrain from `row + 0x270`. `HP2_DriveTrain_InitFromGlobalB_FUN_0018ae70` calls `HP2_DriveTrain_BuildShiftTables_FUN_0018ac38`, which builds shift tables by scanning RPM in `50` RPM steps up to `redline - 200` and choosing the first RPM where the next gear produces more wheel torque than the current gear. If no crossing is found, it uses `redline - 200`. The Godot automatic transmission now mirrors that recovered torque-crossing rule.
+`HP2_PhysicsCar_Construct_FUN_00137100` constructs the engine from `row + 0x2b0` and the drivetrain from `row + 0x270`. `HP2_DriveTrain_InitFromGlobalB_FUN_0018ae70` calls `HP2_DriveTrain_BuildShiftTables_FUN_0018ac38`, which builds shift tables by scanning RPM in `50` RPM steps up to `redline - 200` and choosing the first RPM where the next gear produces more wheel torque than the current gear. If no crossing is found, it uses `redline - 200`, then multiplies the stored shift RPM by a drivetrain scale argument. The Godot automatic transmission mirrors the scan and scale shape; until `uGpffffafbc` is named exactly, the scale defaults to the decoded `shift_up_rpm` hint from the `GLOBALB` row.
 
 ## Engine And Drivetrain Notes
 
 The executable confirms dedicated engine and drivetrain runtime components through `EngineSlotPool`, `DriveTrainSlotPool`, and `DriveTrain` strings, plus a `World::DoTimestep - FakeEngineTask` profiler marker. The current Godot controller mirrors that architecture with explicit RPM, gear, clutch, shift, reverse, torque-curve, engine-brake, and wheel-torque stages.
 
 The gear count, reverse ratio, neutral ratio, forward gear ratios, engine row pointer, drivetrain row pointer, and automatic upshift scan shape are now tied to executable usage. The exact Black Box torque curve payload and clutch/torque-converter behavior are still not bit-exact; keep these fields marked `inferred` until the `HP2_Curve_EvaluateLinear_FUN_0018f838` curve payload and drivetrain update loop are completely mapped.
+
+## Godot Runtime Architecture
+
+The Godot controller has been split to mirror the recovered PS2 runtime boundaries while keeping `EAGLCarController3D` as the public scene-facing facade. The facade delegates to focused scripts under `eagl/assets/car/physics/`:
+
+- `HP2CarRuntime` owns the `PhysicsCar::Move()`-style update order.
+- `HP2VehicleConfig` adapts decoded `GLOBALB` handling rows into runtime queries.
+- `HP2InputState`, `HP2Engine`, and `HP2DriveTrain` cover input filtering, RPM/torque, requested gear, and the recovered automatic shift scan.
+- `HP2AckermannSteering`, `HP2Suspension`, `HP2Wheel`, and `HP2PhysicsIntegrator` cover the four-wheel force pipeline and custom Euler integration.
+- `HP2VisualWheelRig` keeps runtime tire/brake attachment visuals separate from physics state, matching the original `CarRenderInfo`/runtime part split.
+
+The v1 force formulas remain close to the prior Godot behavior and are still marked as inferred where Ghidra has not yet provided exact constants. Ghidra-derived offsets, class boundaries, and update ordering are treated as the authoritative source.
+
+The automatic transmission now avoids the older Godot-only speed-window/kickdown fallback. Upshifts are driven by the recovered `HP2_DriveTrain_BuildShiftTables_FUN_0018ac38` RPM threshold, with wheel-coupled RPM used to trigger the same threshold during acceleration. Debug shift speeds are derived from those RPM thresholds for display only.

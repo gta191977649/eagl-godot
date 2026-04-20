@@ -556,7 +556,7 @@ func _validate_controller_drivetrain(controller) -> bool:
 	controller.throttle = 1.0
 	controller.brake = 0.0
 	controller.local_longitudinal_speed = 16.0
-	controller.engine_rpm = controller._engine_redline_rpm() * 0.96
+	controller.engine_rpm = controller._gear_shift_up_rpm(1) + 10.0
 	controller.current_gear = 1
 	controller.shift_timer = 0.0
 	controller._update_drivetrain(1.0 / 60.0)
@@ -573,7 +573,7 @@ func _validate_controller_drivetrain(controller) -> bool:
 		controller.engine_rpm = controller._engine_peak_rpm()
 		controller._update_drivetrain(1.0 / 60.0)
 	if int(controller.current_gear) < target_gear:
-		push_error("VALIDATION controller drivetrain expected speed-window upshift to gear %d, got gear=%s" % [target_gear, controller.current_gear])
+		push_error("VALIDATION controller drivetrain expected shift-table speed upshift to gear %d, got gear=%s" % [target_gear, controller.current_gear])
 		return false
 	controller.reset_motion()
 	controller.throttle = 0.0
