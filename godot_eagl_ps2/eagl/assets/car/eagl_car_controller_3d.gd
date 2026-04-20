@@ -5,20 +5,27 @@ extends Node3D
 @export var enabled := true
 
 var tuning: Dictionary = {}
+var handling_data: Dictionary = {}
 var velocity := Vector3.ZERO
 var yaw_rate := 0.0
 var steer := 0.0
+var steering_angle := 0.0
 var throttle := 0.0
 var brake := 0.0
 var handbrake := false
 var grounded := false
+var movement_mode := "coast"
 var local_longitudinal_speed := 0.0
 var local_lateral_speed := 0.0
 var slip := 0.0
 var wheel_angular_speed := 0.0
+var last_drive_force := 0.0
+var last_brake_force := 0.0
+var last_lateral_force := 0.0
+var last_drag_force := 0.0
 
-var _wheel_nodes: Array[Node3D] = []
-var _front_wheel_nodes: Array[Node3D] = []
+var _spin_pivots: Array[Node3D] = []
+var _steer_pivots: Array[Node3D] = []
 var _visual_root: Node3D
 
 
@@ -30,13 +37,19 @@ func reset_motion() -> void:
 	velocity = Vector3.ZERO
 	yaw_rate = 0.0
 	steer = 0.0
+	steering_angle = 0.0
 	throttle = 0.0
 	brake = 0.0
 	handbrake = false
+	movement_mode = "coast"
 	local_longitudinal_speed = 0.0
 	local_lateral_speed = 0.0
 	slip = 0.0
 	wheel_angular_speed = 0.0
+	last_drive_force = 0.0
+	last_brake_force = 0.0
+	last_lateral_force = 0.0
+	last_drag_force = 0.0
 
 
 func _physics_process(delta: float) -> void:
@@ -86,17 +99,30 @@ func _integrate_body(body: Node3D, delta: float) -> void:
 	var handbrake_grip_scale := float(tuning.get("handbrake_grip_scale", 0.38))
 	var gravity := float(tuning.get("gravity", 28.0))
 
+	last_drive_force = 0.0
+	last_brake_force = 0.0
+	last_lateral_force = 0.0
+	last_drag_force = 0.0
+	movement_mode = "airborne" if not grounded else "coast"
 	if throttle > 0.0 and local_longitudinal_speed < max_forward_speed:
-		velocity += forward * engine_accel * throttle * delta
+		last_drive_force = engine_accel * throttle
+		velocity += forward * last_drive_force * delta
+		movement_mode = "drive"
 	if brake > 0.0:
 		if local_longitudinal_speed > 1.0:
-			velocity -= forward * brake_accel * brake * delta
+			last_brake_force = brake_accel * brake
+			velocity -= forward * last_brake_force * delta
+			movement_mode = "brake"
 		elif local_longitudinal_speed > -max_reverse_speed:
-			velocity -= forward * reverse_accel * brake * delta
+			last_brake_force = reverse_accel * brake
+			velocity -= forward * last_brake_force * delta
+			movement_mode = "reverse"
 
 	var grip := lateral_grip * (handbrake_grip_scale if handbrake else 1.0)
+	last_lateral_force = local_lateral_speed * grip
 	velocity -= right * local_lateral_speed * clampf(grip * delta, 0.0, 1.0)
 	if grounded:
+		last_drag_force = local_longitudinal_speed * linear_drag
 		velocity -= forward * local_longitudinal_speed * clampf(linear_drag * delta, 0.0, 0.35)
 		velocity = velocity.move_toward(Vector3.ZERO, rolling_drag * delta)
 	else:
@@ -159,20 +185,25 @@ func _align_to_ground_normal(body: Node3D, normal: Vector3, delta: float) -> voi
 
 func _update_wheel_visuals(delta: float) -> void:
 	var wheel_radius := float(tuning.get("wheel_radius", 0.36))
+	var max_steer := float(tuning.get("max_steer_angle", 0.62))
 	wheel_angular_speed = local_longitudinal_speed / maxf(wheel_radius, 0.01)
-	for wheel in _wheel_nodes:
-		if wheel == null or not is_instance_valid(wheel):
+	steering_angle = steer * max_steer
+	for spin_pivot in _spin_pivots:
+		if spin_pivot == null or not is_instance_valid(spin_pivot):
 			continue
-		wheel.rotate_object_local(Vector3.RIGHT, wheel_angular_speed * delta)
-	for wheel in _front_wheel_nodes:
-		if wheel == null or not is_instance_valid(wheel):
+		var spin_direction := float(spin_pivot.get_meta("eagl_spin_direction", 1.0))
+		spin_pivot.rotation.x += wheel_angular_speed * spin_direction * delta
+	for steer_pivot in _steer_pivots:
+		if steer_pivot == null or not is_instance_valid(steer_pivot):
 			continue
-		wheel.set_meta("eagl_visual_steer", steer)
+		steer_pivot.rotation.y = steering_angle
+		steer_pivot.set_meta("eagl_visual_steer", steer)
+		steer_pivot.set_meta("eagl_visual_steering_angle", steering_angle)
 
 
 func _cache_visual_parts() -> void:
-	_wheel_nodes.clear()
-	_front_wheel_nodes.clear()
+	_spin_pivots.clear()
+	_steer_pivots.clear()
 	_visual_root = get_node_or_null(visual_root_path) as Node3D
 	if _visual_root == null:
 		return
@@ -180,11 +211,10 @@ func _cache_visual_parts() -> void:
 		var node3d := node as Node3D
 		if node3d == null:
 			continue
-		var object_name := String(node3d.get_meta("eagl_object_name", node3d.name)).to_upper()
-		if object_name.contains("TIRE") or object_name.contains("WHEEL"):
-			_wheel_nodes.append(node3d)
-			if object_name.contains("FRONT"):
-				_front_wheel_nodes.append(node3d)
+		if node3d.has_meta("eagl_spin_pivot") and bool(node3d.get_meta("eagl_spin_pivot")):
+			_spin_pivots.append(node3d)
+		if node3d.has_meta("eagl_steer_pivot") and bool(node3d.get_meta("eagl_steer_pivot")):
+			_steer_pivots.append(node3d)
 
 
 func debug_state() -> Dictionary:
@@ -195,12 +225,23 @@ func debug_state() -> Dictionary:
 		"lateral_speed": local_lateral_speed,
 		"yaw_rate": yaw_rate,
 		"steer": steer,
+		"steering_angle": steering_angle,
 		"throttle": throttle,
 		"brake": brake,
 		"handbrake": handbrake,
 		"grounded": grounded,
+		"movement_mode": movement_mode,
 		"slip": slip,
 		"wheel_angular_speed": wheel_angular_speed,
+		"spin_pivot_count": _spin_pivots.size(),
+		"steer_pivot_count": _steer_pivots.size(),
+		"drive_force": last_drive_force,
+		"brake_force": last_brake_force,
+		"lateral_force": last_lateral_force,
+		"drag_force": last_drag_force,
+		"handling_source": handling_data.get("handling_source", tuning.get("source", "unknown")),
+		"exact_handling_status": handling_data.get("exact_handling_status", tuning.get("exact_handling_status", "unknown")),
+		"decoded_car_id": handling_data.get("car_id", tuning.get("car_id", "")),
 		"tuning_source": tuning.get("source", "unknown"),
 		"tuning_status": tuning.get("status", "unknown"),
 	}

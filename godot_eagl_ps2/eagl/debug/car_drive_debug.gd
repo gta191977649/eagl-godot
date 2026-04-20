@@ -1,7 +1,5 @@
 extends Node3D
 
-const FreeCameraScript := preload("res://eagl/debug/free_camera.gd")
-
 @export var platform := "EAGL_HOTPUSUIT2_PS2"
 @export_global_dir var game_root := "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA"
 @export var default_car := "MCLAREN"
@@ -14,11 +12,17 @@ var _stats_label: Label
 var _camera_label: Label
 var _debug_camera: Camera3D
 var _drive_toggle: CheckButton
-var _follow_toggle: CheckButton
 var _all_variants_toggle: CheckButton
 var _group_toggles: Dictionary = {}
+var _camera_yaw_offset := 0.0
+var _camera_pitch := deg_to_rad(18.0)
+var _manual_orbit_timer := 0.0
 
 const PART_GROUPS := ["Body", "Wheels", "Brakes", "GlassLightsDamage", "ShadowBlur", "Dashboard"]
+const CAMERA_MOUSE_SENSITIVITY := 0.006
+const CAMERA_MIN_PITCH := -0.18
+const CAMERA_MAX_PITCH := 0.72
+const CAMERA_RECENTER_DELAY := 1.2
 
 
 func _ready() -> void:
@@ -40,6 +44,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			_reset_car()
 		elif event.keycode == KEY_F:
 			_frame_car()
+	elif event is InputEventMouseMotion:
+		var motion := event as InputEventMouseMotion
+		if motion.relative.length_squared() > 0.0:
+			_camera_yaw_offset -= motion.relative.x * CAMERA_MOUSE_SENSITIVITY
+			_camera_pitch = clampf(_camera_pitch - motion.relative.y * CAMERA_MOUSE_SENSITIVITY, CAMERA_MIN_PITCH, CAMERA_MAX_PITCH)
+			_manual_orbit_timer = CAMERA_RECENTER_DELAY
 
 
 func _initialize_eagl() -> void:
@@ -124,7 +134,6 @@ func _ensure_world() -> void:
 		camera.current = true
 		camera.position = Vector3(0.0, 5.0, 12.0)
 		camera.rotation_degrees = Vector3(-20.0, 0.0, 0.0)
-		camera.script = FreeCameraScript
 		add_child(camera)
 		_debug_camera = camera
 	else:
@@ -200,10 +209,6 @@ func _ensure_ui() -> void:
 	_drive_toggle.button_pressed = true
 	_drive_toggle.toggled.connect(func(_pressed: bool) -> void: _apply_debug_toggles())
 	top.add_child(_drive_toggle)
-	_follow_toggle = CheckButton.new()
-	_follow_toggle.text = "Follow cam"
-	_follow_toggle.button_pressed = false
-	top.add_child(_follow_toggle)
 	_all_variants_toggle = CheckButton.new()
 	_all_variants_toggle.text = "All variants"
 	_all_variants_toggle.button_pressed = false
@@ -244,11 +249,9 @@ func _ensure_ui() -> void:
 	_stats_label.add_theme_constant_override("shadow_offset_y", 1)
 	stats_panel.add_child(_stats_label)
 	_camera_label = Label.new()
-	_camera_label.name = "FreeCameraLabel"
-	_camera_label.text = "Free camera"
+	_camera_label.name = "FollowCameraLabel"
+	_camera_label.text = "Follow camera: move mouse to orbit"
 	rows.add_child(_camera_label)
-	if _debug_camera != null:
-		_debug_camera.speed_label_path = _debug_camera.get_path_to(_camera_label)
 
 
 func _update_debug_labels() -> void:
@@ -263,23 +266,28 @@ func _update_debug_labels() -> void:
 	var warnings: Array = EAGLManager.get_stats().get("car", {}).get("warnings", [])
 	var bounds: AABB = _car_root.get_meta("eagl_bounds", AABB())
 	var offset: Vector3 = _car_root.get_meta("eagl_visual_offset", Vector3.ZERO)
-	_stats_label.text = "Car: %s\nSpeed: %.1f km/h  Grounded: %s  Slip: %.2f\nLocal: %.2f forward / %.2f side  Yaw: %.3f  Steer: %.2f\nObjects: %s rendered / %s parsed / %s hidden  Wheels: %s  Brakes: %s\nTextures: %s bank / %s textured surfaces / %s fallback  Locators: %s\nBounds: %.2f x %.2f x %.2f  Visual offset: %.2f, %.2f, %.2f\nGeometry: %s  Tuning: %s (%s)\nWarnings: %s\nControls: W/S throttle/brake, A/D steer, Space handbrake, R reset, F frame camera" % [
+	_stats_label.text = "Car: %s\nSpeed: %.1f km/h  Mode: %s  Grounded: %s  Slip: %.2f\nLocal: %.2f forward / %.2f side  Yaw: %.3f  Steer: %.2f (%.2f rad)\nObjects: %s rendered / %s parsed / %s hidden  Wheels: %s  Brakes: %s  Pivots: %s spin / %s steer\nTextures: %s bank / %s textured surfaces / %s fallback / %s missing hashes  Locators: %s\nBounds: %.2f x %.2f x %.2f  Visual offset: %.2f, %.2f, %.2f\nGeometry: %s  Tuning: %s (%s)  Exact: %s\nWarnings: %s\nControls: W/S throttle/brake, A/D steer, Space handbrake, mouse orbit, R reset, F frame camera" % [
 		_car_root.get_meta("eagl_car_id", ""),
 		float(state.get("speed_kmh", 0.0)),
+		state.get("movement_mode", "coast"),
 		str(state.get("grounded", false)),
 		float(state.get("slip", 0.0)),
 		float(state.get("longitudinal_speed", 0.0)),
 		float(state.get("lateral_speed", 0.0)),
 		float(state.get("yaw_rate", 0.0)),
 		float(state.get("steer", 0.0)),
+		float(state.get("steering_angle", 0.0)),
 		_car_root.get_meta("eagl_rendered_object_count", 0),
 		_car_root.get_meta("eagl_object_count", 0),
 		_car_root.get_meta("eagl_hidden_variant_count", 0),
 		_car_root.get_meta("eagl_wheel_instance_count", 0),
 		_car_root.get_meta("eagl_brake_instance_count", 0),
+		state.get("spin_pivot_count", 0),
+		state.get("steer_pivot_count", 0),
 		_car_root.get_meta("eagl_texture_count", 0),
 		_car_root.get_meta("eagl_textured_surface_count", 0),
 		_car_root.get_meta("eagl_fallback_surface_count", 0),
+		_car_root.get_meta("eagl_missing_texture_hashes", []).size(),
 		_car_root.get_meta("eagl_locator_count", 0),
 		bounds.size.x,
 		bounds.size.y,
@@ -290,6 +298,7 @@ func _update_debug_labels() -> void:
 		"all variants" if bool(_car_root.get_meta("eagl_show_all_car_variants", false)) else "primary variants",
 		state.get("tuning_source", "unknown"),
 		state.get("tuning_status", "unknown"),
+		state.get("exact_handling_status", _car_root.get_meta("eagl_exact_handling_status", "unknown")),
 		warnings.size(),
 	]
 
@@ -327,6 +336,8 @@ func _apply_debug_toggles() -> void:
 func _frame_car() -> void:
 	if _car_root == null or _debug_camera == null:
 		return
+	_camera_yaw_offset = 0.0
+	_camera_pitch = deg_to_rad(18.0)
 	var bounds: AABB = _car_root.get_meta("eagl_bounds", AABB(Vector3(-2.0, -0.75, -4.0), Vector3(4.0, 2.0, 8.0)))
 	var focus := _car_root.global_position + bounds.position + bounds.size * 0.5
 	var radius := maxf(maxf(bounds.size.x, bounds.size.y), bounds.size.z) * 0.65
@@ -336,13 +347,29 @@ func _frame_car() -> void:
 
 
 func _update_follow_camera(delta: float) -> void:
-	if _car_root == null or _debug_camera == null or _follow_toggle == null or not _follow_toggle.button_pressed:
+	if _car_root == null or _debug_camera == null:
 		return
 	var basis := _car_root.global_transform.basis.orthonormalized()
-	var target := _car_root.global_position + Vector3.UP * 1.3
-	var desired := target + basis.z * 9.0 + Vector3.UP * 3.2
-	_debug_camera.global_position = _debug_camera.global_position.lerp(desired, clampf(delta * 5.0, 0.0, 1.0))
+	var target := _car_root.global_position + Vector3.UP * 1.35
+	var car_back := basis.z.normalized()
+	var car_yaw := atan2(car_back.x, car_back.z)
+	var speed_kmh := 0.0
+	if _controller != null and _controller.has_method("debug_state"):
+		speed_kmh = float(_controller.debug_state().get("speed_kmh", 0.0))
+	if _manual_orbit_timer > 0.0:
+		_manual_orbit_timer = maxf(0.0, _manual_orbit_timer - delta)
+	elif speed_kmh > 8.0:
+		_camera_yaw_offset = lerpf(_camera_yaw_offset, 0.0, clampf(delta * 1.6, 0.0, 1.0))
+	var bounds: AABB = _car_root.get_meta("eagl_bounds", AABB(Vector3(-2.0, -0.75, -4.0), Vector3(4.0, 2.0, 8.0)))
+	var radius := maxf(maxf(bounds.size.x, bounds.size.y), bounds.size.z) * 0.65
+	var distance := maxf(7.5, radius * 2.2)
+	var yaw := car_yaw + _camera_yaw_offset
+	var horizontal := cos(_camera_pitch) * distance
+	var desired := target + Vector3(sin(yaw) * horizontal, sin(_camera_pitch) * distance + 1.2, cos(yaw) * horizontal)
+	_debug_camera.global_position = _debug_camera.global_position.lerp(desired, clampf(delta * 6.0, 0.0, 1.0))
 	_debug_camera.look_at(target, Vector3.UP)
+	if _camera_label != null:
+		_camera_label.text = "Follow camera: mouse orbit  yaw %.1f  pitch %.1f" % [rad_to_deg(_camera_yaw_offset), rad_to_deg(_camera_pitch)]
 
 
 func _car_suspension_height(car: Node) -> float:

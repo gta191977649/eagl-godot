@@ -25,6 +25,8 @@ var fallback_surfaces := 0
 var uv_surfaces := 0
 var textured_missing_uv_surfaces := 0
 var lod_surface_count := 0
+var missing_texture_hashes: Array[int] = []
+var missing_texture_surfaces: Array[Dictionary] = []
 
 
 func reset() -> void:
@@ -38,6 +40,8 @@ func reset() -> void:
 	uv_surfaces = 0
 	textured_missing_uv_surfaces = 0
 	lod_surface_count = 0
+	missing_texture_hashes.clear()
+	missing_texture_surfaces.clear()
 
 
 func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> MeshInstance3D:
@@ -74,8 +78,10 @@ func build_object_mesh(obj: Dictionary, apply_object_transform: bool = true) -> 
 		if use_vertex_colors:
 			arrays[Mesh.ARRAY_COLOR] = colors
 
-		var texture_hash := _texture_hash_for_block(obj, block_index)
+		var texture_hash := _resolve_texture_hash_alias(obj, _texture_hash_for_block(obj, block_index))
 		var light_material_hash := _light_material_hash_for_block(obj, block_index)
+		if texture_hash != 0 and texture_bank != null and not texture_bank.has_texture(texture_hash):
+			_record_missing_texture(object_name, block_index, texture_hash, block)
 		if bool(obj.get("skip_missing_texture_surfaces", false)) and texture_hash != 0 and texture_bank != null and not texture_bank.has_texture(texture_hash):
 			_count_skip("missing_texture_surface")
 			continue
@@ -341,6 +347,27 @@ func _texture_hash_for_block(obj: Dictionary, block_index: int) -> int:
 		if texture_index >= 0 and texture_index < hashes.size():
 			return int(hashes[texture_index])
 	return int(hashes[mini(block_index, hashes.size() - 1)])
+
+
+func _resolve_texture_hash_alias(obj: Dictionary, texture_hash: int) -> int:
+	if texture_hash == 0:
+		return 0
+	var aliases: Dictionary = obj.get("texture_hash_aliases", {})
+	if aliases.is_empty():
+		return texture_hash
+	return int(aliases.get(texture_hash, texture_hash))
+
+
+func _record_missing_texture(object_name: String, block_index: int, texture_hash: int, block: Dictionary) -> void:
+	if not missing_texture_hashes.has(texture_hash):
+		missing_texture_hashes.append(texture_hash)
+	missing_texture_surfaces.append({
+		"object_name": object_name,
+		"block_index": block_index,
+		"texture_hash": texture_hash,
+		"texture_index": block.get("texture_index", -1),
+		"render_flag": block.get("render_flag", 0),
+	})
 
 
 func _safe_node_name(value: String) -> String:

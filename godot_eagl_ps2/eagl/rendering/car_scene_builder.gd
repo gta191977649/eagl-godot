@@ -33,9 +33,14 @@ func build_car_scene(asset, options: Dictionary = {}) -> Node3D:
 	var built := 0
 	var hidden_variants := 0
 	var show_all_variants := bool(options.get("show_all_car_variants", options.get("show_all_car_lods", false)))
+	var show_wheel_blur := bool(options.get("show_wheel_blur", false))
 	var tire_objects: Array[Dictionary] = []
 	var brake_objects: Array[Dictionary] = []
 	for obj in asset.objects:
+		if _is_wheel_blur_object(obj) and not show_wheel_blur:
+			hidden_variants += 1
+			_count_skip("wheel_blur_disabled")
+			continue
 		if not show_all_variants and not bool(obj.get("render_default", true)):
 			hidden_variants += 1
 			_count_skip("hidden_car_variant")
@@ -62,18 +67,26 @@ func build_car_scene(asset, options: Dictionary = {}) -> Node3D:
 	var controller = CarControllerScript.new()
 	controller.name = "EAGLCarController3D"
 	controller.tuning = asset.physics_tuning.duplicate(true)
+	controller.handling_data = asset.handling_data.duplicate(true)
 	controller.visual_root_path = NodePath("../Visual")
 	root.add_child(controller)
 	controller.owner = root.owner
 
+	asset.missing_texture_hashes = mesh_builder.missing_texture_hashes.duplicate()
+	asset.missing_texture_surfaces = mesh_builder.missing_texture_surfaces.duplicate(true)
 	asset.bounds = bounds
 	asset.has_bounds = bounds.size != Vector3.ZERO
 	root.set_meta("eagl_visual_offset", visual_offset)
 	root.set_meta("eagl_rendered_object_count", built)
 	root.set_meta("eagl_hidden_variant_count", hidden_variants)
 	root.set_meta("eagl_show_all_car_variants", show_all_variants)
+	root.set_meta("eagl_wheel_blur_enabled", show_wheel_blur)
 	root.set_meta("eagl_wheel_instance_count", _wheel_instance_count(visual_root))
 	root.set_meta("eagl_brake_instance_count", _assembled_instance_count(visual_root, "assembled_brake_instance"))
+	root.set_meta("eagl_wheel_slot_count", asset.wheel_slots.size())
+	root.set_meta("eagl_wheel_slot_source", asset.wheel_slot_source)
+	root.set_meta("eagl_exact_handling_status", asset.exact_handling_status)
+	root.set_meta("eagl_runtime_part_counts", asset.runtime_parts.get("counts", {}).duplicate(true))
 	root.set_meta("eagl_object_count", asset.objects.size())
 	root.set_meta("eagl_dashboard_object_count", asset.dashboard_objects.size())
 	root.set_meta("eagl_block_count", asset.block_count())
@@ -89,6 +102,8 @@ func build_car_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_uv_surface_count", mesh_builder.uv_surfaces)
 	root.set_meta("eagl_textured_missing_uv_surface_count", mesh_builder.textured_missing_uv_surfaces)
 	root.set_meta("eagl_lod_surface_count", mesh_builder.lod_surface_count)
+	root.set_meta("eagl_missing_texture_hashes", mesh_builder.missing_texture_hashes.duplicate())
+	root.set_meta("eagl_missing_texture_surface_count", mesh_builder.missing_texture_surfaces.size())
 	return root
 
 
@@ -140,7 +155,7 @@ func _add_object_node(group_roots: Dictionary, obj: Dictionary) -> bool:
 
 
 func _add_wheel_instances(group_roots: Dictionary, asset, tire_objects: Array[Dictionary]) -> int:
-	var wheel_slots: Array = asset.metadata.get("wheel_slots", [])
+	var wheel_slots: Array = asset.wheel_slots
 	if wheel_slots.size() < 4 or tire_objects.is_empty():
 		var fallback_count := 0
 		for obj in tire_objects:
@@ -168,12 +183,51 @@ func _add_wheel_instances(group_roots: Dictionary, asset, tire_objects: Array[Di
 
 
 func _add_wheel_instance(group_roots: Dictionary, obj: Dictionary, slot: Dictionary) -> bool:
-	return _add_assembled_slot_instance(group_roots, obj, slot, "Wheels", "assembled_wheel_instance")
+	var mesh_node := mesh_builder.build_object_mesh(obj, false)
+	if mesh_node == null:
+		_count_skip("empty_wheels_mesh")
+		return false
+	var parent: Node3D = group_roots.get("Wheels", group_roots["Body"])
+	var object_name: String = obj.get("name", "Tire")
+	var slot_id := _slot_id(slot)
+	var slot_pivot := Node3D.new()
+	slot_pivot.name = _safe_node_name("WheelSlot_%s" % slot_id)
+	slot_pivot.position = slot.get("position_godot", Vector3.ZERO)
+	_set_runtime_slot_meta(slot_pivot, object_name, slot, "Wheels", "wheel", "assembled_wheel_instance")
+	parent.add_child(slot_pivot)
+
+	var steer_pivot := Node3D.new()
+	steer_pivot.name = "SteerPivot"
+	steer_pivot.set_meta("eagl_runtime_part", "wheel")
+	steer_pivot.set_meta("eagl_steer_pivot", bool(slot.get("is_front", String(slot.get("axle", "")) == "front")))
+	steer_pivot.set_meta("eagl_wheel_slot_id", slot_id)
+	steer_pivot.set_meta("eagl_wheel_slot", slot.duplicate(true))
+	slot_pivot.add_child(steer_pivot)
+
+	var spin_pivot := Node3D.new()
+	spin_pivot.name = "SpinPivot"
+	spin_pivot.set_meta("eagl_runtime_part", "wheel")
+	spin_pivot.set_meta("eagl_spin_pivot", true)
+	spin_pivot.set_meta("eagl_wheel_slot_id", slot_id)
+	spin_pivot.set_meta("eagl_wheel_slot", slot.duplicate(true))
+	spin_pivot.set_meta("eagl_is_front_wheel", bool(slot.get("is_front", String(slot.get("axle", "")) == "front")))
+	spin_pivot.set_meta("eagl_spin_direction", 1.0)
+	steer_pivot.add_child(spin_pivot)
+
+	var node := _mesh_instance_from_source(mesh_node, "Mesh")
+	var mesh_bounds := node.get_aabb()
+	node.position = -(mesh_bounds.position + mesh_bounds.size * 0.5)
+	if bool(slot.get("is_right", String(slot.get("side", "")) == "right")):
+		node.scale.x = -1.0
+	node.set_meta("eagl_runtime_part", "wheel_mesh")
+	node.set_meta("eagl_wheel_slot_id", slot_id)
+	spin_pivot.add_child(node)
+	return true
 
 
 func _add_brake_instances(group_roots: Dictionary, asset, brake_objects: Array[Dictionary]) -> int:
-	var wheel_slots: Array = asset.metadata.get("wheel_slots", [])
-	if wheel_slots.size() < 4 or brake_objects.is_empty():
+	var brake_slots: Array = asset.brake_slots
+	if brake_slots.size() < 4 or brake_objects.is_empty():
 		var fallback_count := 0
 		for obj in brake_objects:
 			if _add_object_node(group_roots, obj):
@@ -186,7 +240,7 @@ func _add_brake_instances(group_roots: Dictionary, asset, brake_objects: Array[D
 		return 0
 
 	var built := 0
-	for slot in wheel_slots:
+	for slot in brake_slots:
 		var slot_dict: Dictionary = slot
 		var axle := String(slot_dict.get("axle", "front"))
 		var source_obj := front_obj if axle == "front" else rear_obj
@@ -200,7 +254,36 @@ func _add_brake_instances(group_roots: Dictionary, asset, brake_objects: Array[D
 
 
 func _add_brake_instance(group_roots: Dictionary, obj: Dictionary, slot: Dictionary) -> bool:
-	return _add_assembled_slot_instance(group_roots, obj, slot, "Brakes", "assembled_brake_instance")
+	var mesh_node := mesh_builder.build_object_mesh(obj, false)
+	if mesh_node == null:
+		_count_skip("empty_brakes_mesh")
+		return false
+	var parent: Node3D = group_roots.get("Brakes", group_roots["Body"])
+	var object_name: String = obj.get("name", "Brake")
+	var slot_id := _slot_id(slot)
+	var slot_pivot := Node3D.new()
+	slot_pivot.name = _safe_node_name("BrakeSlot_%s" % slot_id)
+	slot_pivot.position = slot.get("position_godot", Vector3.ZERO)
+	_set_runtime_slot_meta(slot_pivot, object_name, slot, "Brakes", "brake", "assembled_brake_instance")
+	parent.add_child(slot_pivot)
+
+	var steer_pivot := Node3D.new()
+	steer_pivot.name = "SteerPivot"
+	steer_pivot.set_meta("eagl_runtime_part", "brake")
+	steer_pivot.set_meta("eagl_steer_pivot", bool(slot.get("is_front", String(slot.get("axle", "")) == "front")))
+	steer_pivot.set_meta("eagl_wheel_slot_id", slot_id)
+	steer_pivot.set_meta("eagl_wheel_slot", slot.duplicate(true))
+	slot_pivot.add_child(steer_pivot)
+
+	var node := _mesh_instance_from_source(mesh_node, "Mesh")
+	var mesh_bounds := node.get_aabb()
+	node.position = -(mesh_bounds.position + mesh_bounds.size * 0.5)
+	if bool(slot.get("is_right", String(slot.get("side", "")) == "right")):
+		node.scale.x = -1.0
+	node.set_meta("eagl_runtime_part", "brake_mesh")
+	node.set_meta("eagl_wheel_slot_id", slot_id)
+	steer_pivot.add_child(node)
+	return true
 
 
 func _add_assembled_slot_instance(group_roots: Dictionary, obj: Dictionary, slot: Dictionary, group_name: String, variant_role: String) -> bool:
@@ -235,6 +318,38 @@ func _add_assembled_slot_instance(group_roots: Dictionary, obj: Dictionary, slot
 	return true
 
 
+func _set_runtime_slot_meta(node: Node3D, object_name: String, slot: Dictionary, group_name: String, runtime_part: String, variant_role: String) -> void:
+	var slot_id := _slot_id(slot)
+	node.set_meta("eagl_object_name", "%s_%s" % [object_name, slot_id])
+	node.set_meta("eagl_source_object_name", object_name)
+	node.set_meta("eagl_part_group", group_name)
+	node.set_meta("eagl_runtime_part", runtime_part)
+	node.set_meta("eagl_wheel_slot_id", slot_id)
+	node.set_meta("eagl_wheel_slot", slot.duplicate(true))
+	node.set_meta("eagl_variant_role", variant_role)
+
+
+func _mesh_instance_from_source(mesh_node: MeshInstance3D, node_name: String) -> MeshInstance3D:
+	var node := MeshInstance3D.new()
+	node.name = node_name
+	node.mesh = mesh_node.mesh
+	for surface_index in range(mesh_node.mesh.get_surface_count()):
+		node.set_surface_override_material(surface_index, mesh_node.get_surface_override_material(surface_index))
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+	return node
+
+
+func _slot_id(slot: Dictionary) -> String:
+	var existing := String(slot.get("slot_id", ""))
+	if existing != "":
+		return existing
+	var axle := String(slot.get("axle", "front")).to_lower()
+	var side := String(slot.get("side", "left")).to_lower()
+	if axle == "front":
+		return "FR" if side == "right" else "FL"
+	return "RR" if side == "right" else "RL"
+
+
 func _is_tire_object(obj: Dictionary) -> bool:
 	var name := String(obj.get("name", "")).to_upper()
 	return name.contains("TIRE_FRONT") or name.contains("TIRE_REAR")
@@ -243,6 +358,11 @@ func _is_tire_object(obj: Dictionary) -> bool:
 func _is_brake_object(obj: Dictionary) -> bool:
 	var name := String(obj.get("name", "")).to_upper()
 	return name.contains("BRAKE_FRONT") or name.contains("BRAKE_REAR")
+
+
+func _is_wheel_blur_object(obj: Dictionary) -> bool:
+	var name := String(obj.get("name", "")).to_upper()
+	return name.contains("WHEEL_BLUR")
 
 
 func _tire_object_for_axle(tire_objects: Array[Dictionary], axle: String) -> Dictionary:
