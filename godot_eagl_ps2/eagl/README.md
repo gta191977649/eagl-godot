@@ -62,7 +62,9 @@ TrackRoot
 │   ├── SKYDOME_ENVMAP
 │   └── WATER
 ├── TrackMarkers
-│   └── startline objects
+│   ├── StartPoints
+│   ├── FinishPoints
+│   └── startline / finishline objects
 └── UnknownChunks
 ```
 
@@ -90,4 +92,4 @@ Scenery placement records are parsed from `0x00034103` and resolved through the 
 - `bun_category`: `ENVIRONMENT`, `TRACK_MARKER`, `PROP`, `ROAD`, `TERRAIN`, `SHADOW`, `LANDMARK`, or `STATIC_DETAIL`
 - `eagl_source_role`: `TEMPLATE_PALETTE`, `STATIC_SOLID_PACK`, or `SPECIAL_SOLID_PACK`
 
-This lets special instanced objects like `SKYDOME_ENVMAP`, `WATER`, and start-line meshes use their `0x34103` transforms while still living under `Environment` or `TrackMarkers`. Normal repeated props are grouped into `MultiMeshInstance3D` nodes by category and mesh hash under semantic buckets such as `Trees`, `Signs`, and `WallsRails`. Toggle `expand_scenery_instances` only when you specifically need fully baked per-instance geometry; it is much heavier.
+This lets special instanced objects like `SKYDOME_ENVMAP`, `WATER`, and start-line / finish-line meshes use their `0x34103` transforms while still living under `Environment` or `TrackMarkers`. `TrackMarkers/StartPoints` and `TrackMarkers/FinishPoints` also receive one `Node3D` child per detected marker transform so the hierarchy exposes exact placement points even when the rendered geometry is grouped into a `MultiMeshInstance3D`. Normal repeated props are grouped into `MultiMeshInstance3D` nodes by category and mesh hash under semantic buckets such as `Trees`, `Signs`, and `WallsRails`. Toggle `expand_scenery_instances` only when you specifically need fully baked per-instance geometry; it is much heavier.

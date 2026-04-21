@@ -114,6 +114,8 @@ func _load_debug_track() -> void:
 	stats["scenery_multimesh_count"] = next_track_node.get_meta("eagl_scenery_multimesh_count", 0)
 	stats["environment_object_count"] = next_track_node.get_meta("eagl_environment_object_count", 0)
 	stats["track_marker_count"] = next_track_node.get_meta("eagl_track_marker_count", 0)
+	stats["track_start_point_count"] = next_track_node.get_meta("eagl_track_start_point_count", 0)
+	stats["track_finish_point_count"] = next_track_node.get_meta("eagl_track_finish_point_count", 0)
 	stats["skipped"] = next_track_node.get_meta("eagl_skipped", {})
 	stats["textured_surface_count"] = next_track_node.get_meta("eagl_textured_surface_count", 0)
 	stats["fallback_surface_count"] = next_track_node.get_meta("eagl_fallback_surface_count", 0)
@@ -134,12 +136,14 @@ func _load_debug_track() -> void:
 	_set_track_controls_enabled(true)
 	_is_loading = false
 	print("EAGL debug track loaded: ", EAGLManager.get_stats())
-	print("EAGL debug scene rendered: objects=%s placed_scenery=%s scenery_multimeshes=%s environment=%s markers=%s textured_surfaces=%s fallback_surfaces=%s uv_surfaces=%s textured_missing_uv=%s lod_surfaces=%s shadow_texture_visibility=%s skipped=%s" % [
+	print("EAGL debug scene rendered: objects=%s placed_scenery=%s scenery_multimeshes=%s environment=%s markers=%s start_points=%s finish_points=%s textured_surfaces=%s fallback_surfaces=%s uv_surfaces=%s textured_missing_uv=%s lod_surfaces=%s shadow_texture_visibility=%s skipped=%s" % [
 		track_node.get_meta("eagl_rendered_object_count", 0),
 		track_node.get_meta("eagl_placed_scenery_instance_count", 0),
 		track_node.get_meta("eagl_scenery_multimesh_count", 0),
 		track_node.get_meta("eagl_environment_object_count", 0),
 		track_node.get_meta("eagl_track_marker_count", 0),
+		track_node.get_meta("eagl_track_start_point_count", 0),
+		track_node.get_meta("eagl_track_finish_point_count", 0),
 		track_node.get_meta("eagl_textured_surface_count", 0),
 		track_node.get_meta("eagl_fallback_surface_count", 0),
 		track_node.get_meta("eagl_uv_surface_count", 0),

@@ -191,7 +191,7 @@ func _assign_source_roles(solid_packs: Array[Dictionary]) -> void:
 
 func _is_special_solid_object_name(object_name: String) -> bool:
 	var name := object_name.to_upper()
-	return name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER" or (name.begins_with("TRACK") and name.contains("STARTLINE"))
+	return name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER" or name.contains("STARTLINE") or name.contains("FINISHLINE")
 
 
 func _extract_blocks_from_strip_entries(vif_payload: PackedByteArray, metadata_payload: PackedByteArray, _object_name: String) -> Array[Dictionary]:

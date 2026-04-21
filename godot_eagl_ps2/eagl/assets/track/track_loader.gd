@@ -34,6 +34,8 @@ func load(track_id: String) -> Node3D:
 	stats["scenery_multimesh_count"] = node.get_meta("eagl_scenery_multimesh_count", 0)
 	stats["environment_object_count"] = node.get_meta("eagl_environment_object_count", 0)
 	stats["track_marker_count"] = node.get_meta("eagl_track_marker_count", 0)
+	stats["track_start_point_count"] = node.get_meta("eagl_track_start_point_count", 0)
+	stats["track_finish_point_count"] = node.get_meta("eagl_track_finish_point_count", 0)
 	stats["skipped"] = node.get_meta("eagl_skipped", {})
 	stats["textured_surface_count"] = node.get_meta("eagl_textured_surface_count", 0)
 	stats["fallback_surface_count"] = node.get_meta("eagl_fallback_surface_count", 0)

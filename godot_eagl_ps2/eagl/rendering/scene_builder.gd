@@ -16,6 +16,8 @@ var warnings: Array[String] = []
 var scenery_multimesh_count := 0
 var environment_object_count := 0
 var track_marker_count := 0
+var track_start_point_count := 0
+var track_finish_point_count := 0
 var shadow_texture_visibility_distance := DEFAULT_SHADOW_TEXTURE_VISIBILITY_DISTANCE
 var shadow_texture_visibility_margin := DEFAULT_SHADOW_TEXTURE_VISIBILITY_MARGIN
 var shadow_texture_visibility_count := 0
@@ -33,6 +35,8 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	scenery_multimesh_count = 0
 	environment_object_count = 0
 	track_marker_count = 0
+	track_start_point_count = 0
+	track_finish_point_count = 0
 	shadow_texture_visibility_count = 0
 
 	var root := Node3D.new()
@@ -75,6 +79,10 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	var marker_root := Node3D.new()
 	marker_root.name = "TrackMarkers"
 	root.add_child(marker_root)
+	var marker_points := _create_named_node3d_children(marker_root, [
+		"StartPoints",
+		"FinishPoints",
+	])
 
 	var unknown_root := Node.new()
 	unknown_root.name = "UnknownChunks"
@@ -83,12 +91,12 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 
 	var place_scenery: bool = bool(options.get("place_scenery_instances", true))
 	var expand_instances: bool = bool(options.get("expand_scenery_instances", false))
-	var built := _add_static_geometry(static_roots, environment_root, marker_root, asset, mesh_cache, place_scenery or expand_instances)
+	var built := _add_static_geometry(static_roots, environment_root, marker_root, marker_points, asset, mesh_cache, place_scenery or expand_instances)
 	var placed := 0
 	if expand_instances:
-		placed = _add_baked_scenery_instances(static_roots, scenery_roots, environment_root, marker_root, asset, mesh_cache)
+		placed = _add_baked_scenery_instances(static_roots, scenery_roots, environment_root, marker_root, marker_points, asset, mesh_cache)
 	elif place_scenery:
-		placed = _add_multimesh_scenery(static_roots, scenery_roots, environment_root, marker_root, asset, mesh_cache)
+		placed = _add_multimesh_scenery(static_roots, scenery_roots, environment_root, marker_root, marker_points, asset, mesh_cache)
 
 	_assign_sun_light_cull_layer(static_root)
 	_assign_sun_light_cull_layer(scenery_root)
@@ -106,6 +114,8 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_scenery_multimesh_count", scenery_multimesh_count)
 	root.set_meta("eagl_environment_object_count", environment_object_count)
 	root.set_meta("eagl_track_marker_count", track_marker_count)
+	root.set_meta("eagl_track_start_point_count", track_start_point_count)
+	root.set_meta("eagl_track_finish_point_count", track_finish_point_count)
 	root.set_meta("eagl_block_count", asset.block_count())
 	root.set_meta("eagl_vertex_count", asset.vertex_count())
 	root.set_meta("eagl_scenery_instance_count", asset.scenery_instances.size())
@@ -175,12 +185,12 @@ func _create_named_node3d_children(parent: Node3D, names: Array[String]) -> Dict
 	return out
 
 
-func _add_static_geometry(static_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, asset, mesh_cache: Dictionary, using_placements: bool) -> int:
+func _add_static_geometry(static_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, marker_points: Dictionary, asset, mesh_cache: Dictionary, using_placements: bool) -> int:
 	var built := 0
 	var solid_packs: Array = asset.solid_packs
 	if solid_packs.is_empty():
 		for obj in _static_objects_for_scene(asset.objects, asset, using_placements):
-			if _add_static_object(static_roots, environment_root, marker_root, obj, mesh_cache):
+			if _add_static_object(static_roots, environment_root, marker_root, marker_points, obj, mesh_cache):
 				built += 1
 		return built
 
@@ -190,12 +200,12 @@ func _add_static_geometry(static_roots: Dictionary, environment_root: Node3D, ma
 		if static_objects.is_empty():
 			continue
 		for obj in static_objects:
-			if _add_static_object(static_roots, environment_root, marker_root, obj, mesh_cache):
+			if _add_static_object(static_roots, environment_root, marker_root, marker_points, obj, mesh_cache):
 				built += 1
 	return built
 
 
-func _add_static_object(static_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, obj: Dictionary, mesh_cache: Dictionary) -> bool:
+func _add_static_object(static_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, marker_points: Dictionary, obj: Dictionary, mesh_cache: Dictionary) -> bool:
 	var object_name: String = obj.get("name", "")
 	var entry = mesh_cache["by_offset"].get(int(obj.get("chunk_offset", -1)))
 	if entry == null:
@@ -214,10 +224,20 @@ func _add_static_object(static_roots: Dictionary, environment_root: Node3D, mark
 	node.set_meta("eagl_source_role", _source_role_for_object(obj))
 	node.set_meta("eagl_placement_kind", "DIRECT_SOLID")
 	node.set_meta("bun_category", category)
+	var marker_kind := _track_marker_kind_for_name(object_name)
+	if marker_kind != "":
+		node.set_meta("eagl_track_marker_kind", marker_kind)
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
 	_apply_shadow_texture_visibility(node, category)
 	parent.add_child(node)
 	_count_semantic_node(category)
+	if category == "TRACK_MARKER":
+		_register_track_marker_point(marker_points, object_name, node.transform, {
+			"eagl_chunk_offset": obj.get("chunk_offset", 0),
+			"eagl_solid_pack_index": obj.get("solid_pack_index", -1),
+			"eagl_source_role": _source_role_for_object(obj),
+			"eagl_placement_kind": "DIRECT_SOLID",
+		})
 	return true
 
 
@@ -245,7 +265,7 @@ func _static_objects_for_scene(objects: Array, asset, using_placements: bool) ->
 	return static_objects
 
 
-func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, asset, mesh_cache: Dictionary) -> int:
+func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, marker_points: Dictionary, asset, mesh_cache: Dictionary) -> int:
 	var placed := 0
 	for instance in asset.scenery_instances:
 		var entry = _mesh_entry_for_instance(instance, mesh_cache)
@@ -271,15 +291,27 @@ func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dicti
 		node.set_meta("eagl_placement_kind", "SCENERY_INSTANCE")
 		node.set_meta("bun_category", category)
 		node.set_meta("eagl_scenery_bucket", scenery_bucket)
+		var marker_kind := _track_marker_kind_for_name(obj.get("name", ""))
+		if marker_kind != "":
+			node.set_meta("eagl_track_marker_kind", marker_kind)
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
 		_apply_shadow_texture_visibility(node, category)
 		parent.add_child(node)
 		placed += 1
 		_count_semantic_node(category)
+		if category == "TRACK_MARKER":
+			_register_track_marker_point(marker_points, obj.get("name", ""), node.transform, {
+				"eagl_scenery_instance": true,
+				"eagl_scenery_info_index": instance.get("scenery_info_index", -1),
+				"eagl_section_number": instance.get("section_number", -1),
+				"eagl_source_role": _source_role_for_object(obj),
+				"eagl_placement_kind": "SCENERY_INSTANCE",
+				"eagl_record_index": instance.get("record_index", 0),
+			})
 	return placed
 
 
-func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, asset, mesh_cache: Dictionary) -> int:
+func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, marker_points: Dictionary, asset, mesh_cache: Dictionary) -> int:
 	var groups := {}
 	var placed := 0
 	for instance in asset.scenery_instances:
@@ -293,6 +325,20 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 			continue
 		var mesh_hash := int(instance.get("object_hash", obj.get("name_hash", 0)))
 		var category := _category_for_mesh_entry(obj, entry, int(instance.get("section_number", -1)))
+		if category == "TRACK_MARKER":
+			_register_track_marker_point(
+				marker_points,
+				obj.get("name", ""),
+				MathUtils.ps2_rows_to_godot_transform(instance.get("transform", [])),
+				{
+					"eagl_scenery_instance": true,
+					"eagl_scenery_info_index": instance.get("scenery_info_index", -1),
+					"eagl_section_number": instance.get("section_number", -1),
+					"eagl_source_role": _source_role_for_object(obj),
+					"eagl_placement_kind": "SCENERY_INSTANCE",
+					"eagl_record_index": instance.get("record_index", 0),
+				}
+			)
 		if category == "SHADOW":
 			var parent := _parent_for_category(category, static_roots, scenery_roots, environment_root, marker_root)
 			var node := MeshInstance3D.new()
@@ -354,6 +400,9 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 		node.set_meta("eagl_placement_kind", "SCENERY_INSTANCE")
 		node.set_meta("bun_category", category)
 		node.set_meta("eagl_scenery_bucket", scenery_bucket)
+		var marker_kind := _track_marker_kind_for_name(obj.get("name", ""))
+		if marker_kind != "":
+			node.set_meta("eagl_track_marker_kind", marker_kind)
 		_apply_shadow_texture_visibility(node, category)
 		parent.add_child(node)
 		placed += transforms.size()
@@ -414,7 +463,7 @@ func _semantic_category_for_object(obj: Dictionary, _section_number: int = -1) -
 	var name := String(obj.get("name", "")).to_upper()
 	if name.begins_with("SKYDOME") or name == "WATER" or name.contains("ENVMAP"):
 		return "ENVIRONMENT"
-	if name.begins_with("TRACK") and name.contains("STARTLINE"):
+	if _track_marker_kind_for_name(name) != "":
 		return "TRACK_MARKER"
 	if name.begins_with("RD_") or name.begins_with("DIRTRD_"):
 		return "ROAD"
@@ -476,6 +525,39 @@ func _source_role_for_object(obj: Dictionary) -> String:
 	if _semantic_category_for_object(obj) in ["ENVIRONMENT", "TRACK_MARKER"]:
 		return "SPECIAL_SOLID_PACK"
 	return "STATIC_SOLID_PACK"
+
+
+func _track_marker_kind_for_name(object_name: String) -> String:
+	var name := object_name.to_upper()
+	if name.contains("STARTLINE"):
+		return "START"
+	if name.contains("FINISHLINE"):
+		return "FINISH"
+	return ""
+
+
+func _register_track_marker_point(marker_points: Dictionary, object_name: String, point_transform: Transform3D, extra_meta: Dictionary = {}) -> void:
+	var marker_kind := _track_marker_kind_for_name(object_name)
+	if marker_kind == "":
+		return
+	var parent_name := "StartPoints" if marker_kind == "START" else "FinishPoints"
+	var parent: Node3D = marker_points.get(parent_name)
+	if parent == null:
+		return
+	var node := Node3D.new()
+	var point_index := parent.get_child_count()
+	node.name = _safe_node_name("%s_%03d_%s" % [parent_name.trim_suffix("s"), point_index, object_name])
+	node.transform = point_transform
+	node.set_meta("eagl_track_marker_point", true)
+	node.set_meta("eagl_track_marker_kind", marker_kind)
+	node.set_meta("eagl_object_name", object_name)
+	for meta_key in extra_meta.keys():
+		node.set_meta(String(meta_key), extra_meta[meta_key])
+	parent.add_child(node)
+	if marker_kind == "START":
+		track_start_point_count += 1
+	else:
+		track_finish_point_count += 1
 
 
 func _parent_for_category(category: String, static_roots: Dictionary, scenery_roots, environment_root: Node3D, marker_root: Node3D, scenery_bucket: String = "Props") -> Node3D:
