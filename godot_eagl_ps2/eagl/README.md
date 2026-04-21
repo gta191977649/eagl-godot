@@ -13,7 +13,7 @@ Current platform:
 `EAGLManager` is registered as a Godot autoload in `project.godot`.
 
 ```gdscript
-EAGLManager.initialize("EAGL_HOTPUSUIT2_PS2", "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA")
+EAGLManager.initialize("EAGL_HOTPUSUIT2_PS2", game_root)
 var track := EAGLManager.load_track("61")
 add_child(track)
 ```
@@ -79,7 +79,7 @@ res://eagl/debug/track_render_debug.tscn
 Defaults:
 
 - platform: `EAGL_HOTPUSUIT2_PS2`
-- game root: `/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA`
+- game root: use the exported `game_root` field or `EAGL_HP2_GAME_ROOT`
 - track: `61`
 - shared scenery placement: on
 - baked scenery expansion: off

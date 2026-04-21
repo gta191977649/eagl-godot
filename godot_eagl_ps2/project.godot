@@ -19,6 +19,10 @@ config/icon="res://icon.svg"
 
 EAGLManager="*res://eagl/core/eagl_manager.gd"
 
+[eagl]
+
+game_root="/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA"
+
 [physics]
 
 3d/physics_engine="Jolt Physics"

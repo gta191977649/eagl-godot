@@ -1,0 +1,75 @@
+[gd_scene format=3 uid="uid://ccsn403ygawdo"]
+
+[ext_resource type="Script" uid="uid://bp3rlrj7y2s3l" path="res://eagl/debug/car_debug.gd" id="1"]
+[ext_resource type="Script" uid="uid://dfwo66bhira15" path="res://eagl/handling/car_controller.gd" id="2"]
+[ext_resource type="Resource" path="res://eagl/assets/car/configs/corvette_hp2_example.tres" id="3"]
+
+[sub_resource type="Environment" id="1"]
+background_mode = 2
+sky_custom_fov = 65.0
+ambient_light_source = 2
+ambient_light_energy = 0.75
+tonemap_mode = 2
+
+[sub_resource type="BoxShape3D" id="3"]
+size = Vector3(600, 1, 600)
+
+[sub_resource type="StandardMaterial3D" id="2"]
+albedo_color = Color(0.18, 0.18, 0.19, 1)
+roughness = 0.95
+
+[sub_resource type="BoxMesh" id="4"]
+size = Vector3(600, 1, 600)
+
+[sub_resource type="BoxShape3D" id="5"]
+size = Vector3(4.6, 1.2, 1.9)
+
+[node name="CarDebug" type="Node3D" unique_id=1852505387]
+script = ExtResource("1")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1644987681]
+environment = SubResource("1")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=1305201704]
+transform = Transform3D(0.76604444, 0.46238267, -0.4465178, 0, 0.6946584, 0.7193398, 0.6427876, -0.55104625, 0.5321392, 0, 0, 0)
+light_energy = 1.8
+shadow_enabled = true
+
+[node name="FlatTrack" type="StaticBody3D" parent="." unique_id=1148499770]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FlatTrack" unique_id=426370608]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+shape = SubResource("3")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="FlatTrack" unique_id=415842352]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+material_override = SubResource("2")
+mesh = SubResource("4")
+
+[node name="Car" type="RigidBody3D" parent="." unique_id=1860729170]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.9, 0)
+continuous_cd = true
+script = ExtResource("2")
+config = ExtResource("3")
+auto_build_visuals = false
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Car" unique_id=995590640]
+shape = SubResource("5")
+
+[node name="FollowCamera" type="Camera3D" parent="." unique_id=1739694075]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 4, 0)
+current = true
+fov = 70.0
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=1810195261]
+
+[node name="TelemetryPanel" type="PanelContainer" parent="HUD" unique_id=450501903]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 316.0
+offset_bottom = 206.0
+
+[node name="Telemetry" type="Label" parent="HUD/TelemetryPanel" unique_id=1945975048]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Loading telemetry..."

@@ -62,7 +62,15 @@ func _load_debug_track() -> void:
 
 	await _set_loading_status("Initializing EAGL", 0.05, true)
 
-	var ok: bool = EAGLManager.initialize(platform, game_root, {
+	var resolved_game_root := _resolved_game_root()
+	if resolved_game_root == "":
+		_is_loading = false
+		_set_track_controls_enabled(true)
+		await _set_loading_status("Failed: no game_root configured", 1.0, true)
+		push_error("Track debug requires EAGLManager game_root, exported game_root, or EAGL_HP2_GAME_ROOT")
+		return
+
+	var ok: bool = EAGLManager.initialize(platform, resolved_game_root, {
 		"place_scenery_instances": place_scenery_instances,
 		"expand_scenery_instances": expand_scenery_instances,
 		"generate_lods": generate_lods,
@@ -172,7 +180,7 @@ func _populate_track_selector() -> void:
 
 
 func _available_track_ids() -> Array[String]:
-	var tracks_dir := _resolve_tracks_dir(game_root)
+	var tracks_dir := _resolve_tracks_dir(_resolved_game_root())
 	if tracks_dir == "":
 		return []
 
@@ -224,6 +232,19 @@ func _resolve_tracks_dir(root: String) -> String:
 			if DirAccess.dir_exists_absolute(candidate.path_join("TRACKS")):
 				return candidate.path_join("TRACKS")
 	return ""
+
+
+func _resolved_game_root() -> String:
+	if EAGLManager.is_initialized():
+		var manager_root := EAGLManager.get_game_root()
+		if manager_root != "":
+			return manager_root
+	if game_root != "":
+		return game_root
+	var project_root := str(ProjectSettings.get_setting("eagl/game_root", ""))
+	if project_root != "":
+		return project_root
+	return OS.get_environment("EAGL_HP2_GAME_ROOT")
 
 
 func _file_has_data(path: String) -> bool:

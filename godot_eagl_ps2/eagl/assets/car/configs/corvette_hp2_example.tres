@@ -1,0 +1,63 @@
+[gd_resource type="Resource" script_class="CarConfig" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://eagl/handling/car_config.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+car_name = "CORVETTE"
+row_index = 0
+duplicate_index = 1
+drive_type = "RWD"
+mass_kg = 1000.0
+center_of_mass_ps2 = Vector3(-0.201, 0.387, 0)
+body_size_ps2 = Vector3(4.6, 1.9, 1.2)
+wheel_local_positions_ps2 = Array[Vector3]([Vector3(1.318, 0.727, 0.2), Vector3(1.318, -0.727, 0.2), Vector3(-1.363, 0.727, 0.2), Vector3(-1.363, -0.727, 0.2)])
+wheel_radii = PackedFloat32Array(0.322, 0.322, 0.332, 0.332)
+front_progressive_spring_scale = 4.5
+front_spring_coefficient = 55.0
+front_rebound_damping = 5.3
+front_bump_damping = 5.0
+front_bump_stop_coefficient = 32.0
+front_rest_length = 1.46
+front_travel_limit = 1.85
+rear_progressive_spring_scale = 4.5
+rear_spring_coefficient = 53.0
+rear_rebound_damping = 5.3
+rear_bump_damping = 5.0
+rear_bump_stop_coefficient = 34.0
+rear_rest_length = 1.56
+rear_travel_limit = 1.95
+steering_response = 3.42
+steering_return = 3.42
+steering_lock_scale = 1.0
+steering_max_degrees = 28.0
+low_speed_steer_scale = 1.0
+high_speed_steer_scale = 0.26
+high_speed_steer_kph = 240.0
+front_lateral_grip = 1.18
+rear_lateral_grip = 1.08
+front_longitudinal_grip = 1.12
+rear_longitudinal_grip = 1.2
+slip_grip_reduction_start_deg = 6.0
+slip_grip_reduction_end_deg = 24.0
+drift_grip_scale = 0.58
+stabilization_slip_deg = 10.0
+drift_slip_deg = 18.0
+stabilization_min_speed_kph = 30.0
+yaw_damping = 1.8
+yaw_assist = 1350.0
+steering_yaw_assist = 680.0
+final_drive_ratio = 4.0
+reverse_gear_ratio = -2.97
+forward_gears = PackedFloat32Array(2.97, 2.07, 1.43, 1.0, 0.84, 0.56)
+idle_rpm = 900.0
+engine_peak_rpm = 6500.0
+engine_redline_rpm = 7200.0
+shift_up_rpm = 6900.0
+shift_down_rpm = 3600.0
+engine_force_scale = 8400.0
+top_speed_reference_kph = 315.0
+brake_force = 10500.0
+handbrake_force = 4600.0
+rolling_resistance = 0.045
+aero_drag = 0.000473
