@@ -1,6 +1,7 @@
 extends Node3D
 
 const CarLoaderScript = preload("res://eagl/assets/car/car_loader.gd")
+const GlobalBHandlingLoaderScript = preload("res://eagl/handling/globalb_handling_loader.gd")
 const RoadSurfaceSamplerScript = preload("res://eagl/handling/road_surface_sampler.gd")
 const DEFAULT_PLATFORM := "EAGL_HOTPUSUIT2_PS2"
 
@@ -19,6 +20,7 @@ const CAMERA_FILL_LIGHT_RANGE = 28.0
 
 @export var platform := DEFAULT_PLATFORM
 @export_global_dir var game_root = ""
+@export_file("*.json") var handling_json_path = ""
 
 @onready var car = $Car
 @onready var camera: Camera3D = $FollowCamera
@@ -35,6 +37,17 @@ var _status_message := ""
 var _camera_yaw := 0.0
 var _camera_pitch := deg_to_rad(14.0)
 var _camera_target_position := Vector3.ZERO
+
+
+func _enter_tree() -> void:
+	var car_node = get_node_or_null("Car")
+	if car_node == null:
+		return
+	var loaded_config = _load_handling_config(car_node)
+	if loaded_config != null:
+		car_node.config = loaded_config
+	if car_node.config != null:
+		_seat_car_from_config(car_node)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -98,9 +111,12 @@ func _update_telemetry() -> void:
 	lines.append("")
 	for wheel in snapshot.get("wheels", []):
 		lines.append(
-			"%s  comp=%4.2f  %s  F=%6.0f" % [
+			"%s  cur=%5.3f raw=%5.3f [%5.3f..%5.3f] %s  F=%6.0f" % [
 				String(wheel.get("slot", "--")),
 				float(wheel.get("compression", 0.0)),
+				float(wheel.get("suspension_distance", 0.0)),
+				float(wheel.get("min_travel", 0.0)),
+				float(wheel.get("max_travel", 0.0)),
 				"GRD" if bool(wheel.get("grounded", false)) else "AIR",
 				float(wheel.get("force", 0.0)),
 			]
@@ -155,6 +171,48 @@ func _resolved_game_root() -> String:
 	if project_root != "":
 		return project_root
 	return OS.get_environment("EAGL_HP2_GAME_ROOT")
+
+
+func _resolved_handling_json_path() -> String:
+	if handling_json_path != "":
+		return handling_json_path
+	var project_path := str(ProjectSettings.get_setting("eagl/handling_json", ""))
+	if project_path != "":
+		return project_path
+	return OS.get_environment("EAGL_HP2_HANDLING_JSON")
+
+
+func _load_handling_config(car_node) -> Resource:
+	var json_path := _resolved_handling_json_path()
+	if json_path == "" or not FileAccess.file_exists(json_path):
+		return null
+	var existing = car_node.config
+	if existing == null:
+		return null
+	var loader = GlobalBHandlingLoaderScript.new()
+	var loaded = loader.load_config(json_path, existing.car_name, existing.duplicate_index, existing.drive_type)
+	if loaded == null:
+		push_warning("Failed to load handling JSON config for %s from %s" % [existing.car_name, json_path])
+		return null
+	print("EAGL handling config override: car=%s duplicate=%d json=%s" % [
+		loaded.car_name,
+		int(loaded.duplicate_index),
+		json_path,
+	])
+	return loaded
+
+
+func _seat_car_from_config(car_node) -> void:
+	if car_node.config == null:
+		return
+	var config = car_node.config
+	if config.wheel_radii.is_empty():
+		return
+	var target_origin_z := 0.0
+	for index in range(mini(config.wheel_local_positions_ps2.size(), config.wheel_radii.size())):
+		var pivot_local_z = config.wheel_local_positions_ps2[index].z
+		target_origin_z = maxf(target_origin_z, config.wheel_radii[index] - pivot_local_z)
+	car_node.position.y = target_origin_z + 0.02
 
 
 func _ensure_eagl_ready() -> String:

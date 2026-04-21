@@ -3,7 +3,7 @@ extends Node3D
 const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_bank.gd")
 
 @export var platform := "EAGL_HOTPUSUIT2_PS2"
-@export_global_dir var game_root := "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA"
+@export_global_dir var game_root := ""
 @export var track_id := "31"
 @export var load_on_ready := true
 @export var place_scenery_instances := true

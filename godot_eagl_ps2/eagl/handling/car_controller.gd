@@ -111,6 +111,7 @@ func refresh_visual_bindings() -> void:
 		for child in dummies_root.get_children():
 			if child is Node3D:
 				_debug_dummy_nodes[String(child.name)] = child
+	_fit_collision_shape_to_visual_bounds()
 
 
 func get_debug_snapshot() -> Dictionary:
@@ -151,7 +152,7 @@ func _step_vehicle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 		if not wheel.grounded:
 			continue
 		var drive_bias = config.drive_bias_for_slot(wheel.slot_id)
-		var wheel_heading_ps2 = wheel.normal_ps2.cross(_wheel_right_axis_ps2(transform.basis, wheel)).normalized()
+		var wheel_heading_ps2 = _wheel_heading_ps2(transform.basis, body_up_ps2, wheel)
 		if wheel_heading_ps2.length_squared() <= 0.0001:
 			wheel_heading_ps2 = body_forward_ps2
 
@@ -182,22 +183,26 @@ func _step_suspension_for_wheel(
 	body_origin_ps2: Vector3,
 	sub_dt: float
 ) -> void:
-	var local_attachment_ps2: Vector3 = wheel.local_position_ps2
-	var attachment_world_ps2 = _transform_point_ps2(transform, local_attachment_ps2)
-	var wheel_contact_query_ps2 = attachment_world_ps2
+	var pivot_local_ps2: Vector3 = wheel.pivot_local_position_ps2
+	var sample_local_ps2: Vector3 = wheel.local_position_ps2
+	var pivot_world_ps2 = _transform_point_ps2(transform, pivot_local_ps2)
+	var sample_world_ps2 = _transform_point_ps2(transform, sample_local_ps2)
+	var wheel_contact_query_ps2 = sample_world_ps2
 
-	wheel.world_attachment_ps2 = attachment_world_ps2
+	wheel.world_pivot_ps2 = pivot_world_ps2
+	wheel.world_attachment_ps2 = sample_world_ps2
 	wheel.prev_compression = wheel.compression
 	wheel.grounded = false
 	wheel.material_id = -1
 	wheel.normal_ps2 = Vector3(0.0, 0.0, 1.0)
-	wheel.contact_point_ps2 = attachment_world_ps2
-	wheel.world_wheel_center_ps2 = attachment_world_ps2
+	wheel.contact_point_ps2 = sample_world_ps2
+	wheel.world_wheel_center_ps2 = sample_world_ps2
 	wheel.suspension_distance = wheel.rest_length
 	wheel.center_offset = maxf(wheel.rest_length - wheel.wheel_radius, 0.0)
+	wheel.overtravel = 0.0
 	wheel.suspension_force = 0.0
 
-	var wheel_velocity_ps2 = _godot_to_ps2(state.get_velocity_at_local_position(_ps2_to_godot(local_attachment_ps2)))
+	var wheel_velocity_ps2 = _godot_to_ps2(state.get_velocity_at_local_position(_ps2_to_godot(pivot_local_ps2)))
 	var wheel_heading_ps2 = _wheel_heading_ps2(transform.basis, body_up_ps2, wheel)
 	var wheel_right_ps2 = _wheel_right_axis_ps2(transform.basis, wheel)
 	wheel.forward_speed = wheel_velocity_ps2.dot(wheel_heading_ps2)
@@ -214,45 +219,43 @@ func _step_suspension_for_wheel(
 		wheel.compression_velocity = (wheel.compression - wheel.prev_compression) / maxf(sub_dt, 0.0001)
 		return
 
-	var travel_direction_ps2 = -body_up_ps2
+	var suspension_axis_ps2 = body_up_ps2
 	var surface_normal: Vector3 = surface["normal"]
 	var surface_point: Vector3 = surface["point"]
-	var denom = surface_normal.dot(travel_direction_ps2)
+	var denom = surface_normal.dot(suspension_axis_ps2)
 	if absf(denom) <= 0.0001:
 		wheel.compression = 0.0
 		wheel.compression_velocity = (wheel.compression - wheel.prev_compression) / maxf(sub_dt, 0.0001)
 		return
 
-	var t = surface_normal.dot(surface_point - attachment_world_ps2) / denom
+	var t = surface_normal.dot(surface_point - sample_world_ps2) / denom
 	var suspension_distance = t + wheel.wheel_radius
-	var compression = clampf(wheel.rest_length - suspension_distance, wheel.min_travel, wheel.max_travel)
-	wheel.compression = compression
+	var clamped_length = clampf(suspension_distance, wheel.min_travel, wheel.max_travel)
+	wheel.compression = clamped_length
 	wheel.compression_velocity = (wheel.compression - wheel.prev_compression) / maxf(sub_dt, 0.0001)
-	wheel.grounded = wheel.compression > 0.0 and t >= -wheel.wheel_radius
+	wheel.grounded = suspension_distance >= wheel.min_travel
 	wheel.material_id = int(surface.get("material_id", -1))
 	wheel.normal_ps2 = surface_normal
 	wheel.suspension_distance = suspension_distance
-	wheel.contact_point_ps2 = attachment_world_ps2 + travel_direction_ps2 * maxf(t, 0.0)
-	wheel.center_offset = maxf(t - wheel.wheel_radius, 0.0)
-	wheel.world_wheel_center_ps2 = attachment_world_ps2 + travel_direction_ps2 * wheel.center_offset
+	wheel.overtravel = maxf(suspension_distance - wheel.max_travel, 0.0)
+	wheel.contact_point_ps2 = sample_world_ps2 + suspension_axis_ps2 * t
+	wheel.center_offset = clamped_length
+	wheel.world_wheel_center_ps2 = sample_world_ps2 + suspension_axis_ps2 * clamped_length
 
 	if not wheel.grounded:
 		wheel.suspension_force = 0.0
 		return
 
-	var normalized_compression = wheel.compression / maxf(wheel.max_travel, 0.001)
-	var spring_force = wheel.spring_coefficient * wheel.compression * (1.0 + wheel.progressive_spring_scale * normalized_compression)
-	var damping = wheel.bump_damping if wheel.compression_velocity > 0.0 else wheel.rebound_damping
+	var progressive_sample = maxf(wheel.compression, 0.0)
+	var spring_force = wheel.spring_coefficient * wheel.compression * (1.0 + wheel.progressive_spring_scale * progressive_sample)
+	var damping = wheel.rebound_damping if wheel.compression_velocity > 0.0 else wheel.bump_damping
 	var damper_force = damping * wheel.compression_velocity
-	var bump_stop_start = wheel.max_travel * 0.85
-	var bump_force = 0.0
-	if wheel.compression > bump_stop_start:
-		var overtravel = (wheel.compression - bump_stop_start) / maxf(wheel.max_travel - bump_stop_start, 0.001)
-		bump_force = wheel.bump_stop_coefficient * overtravel * overtravel
+	var bump_force = wheel.bump_stop_coefficient * (wheel.compression - wheel.reference_length)
+	var overtravel_force = 0.0
 
-	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + bump_force, 0.0)
+	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + bump_force + overtravel_force, 0.0)
 	wheel.load_ratio = wheel.suspension_force / maxf(wheel.preload_force, 1.0)
-	_apply_impulse_ps2(state, body_up_ps2 * wheel.suspension_force * sub_dt, attachment_world_ps2)
+	_apply_impulse_ps2(state, body_up_ps2 * wheel.suspension_force * sub_dt, pivot_world_ps2)
 
 
 func _compute_rpm(speed_mps: float, driven_angular_speed: float, sub_dt: float) -> float:
@@ -386,6 +389,10 @@ func _update_debug_snapshot() -> void:
 		wheel_rows.append({
 			"slot": wheel.slot_id,
 			"compression": wheel.compression,
+			"suspension_distance": wheel.suspension_distance,
+			"min_travel": wheel.min_travel,
+			"max_travel": wheel.max_travel,
+			"overtravel": wheel.overtravel,
 			"grounded": wheel.grounded,
 			"force": wheel.suspension_force,
 		})
@@ -454,7 +461,7 @@ func _update_visuals() -> void:
 		var pivot_node = _debug_pivot_nodes.get(wheel.slot_id, null)
 		if suspension_node != null and suspension_node is Node3D and pivot_node != null and pivot_node is Node3D and _visual_root != null:
 			var suspension_transform: Node3D = suspension_node
-			suspension_transform.position = Vector3(0.0, -wheel.center_offset, 0.0)
+			suspension_transform.position = _ps2_to_godot(wheel.world_wheel_center_ps2 - wheel.world_pivot_ps2)
 		elif wheel_visual != null and wheel_visual is Node3D:
 			var target_position = _ps2_to_godot(wheel.world_wheel_center_ps2)
 			var wheel_node: Node3D = wheel_visual
@@ -485,9 +492,18 @@ func _rebuild_debug_mesh() -> void:
 		var axis_end = _ps2_to_godot(wheel.contact_point_ps2 if wheel.grounded else wheel.world_wheel_center_ps2)
 		var normal_end = _ps2_to_godot(wheel.contact_point_ps2 + wheel.normal_ps2 * debug_normal_length)
 		var center = _ps2_to_godot(wheel.world_wheel_center_ps2)
+		var pivot = _ps2_to_godot(wheel.world_pivot_ps2)
 		var normal_start = center
 		if wheel.contact_point_ps2 != Vector3.ZERO:
 			normal_start = _ps2_to_godot(wheel.contact_point_ps2)
+		_debug_mesh.surface_set_color(Color(1.0, 0.35, 0.15, 1.0))
+		_debug_mesh.surface_add_vertex(pivot + Vector3.LEFT * 0.09)
+		_debug_mesh.surface_add_vertex(pivot + Vector3.RIGHT * 0.09)
+		_debug_mesh.surface_add_vertex(pivot + Vector3.UP * 0.09)
+		_debug_mesh.surface_add_vertex(pivot + Vector3.DOWN * 0.09)
+		_debug_mesh.surface_set_color(Color(0.85, 0.45, 1.0, 1.0))
+		_debug_mesh.surface_add_vertex(pivot)
+		_debug_mesh.surface_add_vertex(axis_start)
 		_debug_mesh.surface_set_color(Color(0.15, 0.7, 1.0, 1.0))
 		_debug_mesh.surface_add_vertex(axis_start)
 		_debug_mesh.surface_add_vertex(axis_end)
@@ -509,6 +525,7 @@ func _rebuild_debug_mesh() -> void:
 		var dummy_color := Color(0.85, 0.3, 1.0, 1.0) if dummy_name.ends_with("_PIVOT") else Color(0.35, 0.95, 0.85, 1.0)
 		_add_cross_marker(dummy_node.global_position, 0.09, dummy_color)
 		_add_circle_marker(dummy_node.global_position, 0.13, (dummy_node.global_basis * pivot_basis.y).normalized(), dummy_color)
+	_add_body_forward_marker()
 	_debug_mesh.surface_end()
 
 
@@ -564,22 +581,59 @@ func _fit_chassis_collision_shape() -> void:
 	var box_shape := collision_shape.shape as BoxShape3D
 	if box_shape == null:
 		return
-	var wheel_top_ps2 := 0.0
-	var half_track_ps2 := 0.0
-	for wheel in wheels:
-		wheel_top_ps2 = maxf(wheel_top_ps2, wheel.local_position_ps2.z + wheel.wheel_radius)
-		half_track_ps2 = maxf(half_track_ps2, absf(wheel.local_position_ps2.y))
-	var chassis_length_ps2 := clampf(config.wheelbase_meters() + 0.6, config.body_size_ps2.x * 0.6, config.body_size_ps2.x * 0.78)
-	var chassis_width_ps2 := clampf(half_track_ps2 * 1.25, config.body_size_ps2.y * 0.46, config.body_size_ps2.y * 0.7)
-	var chassis_height_ps2 := clampf(config.body_size_ps2.z * 0.38, 0.34, 0.58)
-	var chassis_bottom_ps2 := wheel_top_ps2 + maxf(chassis_height_ps2 * 0.12, 0.04)
-	var chassis_center_ps2 := Vector3(
-		config.center_of_mass_ps2.x,
-		config.center_of_mass_ps2.y,
-		chassis_bottom_ps2 + chassis_height_ps2 * 0.5
-	)
-	box_shape.size = _ps2_to_godot(Vector3(chassis_length_ps2, chassis_width_ps2, chassis_height_ps2)).abs()
-	collision_shape.position = _ps2_to_godot(chassis_center_ps2)
+	box_shape.size = _ps2_to_godot(config.body_size_ps2).abs()
+	collision_shape.position = _ps2_to_godot(Vector3(0.0, 0.0, config.body_size_ps2.z * 0.5))
+
+
+func _fit_collision_shape_to_visual_bounds() -> void:
+	var collision_shape := get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if collision_shape == null:
+		return
+	var box_shape := collision_shape.shape as BoxShape3D
+	if box_shape == null:
+		return
+	var body_root := get_node_or_null("CarVisual/Body") as Node3D
+	if body_root == null:
+		return
+	var has_bounds := false
+	var min_point := Vector3.ZERO
+	var max_point := Vector3.ZERO
+	for child in body_root.get_children():
+		if not (child is MeshInstance3D):
+			continue
+		var mesh_instance := child as MeshInstance3D
+		var local_aabb := mesh_instance.get_aabb()
+		var corners := [
+			local_aabb.position,
+			local_aabb.position + Vector3(local_aabb.size.x, 0.0, 0.0),
+			local_aabb.position + Vector3(0.0, local_aabb.size.y, 0.0),
+			local_aabb.position + Vector3(0.0, 0.0, local_aabb.size.z),
+			local_aabb.position + Vector3(local_aabb.size.x, local_aabb.size.y, 0.0),
+			local_aabb.position + Vector3(local_aabb.size.x, 0.0, local_aabb.size.z),
+			local_aabb.position + Vector3(0.0, local_aabb.size.y, local_aabb.size.z),
+			local_aabb.position + local_aabb.size,
+		]
+		for corner in corners:
+			var p: Vector3 = to_local(mesh_instance.global_transform * corner)
+			if not has_bounds:
+				min_point = p
+				max_point = p
+				has_bounds = true
+			else:
+				min_point = min_point.min(p)
+				max_point = max_point.max(p)
+	if not has_bounds:
+		return
+	box_shape.size = (max_point - min_point).abs()
+	collision_shape.position = (min_point + max_point) * 0.5
+
+
+func _add_body_forward_marker() -> void:
+	var body_origin := global_transform.origin
+	var body_forward := global_transform.basis * Vector3.RIGHT
+	_debug_mesh.surface_set_color(Color(1.0, 0.1, 0.1, 1.0))
+	_debug_mesh.surface_add_vertex(body_origin)
+	_debug_mesh.surface_add_vertex(body_origin + body_forward.normalized() * 1.5)
 
 
 func _transform_point_ps2(transform: Transform3D, local_point_ps2: Vector3) -> Vector3:

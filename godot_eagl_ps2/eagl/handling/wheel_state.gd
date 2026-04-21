@@ -6,6 +6,7 @@ var slot_id = ""
 var axle = "front"
 var side = "left"
 
+var pivot_local_position_ps2 = Vector3.ZERO
 var local_position_ps2 = Vector3.ZERO
 var wheel_radius = 0.33
 
@@ -25,6 +26,7 @@ var longitudinal_grip = 1.0
 
 var steer_angle = 0.0
 var roll_angle = 0.0
+var world_pivot_ps2 = Vector3.ZERO
 var world_attachment_ps2 = Vector3.ZERO
 var world_wheel_center_ps2 = Vector3.ZERO
 var contact_point_ps2 = Vector3.ZERO
@@ -32,6 +34,8 @@ var normal_ps2 = Vector3(0.0, 0.0, 1.0)
 var material_id = -1
 var suspension_distance = 0.0
 var center_offset = 0.0
+var overtravel = 0.0
+var reference_length = 0.0
 
 var compression = 0.0
 var prev_compression = 0.0
@@ -46,6 +50,7 @@ var load_ratio = 0.0
 
 
 func reset_runtime() -> void:
+	world_pivot_ps2 = Vector3.ZERO
 	world_attachment_ps2 = Vector3.ZERO
 	world_wheel_center_ps2 = Vector3.ZERO
 	contact_point_ps2 = Vector3.ZERO
@@ -53,6 +58,7 @@ func reset_runtime() -> void:
 	material_id = -1
 	suspension_distance = 0.0
 	center_offset = 0.0
+	overtravel = 0.0
 	roll_angle = 0.0
 	compression = 0.0
 	prev_compression = 0.0

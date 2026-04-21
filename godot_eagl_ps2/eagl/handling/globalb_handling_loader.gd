@@ -42,13 +42,9 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.duplicate_index = int(row.get("duplicate_index", 1))
 	config.drive_type = drive_type
 	config.mass_kg = _field_value(floats, "mass", config.mass_kg)
-	# The 0x0F0..0x0F8 triplet is still only inferred and the lateral/vertical components
-	# do not behave like a verified physical COM in the runtime. Keep only longitudinal bias.
-	config.center_of_mass_ps2 = Vector3(
-		_field_value(floats, "body_center_x", 0.0),
-		0.0,
-		0.0
-	)
+	# The 0x0F0..0x0F8 triplet is still not verified against the runtime path. Keep
+	# the rigid-body COM neutral until that field is confirmed from the executable.
+	config.center_of_mass_ps2 = Vector3.ZERO
 	config.body_size_ps2 = Vector3(
 		_field_value(floats, "body_length", config.body_size_ps2.x),
 		_field_value(floats, "body_width", config.body_size_ps2.y),
@@ -76,29 +72,27 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 		radii.append(float(wheel_entry.get("wheel_radius", 0.33)))
 	config.wheel_radii = PackedFloat32Array(radii)
 
-	config.front_rest_length = _field_value(floats, "front_suspension_rest", config.front_rest_length)
-	config.front_travel_limit = _field_value(floats, "front_suspension_travel", config.front_travel_limit)
-	config.rear_rest_length = _field_value(floats, "rear_suspension_rest", config.rear_rest_length)
-	config.rear_travel_limit = _field_value(floats, "rear_suspension_travel", config.rear_travel_limit)
+	config.front_travel_limit = _row_float(globalb_row, 0x1ac, config.front_travel_limit)
+	config.front_rest_length = _row_float(globalb_row, 0x1b0, config.front_rest_length)
+	config.front_reference_length = _row_float(globalb_row, 0x1b4, config.front_reference_length)
+	config.rear_travel_limit = _row_float(globalb_row, 0x1cc, config.rear_travel_limit)
+	config.rear_rest_length = _row_float(globalb_row, 0x1d0, config.rear_rest_length)
+	config.rear_reference_length = _row_float(globalb_row, 0x1d4, config.rear_reference_length)
 	config.front_max_compression = _row_float(globalb_row, 0x244, config.front_max_compression)
 	config.front_min_compression = _row_float(globalb_row, 0x248, config.front_min_compression)
 	config.rear_max_compression = _row_float(globalb_row, 0x264, config.rear_max_compression)
 	config.rear_min_compression = _row_float(globalb_row, 0x268, config.rear_min_compression)
+	config.front_progressive_spring_scale = _row_float(globalb_row, 0x230, config.front_progressive_spring_scale)
+	config.front_spring_coefficient = _row_float(globalb_row, 0x234, config.front_spring_coefficient)
+	config.front_rebound_damping = _row_float(globalb_row, 0x238, config.front_rebound_damping)
+	config.front_bump_damping = _row_float(globalb_row, 0x23c, config.front_bump_damping)
+	config.front_bump_stop_coefficient = _row_float(globalb_row, 0x240, config.front_bump_stop_coefficient)
 
-	# `docs/handing/README.md` identifies 0x230 and 0x250 as per-axle suspension blocks.
-	# The JSON labels on those raw floats are still inferred, so the handling system maps
-	# them by confirmed suspension-block order instead of the CSV field names.
-	config.front_progressive_spring_scale = _field_value(floats, "front_tire_stiffness", config.front_progressive_spring_scale)
-	config.front_spring_coefficient = _field_value(floats, "front_tire_grip", config.front_spring_coefficient)
-	config.front_rebound_damping = _field_value(floats, "front_brake_bias", config.front_rebound_damping)
-	config.front_bump_damping = _field_value(floats, "front_lateral_grip", config.front_bump_damping)
-	config.front_bump_stop_coefficient = _field_value(floats, "front_longitudinal_grip", config.front_bump_stop_coefficient)
-
-	config.rear_progressive_spring_scale = _field_value(floats, "rear_tire_stiffness", config.rear_progressive_spring_scale)
-	config.rear_spring_coefficient = _field_value(floats, "rear_tire_grip", config.rear_spring_coefficient)
-	config.rear_rebound_damping = _field_value(floats, "rear_brake_bias", config.rear_rebound_damping)
-	config.rear_bump_damping = _field_value(floats, "rear_lateral_grip", config.rear_bump_damping)
-	config.rear_bump_stop_coefficient = _field_value(floats, "rear_longitudinal_grip", config.rear_bump_stop_coefficient)
+	config.rear_progressive_spring_scale = _row_float(globalb_row, 0x250, config.rear_progressive_spring_scale)
+	config.rear_spring_coefficient = _row_float(globalb_row, 0x254, config.rear_spring_coefficient)
+	config.rear_rebound_damping = _row_float(globalb_row, 0x258, config.rear_rebound_damping)
+	config.rear_bump_damping = _row_float(globalb_row, 0x25c, config.rear_bump_damping)
+	config.rear_bump_stop_coefficient = _row_float(globalb_row, 0x260, config.rear_bump_stop_coefficient)
 
 	config.steering_response = _field_value(floats, "steering_response", config.steering_response)
 	config.steering_return = _field_value(floats, "steering_return", config.steering_return)

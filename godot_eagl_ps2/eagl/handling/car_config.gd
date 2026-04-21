@@ -34,6 +34,7 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var front_travel_limit = 1.85
 @export var front_max_compression = 0.125
 @export var front_min_compression = -0.13
+@export var front_reference_length = 0.0
 
 @export var rear_progressive_spring_scale = 4.5
 @export var rear_spring_coefficient = 53.0
@@ -44,6 +45,7 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var rear_travel_limit = 1.95
 @export var rear_max_compression = 0.115
 @export var rear_min_compression = -0.115
+@export var rear_reference_length = 0.0
 
 @export var steering_response = 3.42
 @export var steering_return = 3.42
@@ -98,6 +100,7 @@ func build_wheel_states() -> Array:
 		wheel.slot_id = SLOT_IDS[index]
 		wheel.axle = SLOT_AXLES[index]
 		wheel.side = SLOT_SIDES[index]
+		wheel.pivot_local_position_ps2 = wheel_local_positions_ps2[index]
 		wheel.local_position_ps2 = wheel_local_positions_ps2[index] - physics_origin_offset_ps2
 		wheel.wheel_radius = wheel_radii[index]
 		if wheel.is_front():
@@ -109,6 +112,7 @@ func build_wheel_states() -> Array:
 			wheel.rest_length = front_rest_length
 			wheel.min_travel = front_min_compression
 			wheel.max_travel = front_max_compression
+			wheel.reference_length = front_reference_length
 			wheel.preload_force = front_preload
 			wheel.lateral_grip = front_lateral_grip
 			wheel.longitudinal_grip = front_longitudinal_grip
@@ -121,6 +125,7 @@ func build_wheel_states() -> Array:
 			wheel.rest_length = rear_rest_length
 			wheel.min_travel = rear_min_compression
 			wheel.max_travel = rear_max_compression
+			wheel.reference_length = rear_reference_length
 			wheel.preload_force = rear_preload
 			wheel.lateral_grip = rear_lateral_grip
 			wheel.longitudinal_grip = rear_longitudinal_grip
@@ -188,13 +193,30 @@ func wheelbase_meters() -> float:
 
 
 func _front_axle_preload() -> float:
-	var wheelbase = maxf(front_axle_center_x() - rear_axle_center_x(), 0.001)
-	var front_fraction = clampf((center_of_mass_ps2.x - rear_axle_center_x()) / wheelbase, 0.08, 0.92)
-	return mass_kg * 9.8 * front_fraction * 0.5
+	var split = _axle_preload_split()
+	return split["front_each"]
 
 
 func _rear_axle_preload() -> float:
-	var wheelbase = maxf(front_axle_center_x() - rear_axle_center_x(), 0.001)
-	var front_fraction = clampf((center_of_mass_ps2.x - rear_axle_center_x()) / wheelbase, 0.08, 0.92)
-	var rear_fraction = 1.0 - front_fraction
-	return mass_kg * 9.8 * rear_fraction * 0.5
+	var split = _axle_preload_split()
+	return split["rear_each"]
+
+
+func _axle_preload_split() -> Dictionary:
+	var front_x: float = front_axle_center_x() - physics_origin_offset_ps2.x
+	var rear_x: float = rear_axle_center_x() - physics_origin_offset_ps2.x
+	var denom: float = front_x - rear_x
+	if absf(denom) <= 0.0001:
+		var equal_share: float = mass_kg * 9.8 * 0.25
+		return {
+			"front_each": equal_share,
+			"rear_each": equal_share,
+		}
+
+	var rear_each_fraction: float = (front_x / denom) * 0.5
+	var front_each_fraction: float = 0.5 - rear_each_fraction
+	var total_load: float = mass_kg * 9.8
+	return {
+		"front_each": total_load * front_each_fraction,
+		"rear_each": total_load * rear_each_fraction,
+	}
