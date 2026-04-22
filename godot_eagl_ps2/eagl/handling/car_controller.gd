@@ -15,6 +15,9 @@ const REST_SETTLE_LINEAR_DAMP = 4.0
 const REST_SETTLE_ANGULAR_DAMP = 6.0
 const REST_FREEZE_LINEAR_SPEED = 0.03
 const REST_FREEZE_ANGULAR_SPEED = 0.03
+const GROUNDED_HEAVE_DAMPING = 6.0
+const GROUNDED_PITCH_DAMPING = 950.0
+const GROUNDED_ROLL_DAMPING = 950.0
 
 @export var config = null
 @export var auto_build_visuals = true
@@ -231,6 +234,7 @@ func _step_vehicle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 
 	var drag_force_ps2 = _drag_force_ps2(flat_velocity_ps2, speed_mps)
 	_apply_impulse_ps2(state, drag_force_ps2 * sub_dt, body_origin_ps2)
+	_apply_grounded_chassis_damping(state, body_origin_ps2, body_up_ps2, body_forward_ps2, body_right_ps2, sub_dt)
 	_apply_torque_impulse_ps2(state, _yaw_assist_torque_ps2(body_up_ps2, state, speed_mps) * sub_dt)
 	_apply_rest_settle(state, sub_dt)
 
@@ -431,6 +435,33 @@ func _apply_rest_settle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 		wheel.previous_length = wheel.current_length
 
 
+func _apply_grounded_chassis_damping(
+	state: PhysicsDirectBodyState3D,
+	body_origin_ps2: Vector3,
+	body_up_ps2: Vector3,
+	body_forward_ps2: Vector3,
+	body_right_ps2: Vector3,
+	sub_dt: float
+) -> void:
+	var grounded_count := 0
+	for wheel in wheels:
+		if wheel.grounded:
+			grounded_count += 1
+	if grounded_count == 0:
+		return
+	var grounded_alpha := float(grounded_count) / float(wheels.size())
+	var linear_velocity_ps2 := _godot_to_ps2(state.linear_velocity)
+	var vertical_speed := linear_velocity_ps2.dot(body_up_ps2)
+	var heave_force_ps2: Vector3 = body_up_ps2 * (-vertical_speed * config.mass_kg * GROUNDED_HEAVE_DAMPING * grounded_alpha)
+	_apply_impulse_ps2(state, heave_force_ps2 * sub_dt, body_origin_ps2)
+	var angular_velocity_ps2 := _godot_to_ps2(state.angular_velocity)
+	var pitch_rate := angular_velocity_ps2.dot(body_right_ps2)
+	var roll_rate := angular_velocity_ps2.dot(body_forward_ps2)
+	var attitude_torque_ps2: Vector3 = body_right_ps2 * (-pitch_rate * GROUNDED_PITCH_DAMPING * grounded_alpha)
+	attitude_torque_ps2 += body_forward_ps2 * (-roll_rate * GROUNDED_ROLL_DAMPING * grounded_alpha)
+	_apply_torque_impulse_ps2(state, attitude_torque_ps2 * sub_dt)
+
+
 func _can_rest_settle(state: PhysicsDirectBodyState3D) -> bool:
 	if absf(_throttle_input) > 0.01 or absf(_brake_input) > 0.01:
 		return false
@@ -628,6 +659,7 @@ func _rebuild_debug_mesh() -> void:
 	var pivot_basis := _ps2_debug_basis()
 	_debug_mesh.clear_surfaces()
 	_debug_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	_add_chassis_debug_wireframe()
 	for wheel in wheels:
 		var pivot = _debug_local_from_ps2(wheel.world_pivot_ps2)
 		var attachment = _debug_local_from_ps2(wheel.world_attachment_ps2)
@@ -645,10 +677,10 @@ func _rebuild_debug_mesh() -> void:
 		_debug_mesh.surface_add_vertex(pivot + Vector3.RIGHT * 0.09)
 		_debug_mesh.surface_add_vertex(pivot + Vector3.UP * 0.09)
 		_debug_mesh.surface_add_vertex(pivot + Vector3.DOWN * 0.09)
-		_debug_mesh.surface_set_color(Color(0.85, 0.45, 1.0, 1.0))
+		_debug_mesh.surface_set_color(Color(0.15, 0.95, 0.85, 0.95))
 		_debug_mesh.surface_add_vertex(pivot)
 		_debug_mesh.surface_add_vertex(attachment)
-		_debug_mesh.surface_set_color(Color(0.15, 0.7, 1.0, 1.0))
+		_debug_mesh.surface_set_color(Color(0.0, 0.85, 1.0, 1.0))
 		_debug_mesh.surface_add_vertex(attachment)
 		_debug_mesh.surface_add_vertex(axis_end)
 		_debug_mesh.surface_set_color(Color(0.15, 0.95, 0.85, 0.95))
@@ -662,6 +694,7 @@ func _rebuild_debug_mesh() -> void:
 		_debug_mesh.surface_add_vertex(center + Vector3.RIGHT * 0.08)
 		_debug_mesh.surface_add_vertex(center + Vector3.UP * 0.08)
 		_debug_mesh.surface_add_vertex(center + Vector3.DOWN * 0.08)
+		_add_suspension_force_marker(wheel, pivot)
 		_add_circle_marker(attachment, 0.11, _debug_local_direction_ps2(_basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0))), Color(0.15, 0.95, 0.85, 0.75), 16)
 		_add_circle_marker(center, maxf(wheel.wheel_radius, 0.05), _debug_local_direction_ps2(_wheel_axle_ps2(global_transform.basis, wheel)), Color(1.0, 0.75, 0.15, 0.9), 18)
 		if wheel.grounded:
@@ -732,6 +765,57 @@ func _add_circle_marker(center: Vector3, radius: float, normal: Vector3, color: 
 		var p1 := center + (tangent * cos(t1) + bitangent * sin(t1)) * radius
 		_debug_mesh.surface_add_vertex(p0)
 		_debug_mesh.surface_add_vertex(p1)
+
+
+func _add_chassis_debug_wireframe() -> void:
+	var collision_shape := get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if collision_shape == null:
+		return
+	var box_shape := collision_shape.shape as BoxShape3D
+	if box_shape == null:
+		return
+	var extents := box_shape.size * 0.5
+	var corners := [
+		Vector3(-extents.x, -extents.y, -extents.z),
+		Vector3(extents.x, -extents.y, -extents.z),
+		Vector3(extents.x, extents.y, -extents.z),
+		Vector3(-extents.x, extents.y, -extents.z),
+		Vector3(-extents.x, -extents.y, extents.z),
+		Vector3(extents.x, -extents.y, extents.z),
+		Vector3(extents.x, extents.y, extents.z),
+		Vector3(-extents.x, extents.y, extents.z),
+	]
+	var transformed: Array[Vector3] = []
+	transformed.resize(corners.size())
+	for index in range(corners.size()):
+		transformed[index] = collision_shape.transform * corners[index]
+	var edges := [
+		Vector2i(0, 1), Vector2i(1, 2), Vector2i(2, 3), Vector2i(3, 0),
+		Vector2i(4, 5), Vector2i(5, 6), Vector2i(6, 7), Vector2i(7, 4),
+		Vector2i(0, 4), Vector2i(1, 5), Vector2i(2, 6), Vector2i(3, 7),
+	]
+	_debug_mesh.surface_set_color(Color(1.0, 1.0, 1.0, 0.9))
+	for edge in edges:
+		_debug_mesh.surface_add_vertex(transformed[edge.x])
+		_debug_mesh.surface_add_vertex(transformed[edge.y])
+
+
+func _add_suspension_force_marker(wheel, pivot: Vector3) -> void:
+	var force_alpha := clampf(wheel.suspension_force / maxf(wheel.preload_force * 1.35, 1.0), 0.0, 1.0)
+	var force_color := Color(0.35, 0.22, 0.22, 0.45)
+	if wheel.suspension_force > 0.5:
+		force_color = Color(0.55 + 0.45 * force_alpha, 0.08, 0.08, 0.8 + 0.2 * force_alpha)
+	var force_axis := _debug_local_direction_ps2(_basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0)))
+	var force_length := lerpf(0.06, 0.6, force_alpha)
+	var force_end := pivot + force_axis * force_length
+	_debug_mesh.surface_set_color(force_color)
+	_debug_mesh.surface_add_vertex(pivot)
+	_debug_mesh.surface_add_vertex(force_end)
+	var tip_radius := 0.025 + force_alpha * 0.04
+	_debug_mesh.surface_add_vertex(force_end)
+	_debug_mesh.surface_add_vertex(force_end - force_axis * tip_radius + Vector3.LEFT * tip_radius)
+	_debug_mesh.surface_add_vertex(force_end)
+	_debug_mesh.surface_add_vertex(force_end - force_axis * tip_radius + Vector3.RIGHT * tip_radius)
 
 
 func _ps2_debug_basis() -> Basis:
