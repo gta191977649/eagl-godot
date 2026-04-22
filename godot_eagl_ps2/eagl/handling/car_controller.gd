@@ -150,12 +150,14 @@ func refresh_visual_bindings() -> void:
 		var suspension_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension" % slot_id)
 		if suspension_node != null:
 			_wheel_suspension_nodes[slot_id] = suspension_node
-		var steer_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer" % slot_id)
-		if steer_node != null:
-			_wheel_visuals[slot_id] = steer_node
-		var roll_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer/Roll" % slot_id)
-		if roll_node != null:
-			_wheel_roll_visuals[slot_id] = roll_node
+			var steer_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer" % slot_id)
+			if steer_node != null:
+				_wheel_visuals[slot_id] = steer_node
+			var roll_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer/Roll/Spin" % slot_id)
+			if roll_node == null:
+				roll_node = visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer/Roll" % slot_id)
+			if roll_node != null:
+				_wheel_roll_visuals[slot_id] = roll_node
 	var dummies_root := visual_root.get_node_or_null("Dummies")
 	if dummies_root != null:
 		for child in dummies_root.get_children():
@@ -402,6 +404,13 @@ func _wheel_right_axis_ps2(basis: Basis, wheel) -> Vector3:
 	return body_up_ps2.cross(heading_ps2).normalized()
 
 
+func _wheel_axle_ps2(basis: Basis, wheel) -> Vector3:
+	var axle_ps2 = _wheel_right_axis_ps2(basis, wheel)
+	if axle_ps2.length_squared() <= 0.0001:
+		axle_ps2 = _basis_axis_ps2(basis, Vector3(0.0, 1.0, 0.0))
+	return axle_ps2.normalized()
+
+
 func _apply_impulse_ps2(state: PhysicsDirectBodyState3D, impulse_ps2: Vector3, world_position_ps2: Vector3) -> void:
 	if impulse_ps2.length_squared() <= 0.000001:
 		return
@@ -533,7 +542,7 @@ func _update_visuals() -> void:
 		if _is_live_node3d(roll_visual):
 			var roll_node: Node3D = roll_visual
 			var roll_rotation = roll_node.rotation
-			roll_rotation.z = -wheel.roll_angle
+			roll_rotation.x = wheel.roll_angle * float(roll_node.get_meta("eagl_spin_direction", 1.0))
 			roll_node.rotation = roll_rotation
 
 
@@ -578,7 +587,7 @@ func _rebuild_debug_mesh() -> void:
 		_debug_mesh.surface_add_vertex(center + Vector3.UP * 0.08)
 		_debug_mesh.surface_add_vertex(center + Vector3.DOWN * 0.08)
 		_add_circle_marker(attachment, 0.11, _debug_local_direction_ps2(_basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0))), Color(0.15, 0.95, 0.85, 0.75), 16)
-		_add_circle_marker(center, maxf(wheel.wheel_radius, 0.05), _debug_local_direction_ps2(_wheel_heading_ps2(global_transform.basis, _basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0)), wheel)), Color(1.0, 0.75, 0.15, 0.9), 18)
+		_add_circle_marker(center, maxf(wheel.wheel_radius, 0.05), _debug_local_direction_ps2(_wheel_axle_ps2(global_transform.basis, wheel)), Color(1.0, 0.75, 0.15, 0.9), 18)
 		if wheel.grounded:
 			_add_circle_marker(contact, 0.09, _debug_local_direction_ps2(wheel.normal_ps2), Color(0.25, 1.0, 0.3, 0.8), 14)
 	for slot_id in _debug_pivot_nodes.keys():

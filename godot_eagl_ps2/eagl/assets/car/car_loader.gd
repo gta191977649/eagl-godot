@@ -49,6 +49,7 @@ func build_scene(asset, config = null) -> Node3D:
 	root.set_meta("eagl_car_id", asset.car_id)
 	root.set_meta("eagl_source_path", asset.source_path)
 	root.set_meta("eagl_assembly_summary", asset.assembly_summary)
+	root.set_meta("eagl_wheel_slots", asset.wheel_slots.duplicate(true))
 	var primary_body_variant := _pick_primary_body_variant(asset)
 	root.set_meta("eagl_primary_body_variant", primary_body_variant)
 
@@ -71,11 +72,11 @@ func build_scene(asset, config = null) -> Node3D:
 		"_TIRE_REAR_A",
 		"_TIRE_REAR_B",
 		"_TIRE_REAR_C",
-	], true)
+	])
 	var brake_meshes := _collect_named_meshes(asset, [
 		"_BRAKE_FRONT",
 		"_BRAKE_REAR",
-	], true)
+	])
 	var wheel_visual_selection := _select_normal_wheel_visuals(asset, tire_meshes, config)
 	root.set_meta("eagl_wheel_visual_selection", _wheel_visual_selection_summary(wheel_visual_selection))
 
@@ -89,7 +90,7 @@ func build_scene(asset, config = null) -> Node3D:
 		body_root.add_child(node)
 
 	if config != null:
-		_build_runtime_pivots(root, wheels_root, dummies_root, wheel_visual_selection, brake_meshes, config)
+		_build_runtime_pivots(root, wheels_root, dummies_root, wheel_visual_selection, brake_meshes, asset.wheel_slots, config)
 
 	root.set_meta("eagl_body_mesh_count", body_root.get_child_count())
 	root.set_meta("eagl_wheel_pivot_names", _child_name_list(wheels_root))
@@ -97,11 +98,13 @@ func build_scene(asset, config = null) -> Node3D:
 	return root
 
 
-func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node3D, wheel_visual_selection: Dictionary, brake_meshes: Dictionary, config) -> void:
+func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node3D, wheel_visual_selection: Dictionary, brake_meshes: Dictionary, wheel_slots: Array, config) -> void:
+	var slot_metadata := _wheel_slot_metadata_by_id(wheel_slots, config)
 	for index in range(SLOT_IDS.size()):
 		if index >= config.wheel_local_positions_ps2.size():
-			break
+			continue
 		var slot_id: String = SLOT_IDS[index]
+		var slot_info: Dictionary = slot_metadata.get(slot_id, {})
 		var wheel_root := Node3D.new()
 		wheel_root.name = slot_id
 		wheel_root.position = MathUtils.ps2_to_godot_vec3(config.wheel_local_positions_ps2[index])
@@ -117,22 +120,32 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 
 		var roll_root := Node3D.new()
 		roll_root.name = "Roll"
+		var base_yaw := _wheel_base_yaw(slot_info)
+		roll_root.rotation.y = base_yaw
+		roll_root.set_meta("eagl_base_yaw", base_yaw)
+		roll_root.set_meta("eagl_slot_side", String(slot_info.get("side", "")))
+		roll_root.set_meta("eagl_locator_orientation_index", int(slot_info.get("locator_orientation_index", -1)))
 		steer_root.add_child(roll_root)
+
+		var spin_root := Node3D.new()
+		spin_root.name = "Spin"
+		spin_root.set_meta("eagl_spin_direction", _wheel_spin_direction(slot_info))
+		spin_root.set_meta("eagl_slot_side", String(slot_info.get("side", "")))
+		spin_root.set_meta("eagl_locator_orientation_index", int(slot_info.get("locator_orientation_index", -1)))
+		roll_root.add_child(spin_root)
 
 		var tire_selection: Dictionary = wheel_visual_selection.get(slot_id, {})
 		var tire_template: MeshInstance3D = tire_selection.get("template", null)
 		if tire_template != null:
 			var tire_node := _duplicate_mesh_instance(tire_template, "Tire")
-			tire_node.rotation.y = _wheel_visual_yaw_for_slot(slot_id)
 			tire_node.set_meta("eagl_source_object", tire_selection.get("object_name", ""))
 			tire_node.set_meta("eagl_detail_suffix", tire_selection.get("detail_suffix", ""))
 			tire_node.set_meta("eagl_detail_level", tire_selection.get("detail_level", -1))
-			roll_root.add_child(tire_node)
+			spin_root.add_child(tire_node)
 
 		var brake_template: MeshInstance3D = _brake_template_for_slot(brake_meshes, slot_id)
 		if brake_template != null:
 			var brake_node := _duplicate_mesh_instance(brake_template, "Brake")
-			brake_node.rotation.y = _wheel_visual_yaw_for_slot(slot_id)
 			steer_root.add_child(brake_node)
 
 		var dummy := Node3D.new()
@@ -146,15 +159,46 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 	dummies_root.add_child(center_dummy)
 
 
-func _collect_named_meshes(asset, suffixes: Array[String], apply_transform: bool) -> Dictionary:
+func _wheel_slot_metadata_by_id(wheel_slots: Array, config) -> Dictionary:
+	var by_id := {}
+	for slot in wheel_slots:
+		var slot_dict: Dictionary = slot
+		var slot_id := String(slot_dict.get("slot_id", ""))
+		if slot_id == "":
+			continue
+		by_id[slot_id] = slot_dict.duplicate(true)
+	for index in range(SLOT_IDS.size()):
+		var slot_id: String = SLOT_IDS[index]
+		if by_id.has(slot_id):
+			continue
+		var side := "right" if slot_id.ends_with("R") else "left"
+		var axle := "rear" if slot_id.begins_with("R") else "front"
+		var position_ps2: Vector3 = config.wheel_local_positions_ps2[index] if index < config.wheel_local_positions_ps2.size() else Vector3.ZERO
+		by_id[slot_id] = {
+			"slot_id": slot_id,
+			"axle": axle,
+			"side": side,
+			"position_ps2": position_ps2,
+			"position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
+			"source": "config_fallback",
+			"locator_orientation_index": 0 if axle == "front" else 1,
+		}
+	return by_id
+
+
+func _collect_named_meshes(asset, suffixes: Array[String]) -> Dictionary:
 	var meshes := {}
 	for obj in asset.objects:
 		var object_name: String = obj.get("name", "")
 		for suffix in suffixes:
 			if not object_name.ends_with(suffix):
 				continue
-			var mesh_node := mesh_builder.build_object_mesh(obj, apply_transform)
-			if mesh_node != null and not meshes.has(suffix):
+			if meshes.has(suffix):
+				continue
+			var mesh_node := mesh_builder.build_object_mesh(obj, false)
+			if mesh_node != null:
+				mesh_node.transform = _runtime_part_local_transform(obj)
+				mesh_node.set_meta("eagl_runtime_part_transform_mode", "source_rotation_only")
 				meshes[suffix] = mesh_node
 	return meshes
 
@@ -163,6 +207,7 @@ func _duplicate_mesh_instance(template: MeshInstance3D, node_name: String) -> Me
 	var node := MeshInstance3D.new()
 	node.name = node_name
 	node.mesh = template.mesh
+	node.transform = template.transform
 	for surface_index in range(template.get_surface_override_material_count()):
 		node.set_surface_override_material(surface_index, template.get_surface_override_material(surface_index))
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
@@ -183,8 +228,6 @@ func _select_normal_wheel_visuals(asset, tire_meshes: Dictionary, config = null)
 
 func _best_tire_choice(asset, tire_meshes: Dictionary, axle: String, expected_diameter: float = 0.0) -> Dictionary:
 	var prefix := "_TIRE_FRONT_" if axle == "front" else "_TIRE_REAR_"
-	var best_choice := {}
-	var best_score := INF
 	var detail_level := 0
 	for suffix in TIRE_DETAIL_SUFFIXES:
 		var object_name := "%s%s" % [prefix, suffix]
@@ -192,20 +235,22 @@ func _best_tire_choice(asset, tire_meshes: Dictionary, axle: String, expected_di
 			detail_level += 1
 			continue
 		var template: MeshInstance3D = tire_meshes[object_name]
-		var score := _wheel_template_score(template, expected_diameter, detail_level)
-		if score < best_score:
-			best_score = score
-			best_choice = {
-				"axle": axle,
-				"source_axle": axle,
-				"detail_suffix": suffix,
-				"detail_level": detail_level,
-				"object_name": _full_object_name(asset.car_id, object_name),
-				"template": template,
-			}
-		detail_level += 1
-	if not best_choice.is_empty():
-		return best_choice
+		if template == null:
+			detail_level += 1
+			continue
+		var size := template.mesh.get_aabb().size.abs() if template.mesh != null else Vector3.ZERO
+		var largest_dimension := maxf(size.x, maxf(size.y, size.z))
+		if expected_diameter > 0.0001 and largest_dimension < expected_diameter * 0.35:
+			detail_level += 1
+			continue
+		return {
+			"axle": axle,
+			"source_axle": axle,
+			"detail_suffix": suffix,
+			"detail_level": detail_level,
+			"object_name": _full_object_name(asset.car_id, object_name),
+			"template": template,
+		}
 
 	if axle == "rear":
 		var fallback := _best_tire_choice(asset, tire_meshes, "front", expected_diameter)
@@ -243,13 +288,27 @@ func _wheel_template_score(template: MeshInstance3D, expected_diameter: float, d
 	return dimension_error + tiny_penalty + float(detail_level) * 0.01
 
 
-func _wheel_visual_yaw_for_slot(slot_id: String) -> float:
-	# PS2 wheel meshes come in with the axle running along local X, but the runtime
-	# suspension/roll rig expects axle-aligned local Z in Godot space.
-	var yaw := PI * 0.5
-	if slot_id in ["FR", "RR"]:
-		yaw += PI
-	return wrapf(yaw, -PI, PI)
+func _runtime_part_local_transform(obj: Dictionary) -> Transform3D:
+	var object_name := String(obj.get("name", "")).to_upper()
+	var source_transform := MathUtils.ps2_rows_to_godot_transform(obj.get("transform", []))
+	var basis := source_transform.basis.orthonormalized()
+	if basis.determinant() < 0.0:
+		basis = Basis(-basis.x, basis.y, basis.z).orthonormalized()
+	if object_name.contains("_TIRE_") or object_name.contains("_BRAKE_"):
+		basis = (basis * Basis(Vector3.UP, PI * 0.5)).orthonormalized()
+	return Transform3D(basis, Vector3.ZERO)
+
+
+func _wheel_base_yaw(slot_info: Dictionary) -> float:
+	var side := String(slot_info.get("side", ""))
+	if side == "right":
+		return -PI * 0.5
+	return PI * 0.5
+
+
+func _wheel_spin_direction(slot_info: Dictionary) -> float:
+	var side := String(slot_info.get("side", ""))
+	return -1.0 if side == "right" else 1.0
 
 
 func _full_object_name(car_id: String, suffix: String) -> String:
@@ -257,9 +316,8 @@ func _full_object_name(car_id: String, suffix: String) -> String:
 
 
 func _brake_template_for_slot(brake_meshes: Dictionary, slot_id: String) -> MeshInstance3D:
-	if slot_id in ["FL", "FR"]:
-		return brake_meshes.get("_BRAKE_FRONT", null)
-	return brake_meshes.get("_BRAKE_REAR", brake_meshes.get("_BRAKE_FRONT", null))
+	var suffix := "_BRAKE_FRONT" if slot_id in ["FL", "FR"] else "_BRAKE_REAR"
+	return brake_meshes.get(suffix, brake_meshes.get("_BRAKE_FRONT", null))
 
 
 func _wheel_visual_selection_summary(wheel_visual_selection: Dictionary) -> Dictionary:

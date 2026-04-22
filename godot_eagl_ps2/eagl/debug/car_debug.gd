@@ -11,7 +11,6 @@ const GROUND_HEIGHT = 1.0
 const GROUND_OFFSET_Y = -0.5
 const CAMERA_DISTANCE = 8.5
 const CAMERA_TARGET_HEIGHT = 1.55
-const CAMERA_SMOOTHING = 7.0
 const CAMERA_LOOK_AHEAD = 2.75
 const CAMERA_MOUSE_SENSITIVITY = 0.0035
 const CAMERA_MIN_PITCH = deg_to_rad(-18.0)
@@ -105,9 +104,8 @@ func _update_camera(delta: float) -> void:
 		-sin(_camera_yaw) * horizontal_radius
 	)
 	var desired_position = desired_target + orbit_offset
-	var smoothing = clampf(delta * CAMERA_SMOOTHING, 0.0, 1.0)
-	_camera_target_position = _camera_target_position.lerp(desired_target, smoothing)
-	camera.global_position = camera.global_position.lerp(desired_position, smoothing)
+	_camera_target_position = desired_target
+	camera.global_position = desired_position
 	camera.look_at(_camera_target_position, Vector3.UP)
 
 
@@ -192,7 +190,6 @@ func _resolved_game_root() -> String:
 	if project_root != "":
 		return project_root
 	return OS.get_environment("EAGL_HP2_GAME_ROOT")
-
 
 func _resolved_handling_json_path() -> String:
 	if handling_json_path != "":
@@ -481,9 +478,14 @@ func _on_overlay_toggled(enabled: bool) -> void:
 func _build_runtime_config_for_car(car_name: String, duplicate_index: int = 1, drive_type: String = ""):
 	var resolved_drive_type: String = drive_type if drive_type != "" else _default_drive_type()
 	var json_path: String = _resolved_handling_json_path()
+	var loader = GlobalBHandlingLoaderScript.new()
 	if json_path != "" and FileAccess.file_exists(json_path):
-		var loader = GlobalBHandlingLoaderScript.new()
 		var loaded = loader.load_config(json_path, car_name, duplicate_index, resolved_drive_type)
+		if loaded != null:
+			return loaded
+	var globalb_path := _resolved_globalb_path()
+	if globalb_path != "":
+		var loaded = loader.load_config_from_globalb(globalb_path, car_name, duplicate_index, resolved_drive_type)
 		if loaded != null:
 			return loaded
 	var config = CarConfigScript.new()
@@ -493,6 +495,16 @@ func _build_runtime_config_for_car(car_name: String, duplicate_index: int = 1, d
 	config.duplicate_index = duplicate_index
 	config.drive_type = resolved_drive_type
 	return config
+
+
+func _resolved_globalb_path() -> String:
+	var resolved_root: String = _resolved_game_root()
+	if resolved_root == "":
+		return ""
+	var globalb_path := resolved_root.path_join("GLOBAL").path_join("GLOBALB.BUN")
+	if FileAccess.file_exists(globalb_path):
+		return globalb_path
+	return ""
 
 
 func _resolved_cars_dir() -> String:
