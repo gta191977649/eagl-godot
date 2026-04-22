@@ -101,7 +101,7 @@ func build_wheel_states() -> Array:
 		wheel.axle = SLOT_AXLES[index]
 		wheel.side = SLOT_SIDES[index]
 		wheel.pivot_local_position_ps2 = wheel_local_positions_ps2[index]
-		wheel.local_position_ps2 = wheel_local_positions_ps2[index] - physics_origin_offset_ps2
+		wheel.local_position_ps2 = wheel_local_positions_ps2[index]
 		wheel.wheel_radius = wheel_radii[index]
 		if wheel.is_front():
 			wheel.progressive_spring_scale = front_progressive_spring_scale

@@ -2,7 +2,6 @@
 
 [ext_resource type="Script" uid="uid://bp3rlrj7y2s3l" path="res://eagl/debug/car_debug.gd" id="1"]
 [ext_resource type="Script" uid="uid://dfwo66bhira15" path="res://eagl/handling/car_controller.gd" id="2"]
-[ext_resource type="Resource" path="res://eagl/assets/car/configs/corvette_hp2_example.tres" id="3"]
 
 [sub_resource type="Environment" id="1"]
 background_mode = 2
@@ -50,7 +49,6 @@ mesh = SubResource("4")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.16, 0)
 continuous_cd = true
 script = ExtResource("2")
-config = ExtResource("3")
 auto_build_visuals = false
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Car" unique_id=995590640]
@@ -73,3 +71,55 @@ offset_bottom = 206.0
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
 text = "Loading telemetry..."
+
+[node name="ControlsPanel" type="PanelContainer" parent="HUD" unique_id=1055469108]
+offset_left = 1016.0
+offset_top = 16.0
+offset_right = 1384.0
+offset_bottom = 520.0
+
+[node name="MarginContainer" type="MarginContainer" parent="HUD/ControlsPanel" unique_id=327350437]
+layout_mode = 2
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 14
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 14
+
+[node name="ControlsLayout" type="VBoxContainer" parent="HUD/ControlsPanel/MarginContainer" unique_id=593169619]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="CurrentCarLabel" type="Label" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout" unique_id=822989302]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Current: Loading..."
+autowrap_mode = 3
+
+[node name="ControlsRow" type="HBoxContainer" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout" unique_id=516719810]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="OverlayToggle" type="CheckBox" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout/ControlsRow" unique_id=1056724466]
+layout_mode = 2
+size_flags_horizontal = 3
+button_pressed = true
+text = "Debug Overlay"
+
+[node name="ResetButton" type="Button" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout/ControlsRow" unique_id=1161821954]
+layout_mode = 2
+text = "Reset Car"
+
+[node name="CarListTitle" type="Label" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout" unique_id=1962240029]
+layout_mode = 2
+text = "Cars"
+
+[node name="CarList" type="ItemList" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout" unique_id=777929749]
+custom_minimum_size = Vector2(0, 280)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="ControlsHint" type="Label" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout" unique_id=405579115]
+layout_mode = 2
+theme_override_font_sizes/font_size = 15
+text = "Esc releases the mouse so you can use the list."
+autowrap_mode = 3

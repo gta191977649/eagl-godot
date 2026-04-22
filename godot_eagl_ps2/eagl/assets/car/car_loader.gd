@@ -71,12 +71,12 @@ func build_scene(asset, config = null) -> Node3D:
 		"_TIRE_REAR_A",
 		"_TIRE_REAR_B",
 		"_TIRE_REAR_C",
-	], false)
+	], true)
 	var brake_meshes := _collect_named_meshes(asset, [
 		"_BRAKE_FRONT",
 		"_BRAKE_REAR",
-	], false)
-	var wheel_visual_selection := _select_normal_wheel_visuals(asset, tire_meshes)
+	], true)
+	var wheel_visual_selection := _select_normal_wheel_visuals(asset, tire_meshes, config)
 	root.set_meta("eagl_wheel_visual_selection", _wheel_visual_selection_summary(wheel_visual_selection))
 
 	for obj in asset.objects:
@@ -123,8 +123,7 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 		var tire_template: MeshInstance3D = tire_selection.get("template", null)
 		if tire_template != null:
 			var tire_node := _duplicate_mesh_instance(tire_template, "Tire")
-			if slot_id in ["FR", "RR"]:
-				tire_node.rotation.y = PI
+			tire_node.rotation.y = _wheel_visual_yaw_for_slot(slot_id)
 			tire_node.set_meta("eagl_source_object", tire_selection.get("object_name", ""))
 			tire_node.set_meta("eagl_detail_suffix", tire_selection.get("detail_suffix", ""))
 			tire_node.set_meta("eagl_detail_level", tire_selection.get("detail_level", -1))
@@ -133,8 +132,7 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 		var brake_template: MeshInstance3D = _brake_template_for_slot(brake_meshes, slot_id)
 		if brake_template != null:
 			var brake_node := _duplicate_mesh_instance(brake_template, "Brake")
-			if slot_id in ["FR", "RR"]:
-				brake_node.rotation.y = PI
+			brake_node.rotation.y = _wheel_visual_yaw_for_slot(slot_id)
 			steer_root.add_child(brake_node)
 
 		var dummy := Node3D.new()
@@ -171,9 +169,9 @@ func _duplicate_mesh_instance(template: MeshInstance3D, node_name: String) -> Me
 	return node
 
 
-func _select_normal_wheel_visuals(asset, tire_meshes: Dictionary) -> Dictionary:
-	var front_choice := _best_tire_choice(asset, tire_meshes, "front")
-	var rear_choice := _best_tire_choice(asset, tire_meshes, "rear")
+func _select_normal_wheel_visuals(asset, tire_meshes: Dictionary, config = null) -> Dictionary:
+	var front_choice := _best_tire_choice(asset, tire_meshes, "front", _expected_wheel_diameter(config, "front"))
+	var rear_choice := _best_tire_choice(asset, tire_meshes, "rear", _expected_wheel_diameter(config, "rear"))
 	if rear_choice.is_empty():
 		rear_choice = front_choice
 	var selection := {}
@@ -183,30 +181,75 @@ func _select_normal_wheel_visuals(asset, tire_meshes: Dictionary) -> Dictionary:
 	return selection
 
 
-func _best_tire_choice(asset, tire_meshes: Dictionary, axle: String) -> Dictionary:
+func _best_tire_choice(asset, tire_meshes: Dictionary, axle: String, expected_diameter: float = 0.0) -> Dictionary:
 	var prefix := "_TIRE_FRONT_" if axle == "front" else "_TIRE_REAR_"
+	var best_choice := {}
+	var best_score := INF
 	var detail_level := 0
 	for suffix in TIRE_DETAIL_SUFFIXES:
 		var object_name := "%s%s" % [prefix, suffix]
-		if tire_meshes.has(object_name):
-			return {
+		if not tire_meshes.has(object_name):
+			detail_level += 1
+			continue
+		var template: MeshInstance3D = tire_meshes[object_name]
+		var score := _wheel_template_score(template, expected_diameter, detail_level)
+		if score < best_score:
+			best_score = score
+			best_choice = {
 				"axle": axle,
 				"source_axle": axle,
 				"detail_suffix": suffix,
 				"detail_level": detail_level,
 				"object_name": _full_object_name(asset.car_id, object_name),
-				"template": tire_meshes[object_name],
+				"template": template,
 			}
 		detail_level += 1
+	if not best_choice.is_empty():
+		return best_choice
 
 	if axle == "rear":
-		var fallback := _best_tire_choice(asset, tire_meshes, "front")
+		var fallback := _best_tire_choice(asset, tire_meshes, "front", expected_diameter)
 		if not fallback.is_empty():
 			fallback = fallback.duplicate(true)
 			fallback["axle"] = "rear"
 			fallback["source_axle"] = "front"
 		return fallback
 	return {}
+
+
+func _expected_wheel_diameter(config, axle: String) -> float:
+	if config == null or config.wheel_radii.is_empty():
+		return 0.0
+	var indices := [0, 1] if axle == "front" else [2, 3]
+	var total := 0.0
+	var count := 0
+	for index in indices:
+		if index >= config.wheel_radii.size():
+			continue
+		total += float(config.wheel_radii[index]) * 2.0
+		count += 1
+	return total / float(count) if count > 0 else 0.0
+
+
+func _wheel_template_score(template: MeshInstance3D, expected_diameter: float, detail_level: int) -> float:
+	if template == null or template.mesh == null:
+		return INF
+	var size := template.mesh.get_aabb().size.abs()
+	var largest_dimension := maxf(size.x, maxf(size.y, size.z))
+	if expected_diameter <= 0.0001:
+		return -largest_dimension + float(detail_level) * 0.01
+	var dimension_error := absf(largest_dimension - expected_diameter)
+	var tiny_penalty := 10.0 if largest_dimension < expected_diameter * 0.35 else 0.0
+	return dimension_error + tiny_penalty + float(detail_level) * 0.01
+
+
+func _wheel_visual_yaw_for_slot(slot_id: String) -> float:
+	# PS2 wheel meshes come in with the axle running along local X, but the runtime
+	# suspension/roll rig expects axle-aligned local Z in Godot space.
+	var yaw := PI * 0.5
+	if slot_id in ["FR", "RR"]:
+		yaw += PI
+	return wrapf(yaw, -PI, PI)
 
 
 func _full_object_name(car_id: String, suffix: String) -> String:

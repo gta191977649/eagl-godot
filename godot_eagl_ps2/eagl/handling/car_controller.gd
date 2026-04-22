@@ -38,6 +38,7 @@ var _debug_pivot_nodes = {}
 var _debug_dummy_nodes = {}
 var _debug_mesh_instance: MeshInstance3D
 var _debug_mesh = ImmediateMesh.new()
+var _debug_material: StandardMaterial3D
 
 
 func _ready() -> void:
@@ -46,18 +47,8 @@ func _ready() -> void:
 
 	custom_integrator = true
 	gravity_scale = 0.0
-	mass = config.mass_kg
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = _ps2_to_godot(config.center_of_mass_ps2)
-	engine_rpm = maxf(config.idle_rpm, 900.0)
-	wheels = config.build_wheel_states()
-	_fit_chassis_collision_shape()
-	refresh_visual_bindings()
-
-	if auto_build_visuals and _wheel_visuals.is_empty():
-		_ensure_generated_visuals()
-	if draw_debug:
-		_ensure_debug_mesh()
+	apply_config(config)
 
 
 func _process(_delta: float) -> void:
@@ -83,12 +74,71 @@ func set_surface_sampler(sampler) -> void:
 	surface_sampler = sampler
 
 
+func apply_config(new_config) -> void:
+	if new_config == null:
+		return
+	config = new_config
+	mass = config.mass_kg
+	center_of_mass = _ps2_to_godot(config.center_of_mass_ps2)
+	engine_rpm = maxf(config.idle_rpm, 900.0)
+	current_gear = 1
+	signed_slip_angle = 0.0
+	_steering_state = 0.0
+	_steering_engaged = false
+	wheels = config.build_wheel_states()
+	_fit_chassis_collision_shape()
+	refresh_visual_bindings()
+	if auto_build_visuals and _wheel_visuals.is_empty():
+		_ensure_generated_visuals()
+		refresh_visual_bindings()
+	_prime_wheels_from_current_transform()
+	set_debug_overlay_enabled(draw_debug)
+	_update_visuals()
+	_update_debug_snapshot()
+
+
+func reset_runtime_state(target_transform: Transform3D = transform) -> void:
+	transform = target_transform
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	sleeping = false
+	current_gear = 1
+	engine_rpm = maxf(config.idle_rpm, 900.0)
+	signed_slip_angle = 0.0
+	_throttle_input = 0.0
+	_brake_input = 0.0
+	_steering_input = 0.0
+	_handbrake_input = 0.0
+	_steering_state = 0.0
+	_steering_engaged = false
+	for wheel in wheels:
+		wheel.reset_runtime()
+	_prime_wheels_from_current_transform()
+	_update_visuals()
+	if draw_debug:
+		_rebuild_debug_mesh()
+	_update_debug_snapshot()
+
+
+func set_debug_overlay_enabled(enabled: bool) -> void:
+	draw_debug = enabled
+	if draw_debug:
+		_ensure_debug_mesh()
+		_debug_mesh_instance.visible = true
+		_rebuild_debug_mesh()
+	elif _debug_mesh_instance != null:
+		_debug_mesh.clear_surfaces()
+		_debug_mesh_instance.visible = false
+
+
 func refresh_visual_bindings() -> void:
 	_wheel_visuals.clear()
 	_wheel_roll_visuals.clear()
 	_wheel_suspension_nodes.clear()
 	_debug_pivot_nodes.clear()
 	_debug_dummy_nodes.clear()
+	_visual_root = null
+	_body_visual = null
 	var visual_root := get_node_or_null("CarVisual") as Node3D
 	if visual_root == null:
 		return
@@ -372,7 +422,7 @@ func _update_inputs() -> void:
 	_throttle_input = _read_action_pair("car_accelerate", "ui_up")
 	_brake_input = _read_action_pair("car_brake", "ui_down")
 	_handbrake_input = _read_action_pair("car_handbrake", "")
-	_steering_input = _read_action_pair("car_steer_right", "ui_right") - _read_action_pair("car_steer_left", "ui_left")
+	_steering_input = _read_action_pair("car_steer_left", "ui_left") - _read_action_pair("car_steer_right", "ui_right")
 
 
 func _read_action_pair(primary: String, fallback: String) -> float:
@@ -450,7 +500,14 @@ func _ensure_debug_mesh() -> void:
 		_debug_mesh_instance = MeshInstance3D.new()
 		_debug_mesh_instance.name = "DebugLines"
 		add_child(_debug_mesh_instance)
+	if _debug_material == null:
+		_debug_material = StandardMaterial3D.new()
+		_debug_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_debug_material.vertex_color_use_as_albedo = true
+		_debug_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_debug_material.no_depth_test = true
 	_debug_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_debug_mesh_instance.material_override = _debug_material
 	_debug_mesh_instance.mesh = _debug_mesh
 
 
@@ -459,22 +516,21 @@ func _update_visuals() -> void:
 		var wheel_visual = _wheel_visuals.get(wheel.slot_id, null)
 		var suspension_node = _wheel_suspension_nodes.get(wheel.slot_id, null)
 		var pivot_node = _debug_pivot_nodes.get(wheel.slot_id, null)
-		if suspension_node != null and suspension_node is Node3D and pivot_node != null and pivot_node is Node3D and _visual_root != null:
+		if _is_live_node3d(suspension_node) and _is_live_node3d(pivot_node) and _is_live_node3d(_visual_root):
 			var suspension_transform: Node3D = suspension_node
 			suspension_transform.position = _ps2_to_godot(wheel.world_wheel_center_ps2 - wheel.world_pivot_ps2)
-		elif wheel_visual != null and wheel_visual is Node3D:
+		elif _is_live_node3d(wheel_visual):
 			var target_position = _ps2_to_godot(wheel.world_wheel_center_ps2)
 			var wheel_node: Node3D = wheel_visual
 			wheel_node.global_position = target_position
-		if wheel_visual == null:
+		if not _is_live_node3d(wheel_visual):
 			continue
-		if wheel_visual is Node3D:
-			var steer_node: Node3D = wheel_visual
-			var steer_rotation = steer_node.rotation
-			steer_rotation.y = -wheel.steer_angle
-			steer_node.rotation = steer_rotation
+		var steer_node: Node3D = wheel_visual
+		var steer_rotation = steer_node.rotation
+		steer_rotation.y = wheel.steer_angle
+		steer_node.rotation = steer_rotation
 		var roll_visual = _wheel_roll_visuals.get(wheel.slot_id, null)
-		if roll_visual != null and roll_visual is Node3D:
+		if _is_live_node3d(roll_visual):
 			var roll_node: Node3D = roll_visual
 			var roll_rotation = roll_node.rotation
 			roll_rotation.z = -wheel.roll_angle
@@ -488,14 +544,17 @@ func _rebuild_debug_mesh() -> void:
 	_debug_mesh.clear_surfaces()
 	_debug_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
 	for wheel in wheels:
-		var axis_start = _ps2_to_godot(wheel.world_attachment_ps2)
-		var axis_end = _ps2_to_godot(wheel.contact_point_ps2 if wheel.grounded else wheel.world_wheel_center_ps2)
-		var normal_end = _ps2_to_godot(wheel.contact_point_ps2 + wheel.normal_ps2 * debug_normal_length)
-		var center = _ps2_to_godot(wheel.world_wheel_center_ps2)
-		var pivot = _ps2_to_godot(wheel.world_pivot_ps2)
+		var pivot = _debug_local_from_ps2(wheel.world_pivot_ps2)
+		var attachment = _debug_local_from_ps2(wheel.world_attachment_ps2)
+		var center = _debug_local_from_ps2(wheel.world_wheel_center_ps2)
+		var contact = _debug_local_from_ps2(wheel.contact_point_ps2)
+		var axis_end = contact if wheel.grounded else center
+		var spring_min = _debug_local_from_ps2(wheel.world_attachment_ps2 + _basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0)) * wheel.min_travel)
+		var spring_max = _debug_local_from_ps2(wheel.world_attachment_ps2 + _basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0)) * wheel.max_travel)
+		var normal_end = _debug_local_from_global(_ps2_to_godot(wheel.contact_point_ps2 + wheel.normal_ps2 * debug_normal_length))
 		var normal_start = center
 		if wheel.contact_point_ps2 != Vector3.ZERO:
-			normal_start = _ps2_to_godot(wheel.contact_point_ps2)
+			normal_start = contact
 		_debug_mesh.surface_set_color(Color(1.0, 0.35, 0.15, 1.0))
 		_debug_mesh.surface_add_vertex(pivot + Vector3.LEFT * 0.09)
 		_debug_mesh.surface_add_vertex(pivot + Vector3.RIGHT * 0.09)
@@ -503,10 +562,13 @@ func _rebuild_debug_mesh() -> void:
 		_debug_mesh.surface_add_vertex(pivot + Vector3.DOWN * 0.09)
 		_debug_mesh.surface_set_color(Color(0.85, 0.45, 1.0, 1.0))
 		_debug_mesh.surface_add_vertex(pivot)
-		_debug_mesh.surface_add_vertex(axis_start)
+		_debug_mesh.surface_add_vertex(attachment)
 		_debug_mesh.surface_set_color(Color(0.15, 0.7, 1.0, 1.0))
-		_debug_mesh.surface_add_vertex(axis_start)
+		_debug_mesh.surface_add_vertex(attachment)
 		_debug_mesh.surface_add_vertex(axis_end)
+		_debug_mesh.surface_set_color(Color(0.15, 0.95, 0.85, 0.95))
+		_debug_mesh.surface_add_vertex(spring_min)
+		_debug_mesh.surface_add_vertex(spring_max)
 		_debug_mesh.surface_set_color(Color(0.25, 1.0, 0.3, 1.0))
 		_debug_mesh.surface_add_vertex(normal_start)
 		_debug_mesh.surface_add_vertex(normal_end)
@@ -515,18 +577,35 @@ func _rebuild_debug_mesh() -> void:
 		_debug_mesh.surface_add_vertex(center + Vector3.RIGHT * 0.08)
 		_debug_mesh.surface_add_vertex(center + Vector3.UP * 0.08)
 		_debug_mesh.surface_add_vertex(center + Vector3.DOWN * 0.08)
+		_add_circle_marker(attachment, 0.11, _debug_local_direction_ps2(_basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0))), Color(0.15, 0.95, 0.85, 0.75), 16)
+		_add_circle_marker(center, maxf(wheel.wheel_radius, 0.05), _debug_local_direction_ps2(_wheel_heading_ps2(global_transform.basis, _basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0)), wheel)), Color(1.0, 0.75, 0.15, 0.9), 18)
+		if wheel.grounded:
+			_add_circle_marker(contact, 0.09, _debug_local_direction_ps2(wheel.normal_ps2), Color(0.25, 1.0, 0.3, 0.8), 14)
 	for slot_id in _debug_pivot_nodes.keys():
 		var pivot_node: Node3D = _debug_pivot_nodes[slot_id]
-		_add_cross_marker(pivot_node.global_position, 0.12, Color(1.0, 0.35, 0.15, 1.0))
-		_add_circle_marker(pivot_node.global_position, 0.18, (pivot_node.global_basis * pivot_basis.y).normalized(), Color(1.0, 0.55, 0.15, 1.0))
-		_add_axis_marker(pivot_node.global_position, pivot_node.global_basis * pivot_basis, 0.22)
+		if not _is_live_node3d(pivot_node):
+			_debug_pivot_nodes.erase(slot_id)
+			continue
+		var pivot_position = _debug_local_from_global(pivot_node.global_position)
+		_add_cross_marker(pivot_position, 0.12, Color(1.0, 0.35, 0.15, 1.0))
+		_add_circle_marker(pivot_position, 0.18, _debug_local_direction_global((pivot_node.global_basis * pivot_basis.y).normalized()), Color(1.0, 0.55, 0.15, 1.0))
+		_add_axis_marker(pivot_position, _debug_local_basis(pivot_node.global_basis * pivot_basis), 0.22)
 	for dummy_name in _debug_dummy_nodes.keys():
 		var dummy_node: Node3D = _debug_dummy_nodes[dummy_name]
+		if not _is_live_node3d(dummy_node):
+			_debug_dummy_nodes.erase(dummy_name)
+			continue
 		var dummy_color := Color(0.85, 0.3, 1.0, 1.0) if dummy_name.ends_with("_PIVOT") else Color(0.35, 0.95, 0.85, 1.0)
-		_add_cross_marker(dummy_node.global_position, 0.09, dummy_color)
-		_add_circle_marker(dummy_node.global_position, 0.13, (dummy_node.global_basis * pivot_basis.y).normalized(), dummy_color)
+		var dummy_position = _debug_local_from_global(dummy_node.global_position)
+		_add_cross_marker(dummy_position, 0.09, dummy_color)
+		_add_circle_marker(dummy_position, 0.13, _debug_local_direction_global((dummy_node.global_basis * pivot_basis.y).normalized()), dummy_color)
+		_add_axis_marker(dummy_position, _debug_local_basis(dummy_node.global_basis * pivot_basis), 0.16)
 	_add_body_forward_marker()
 	_debug_mesh.surface_end()
+
+
+func _is_live_node3d(node: Variant) -> bool:
+	return node is Node3D and is_instance_valid(node)
 
 
 func _add_cross_marker(center: Vector3, radius: float, color: Color) -> void:
@@ -629,11 +708,47 @@ func _fit_collision_shape_to_visual_bounds() -> void:
 
 
 func _add_body_forward_marker() -> void:
-	var body_origin := global_transform.origin
-	var body_forward := global_transform.basis * Vector3.RIGHT
+	var body_origin := Vector3.ZERO
+	var body_forward := Vector3.RIGHT
 	_debug_mesh.surface_set_color(Color(1.0, 0.1, 0.1, 1.0))
 	_debug_mesh.surface_add_vertex(body_origin)
 	_debug_mesh.surface_add_vertex(body_origin + body_forward.normalized() * 1.5)
+
+
+func _prime_wheels_from_current_transform() -> void:
+	var body_up_ps2 = _basis_axis_ps2(global_transform.basis, Vector3(0.0, 0.0, 1.0))
+	for wheel in wheels:
+		var pivot_world_ps2 = _transform_point_ps2(global_transform, wheel.pivot_local_position_ps2)
+		var attachment_world_ps2 = _transform_point_ps2(global_transform, wheel.local_position_ps2)
+		wheel.world_pivot_ps2 = pivot_world_ps2
+		wheel.world_attachment_ps2 = attachment_world_ps2
+		wheel.world_wheel_center_ps2 = attachment_world_ps2 + body_up_ps2 * wheel.rest_length
+		wheel.contact_point_ps2 = attachment_world_ps2
+		wheel.normal_ps2 = body_up_ps2
+		wheel.suspension_distance = wheel.rest_length
+		wheel.center_offset = wheel.rest_length
+		wheel.compression = clampf(wheel.rest_length, wheel.min_travel, wheel.max_travel)
+		wheel.prev_compression = wheel.compression
+
+
+func _debug_local_from_ps2(world_point_ps2: Vector3) -> Vector3:
+	return _debug_local_from_global(_ps2_to_godot(world_point_ps2))
+
+
+func _debug_local_from_global(world_point: Vector3) -> Vector3:
+	return to_local(world_point)
+
+
+func _debug_local_direction_ps2(direction_ps2: Vector3) -> Vector3:
+	return global_transform.basis.inverse() * _ps2_to_godot(direction_ps2)
+
+
+func _debug_local_direction_global(direction_global: Vector3) -> Vector3:
+	return global_transform.basis.inverse() * direction_global
+
+
+func _debug_local_basis(global_basis: Basis) -> Basis:
+	return global_transform.basis.inverse() * global_basis
 
 
 func _transform_point_ps2(transform: Transform3D, local_point_ps2: Vector3) -> Vector3:
