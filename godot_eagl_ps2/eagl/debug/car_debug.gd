@@ -127,10 +127,11 @@ func _update_telemetry() -> void:
 	lines.append("")
 	for wheel in snapshot.get("wheels", []):
 		lines.append(
-			"%s  cur=%5.3f raw=%5.3f [%5.3f..%5.3f] %s  F=%6.0f" % [
+			"%s  cur=%5.3f raw=%5.3f vel=%+5.3f [%5.3f..%5.3f] %s  F=%6.0f" % [
 				String(wheel.get("slot", "--")),
 				float(wheel.get("compression", 0.0)),
 				float(wheel.get("suspension_distance", 0.0)),
+				float(wheel.get("travel_velocity", 0.0)),
 				float(wheel.get("min_travel", 0.0)),
 				float(wheel.get("max_travel", 0.0)),
 				"GRD" if bool(wheel.get("grounded", false)) else "AIR",

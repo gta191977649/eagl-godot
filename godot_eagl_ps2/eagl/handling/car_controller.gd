@@ -8,6 +8,13 @@ const MathUtils = preload("res://eagl/utils/math_utils.gd")
 
 const SUBSTEP_TARGET_DT = 0.0044
 const GRAVITY_MPS2 = 9.8
+const REST_SETTLE_LINEAR_SPEED = 0.12
+const REST_SETTLE_ANGULAR_SPEED = 0.12
+const REST_SETTLE_TRAVEL_SPEED = 0.02
+const REST_SETTLE_LINEAR_DAMP = 4.0
+const REST_SETTLE_ANGULAR_DAMP = 6.0
+const REST_FREEZE_LINEAR_SPEED = 0.03
+const REST_FREEZE_ANGULAR_SPEED = 0.03
 
 @export var config = null
 @export var auto_build_visuals = true
@@ -225,6 +232,7 @@ func _step_vehicle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 	var drag_force_ps2 = _drag_force_ps2(flat_velocity_ps2, speed_mps)
 	_apply_impulse_ps2(state, drag_force_ps2 * sub_dt, body_origin_ps2)
 	_apply_torque_impulse_ps2(state, _yaw_assist_torque_ps2(body_up_ps2, state, speed_mps) * sub_dt)
+	_apply_rest_settle(state, sub_dt)
 
 
 func _step_suspension_for_wheel(
@@ -240,6 +248,10 @@ func _step_suspension_for_wheel(
 	var pivot_world_ps2 = _transform_point_ps2(transform, pivot_local_ps2)
 	var sample_world_ps2 = _transform_point_ps2(transform, sample_local_ps2)
 	var wheel_contact_query_ps2 = sample_world_ps2
+	var length_min := minf(wheel.min_travel, wheel.max_travel)
+	var length_max := maxf(wheel.min_travel, wheel.max_travel)
+	var travel_range := maxf(length_max - length_min, 0.0001)
+	var previous_length := clampf(wheel.previous_length, length_min, length_max)
 
 	wheel.world_pivot_ps2 = pivot_world_ps2
 	wheel.world_attachment_ps2 = sample_world_ps2
@@ -249,9 +261,8 @@ func _step_suspension_for_wheel(
 	wheel.normal_ps2 = Vector3(0.0, 0.0, 1.0)
 	wheel.contact_point_ps2 = sample_world_ps2
 	wheel.world_wheel_center_ps2 = sample_world_ps2
-	wheel.suspension_distance = wheel.min_travel
-	wheel.center_offset = wheel.min_travel
 	wheel.overtravel = 0.0
+	wheel.over_limit = 0.0
 	wheel.suspension_force = 0.0
 
 	var wheel_velocity_ps2 = _godot_to_ps2(state.get_velocity_at_local_position(_ps2_to_godot(pivot_local_ps2)))
@@ -263,20 +274,23 @@ func _step_suspension_for_wheel(
 	wheel.roll_angle += wheel.angular_speed * sub_dt
 
 	if surface_sampler == null:
+		wheel.current_length = previous_length
+		wheel.travel_velocity = 0.0
+		wheel.compression_velocity = 0.0
+		wheel.suspension_distance = previous_length
+		wheel.center_offset = previous_length
 		return
-
-	var length_min := minf(wheel.min_travel, wheel.max_travel)
-	var length_max := maxf(wheel.min_travel, wheel.max_travel)
-	var travel_range := maxf(length_max - length_min, 0.0001)
-	var previous_length := clampf(wheel.suspension_distance, length_min, length_max)
 
 	var surface: Dictionary = surface_sampler.sample_surface(wheel_contact_query_ps2)
 	if surface.is_empty():
 		wheel.compression = 0.0
+		wheel.current_length = previous_length
+		wheel.previous_length = previous_length
+		wheel.travel_velocity = 0.0
 		wheel.compression_velocity = 0.0
-		wheel.suspension_distance = length_min
-		wheel.center_offset = length_min
-		wheel.world_wheel_center_ps2 = sample_world_ps2 + body_up_ps2 * length_min
+		wheel.suspension_distance = previous_length
+		wheel.center_offset = previous_length
+		wheel.world_wheel_center_ps2 = sample_world_ps2 + body_up_ps2 * previous_length
 		return
 
 	var suspension_axis_ps2 = body_up_ps2
@@ -285,49 +299,53 @@ func _step_suspension_for_wheel(
 	var denom = surface_normal.dot(suspension_axis_ps2)
 	if absf(denom) <= 0.0001:
 		wheel.compression = 0.0
+		wheel.current_length = previous_length
+		wheel.previous_length = previous_length
+		wheel.travel_velocity = 0.0
 		wheel.compression_velocity = 0.0
-		wheel.suspension_distance = length_min
-		wheel.center_offset = length_min
-		wheel.world_wheel_center_ps2 = sample_world_ps2 + body_up_ps2 * length_min
+		wheel.suspension_distance = previous_length
+		wheel.center_offset = previous_length
+		wheel.world_wheel_center_ps2 = sample_world_ps2 + body_up_ps2 * previous_length
 		return
 
 	var t = surface_normal.dot(surface_point - sample_world_ps2) / denom
-	var suspension_distance = t + wheel.wheel_radius
-	var clamped_length = clampf(suspension_distance, length_min, length_max)
+	var raw_length = t + wheel.wheel_radius
+	var clamped_length = clampf(raw_length, length_min, length_max)
 	var compression_length = clampf(clamped_length - length_min, 0.0, travel_range)
+	var travel_velocity = (clamped_length - previous_length) / maxf(sub_dt, 0.0001)
 	wheel.compression = compression_length / travel_range
-	wheel.compression_velocity = (clamped_length - previous_length) / maxf(sub_dt, 0.0001)
-	wheel.grounded = suspension_distance >= length_min
+	wheel.current_length = clamped_length
+	wheel.travel_velocity = travel_velocity
+	wheel.compression_velocity = travel_velocity
+	wheel.grounded = raw_length >= length_min
 	wheel.material_id = int(surface.get("material_id", -1))
 	wheel.normal_ps2 = surface_normal
-	wheel.suspension_distance = suspension_distance
-	wheel.overtravel = maxf(suspension_distance - length_max, 0.0)
+	wheel.suspension_distance = raw_length
+	wheel.over_limit = maxf(raw_length - length_max, 0.0)
+	wheel.overtravel = wheel.over_limit
 	wheel.contact_point_ps2 = sample_world_ps2 + suspension_axis_ps2 * t
 	wheel.center_offset = clamped_length
 	wheel.world_wheel_center_ps2 = sample_world_ps2 + suspension_axis_ps2 * clamped_length
 
 	if not wheel.grounded:
 		wheel.suspension_force = 0.0
+		wheel.previous_length = clamped_length
 		return
 
-	var progressive_sample = clampf(wheel.compression, 0.0, 1.0)
-	var spring_offset = clamped_length
-	var spring_progress = maxf(spring_offset, 0.0)
-	var spring_force = spring_offset * wheel.spring_coefficient * (1.0 + wheel.progressive_spring_scale * spring_progress)
-	var damping = wheel.rebound_damping if wheel.compression_velocity > 0.0 else wheel.bump_damping
-	var damper_force = damping * wheel.compression_velocity
+	var spring_progress = maxf(clamped_length, 0.0)
+	var spring_force = clamped_length * wheel.spring_coefficient * (1.0 + wheel.progressive_spring_scale * spring_progress)
+	var damping = wheel.rebound_damping if travel_velocity > 0.0 else wheel.bump_damping
+	var damper_force = damping * travel_velocity
 	var anti_roll_force = 0.0
 	var pair = _paired_axle_wheel(wheel)
 	if pair != null:
-		anti_roll_force = wheel.anti_roll_coefficient * (clamped_length - pair.center_offset)
-	var bump_force = 0.0
-	if absf(wheel.reference_length) > 0.0001:
-		bump_force = wheel.bump_stop_coefficient * maxf(clamped_length - wheel.reference_length, 0.0)
-	var overtravel_force = wheel.bump_stop_coefficient * wheel.overtravel
+		anti_roll_force = wheel.anti_roll_coefficient * (clamped_length - pair.current_length)
+	var overtravel_force = wheel.bump_stop_coefficient * wheel.over_limit
 
-	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + anti_roll_force + bump_force + overtravel_force, 0.0)
+	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + anti_roll_force + overtravel_force, 0.0)
 	wheel.load_ratio = wheel.suspension_force / maxf(wheel.preload_force, 1.0)
 	_apply_impulse_ps2(state, body_up_ps2 * wheel.suspension_force * sub_dt, pivot_world_ps2)
+	wheel.previous_length = clamped_length
 
 
 func _compute_rpm(speed_mps: float, driven_angular_speed: float, sub_dt: float) -> float:
@@ -394,6 +412,42 @@ func _drag_force_ps2(flat_velocity_ps2: Vector3, speed_mps: float) -> Vector3:
 	var rolling_force = flat_velocity_ps2.normalized() * -config.rolling_resistance * config.mass_kg * GRAVITY_MPS2
 	var aero_force = flat_velocity_ps2.normalized() * -config.aero_drag * speed_mps * speed_mps * config.mass_kg
 	return rolling_force + aero_force
+
+
+func _apply_rest_settle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
+	if not _can_rest_settle(state):
+		return
+	state.linear_velocity = state.linear_velocity.move_toward(Vector3.ZERO, REST_SETTLE_LINEAR_DAMP * sub_dt)
+	state.angular_velocity = state.angular_velocity.move_toward(Vector3.ZERO, REST_SETTLE_ANGULAR_DAMP * sub_dt)
+	if state.linear_velocity.length() <= REST_FREEZE_LINEAR_SPEED:
+		state.linear_velocity = Vector3.ZERO
+	if state.angular_velocity.length() <= REST_FREEZE_ANGULAR_SPEED:
+		state.angular_velocity = Vector3.ZERO
+	for wheel in wheels:
+		if absf(wheel.travel_velocity) > REST_SETTLE_TRAVEL_SPEED:
+			continue
+		wheel.travel_velocity = 0.0
+		wheel.compression_velocity = 0.0
+		wheel.previous_length = wheel.current_length
+
+
+func _can_rest_settle(state: PhysicsDirectBodyState3D) -> bool:
+	if absf(_throttle_input) > 0.01 or absf(_brake_input) > 0.01:
+		return false
+	if absf(_handbrake_input) > 0.01 or absf(_steering_input) > 0.01:
+		return false
+	if state.linear_velocity.length() > REST_SETTLE_LINEAR_SPEED:
+		return false
+	if state.angular_velocity.length() > REST_SETTLE_ANGULAR_SPEED:
+		return false
+	if wheels.is_empty():
+		return false
+	for wheel in wheels:
+		if not wheel.grounded:
+			return false
+		if absf(wheel.travel_velocity) > REST_SETTLE_TRAVEL_SPEED:
+			return false
+	return true
 
 
 func _yaw_assist_torque_ps2(body_up_ps2: Vector3, state: PhysicsDirectBodyState3D, speed_mps: float) -> Vector3:
@@ -469,9 +523,11 @@ func _update_debug_snapshot() -> void:
 			"slot": wheel.slot_id,
 			"compression": wheel.compression,
 			"suspension_distance": wheel.suspension_distance,
+			"current_length": wheel.current_length,
 			"min_travel": wheel.min_travel,
 			"max_travel": wheel.max_travel,
 			"overtravel": wheel.overtravel,
+			"travel_velocity": wheel.travel_velocity,
 			"grounded": wheel.grounded,
 			"force": wheel.suspension_force,
 		})
@@ -757,8 +813,13 @@ func _prime_wheels_from_current_transform() -> void:
 		wheel.normal_ps2 = body_up_ps2
 		wheel.suspension_distance = length_min
 		wheel.center_offset = length_min
+		wheel.current_length = length_min
+		wheel.previous_length = length_min
+		wheel.travel_velocity = 0.0
+		wheel.over_limit = 0.0
 		wheel.compression = 0.0
 		wheel.prev_compression = wheel.compression
+		wheel.compression_velocity = 0.0
 
 
 func _paired_axle_wheel(wheel):

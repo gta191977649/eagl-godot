@@ -133,6 +133,11 @@ func build_wheel_states() -> Array:
 			wheel.preload_force = rear_preload
 			wheel.lateral_grip = rear_lateral_grip
 			wheel.longitudinal_grip = rear_longitudinal_grip
+		var length_min := minf(wheel.min_travel, wheel.max_travel)
+		wheel.current_length = length_min
+		wheel.previous_length = length_min
+		wheel.suspension_distance = length_min
+		wheel.center_offset = length_min
 		states.append(wheel)
 	return states
 

@@ -37,6 +37,10 @@ var suspension_distance = 0.0
 var center_offset = 0.0
 var overtravel = 0.0
 var reference_length = 0.0
+var current_length = 0.0
+var previous_length = 0.0
+var travel_velocity = 0.0
+var over_limit = 0.0
 
 var compression = 0.0
 var prev_compression = 0.0
@@ -60,6 +64,10 @@ func reset_runtime() -> void:
 	suspension_distance = 0.0
 	center_offset = 0.0
 	overtravel = 0.0
+	current_length = 0.0
+	previous_length = 0.0
+	travel_velocity = 0.0
+	over_limit = 0.0
 	roll_angle = 0.0
 	compression = 0.0
 	prev_compression = 0.0
