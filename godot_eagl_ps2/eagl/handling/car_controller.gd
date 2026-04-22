@@ -311,15 +311,21 @@ func _step_suspension_for_wheel(
 		return
 
 	var progressive_sample = clampf(wheel.compression, 0.0, 1.0)
-	var spring_force = wheel.spring_coefficient * progressive_sample * (1.0 + wheel.progressive_spring_scale * progressive_sample)
+	var spring_offset = clamped_length
+	var spring_progress = maxf(spring_offset, 0.0)
+	var spring_force = spring_offset * wheel.spring_coefficient * (1.0 + wheel.progressive_spring_scale * spring_progress)
 	var damping = wheel.rebound_damping if wheel.compression_velocity > 0.0 else wheel.bump_damping
 	var damper_force = damping * wheel.compression_velocity
+	var anti_roll_force = 0.0
+	var pair = _paired_axle_wheel(wheel)
+	if pair != null:
+		anti_roll_force = wheel.anti_roll_coefficient * (clamped_length - pair.center_offset)
 	var bump_force = 0.0
 	if absf(wheel.reference_length) > 0.0001:
 		bump_force = wheel.bump_stop_coefficient * maxf(clamped_length - wheel.reference_length, 0.0)
 	var overtravel_force = wheel.bump_stop_coefficient * wheel.overtravel
 
-	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + bump_force + overtravel_force, 0.0)
+	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + anti_roll_force + bump_force + overtravel_force, 0.0)
 	wheel.load_ratio = wheel.suspension_force / maxf(wheel.preload_force, 1.0)
 	_apply_impulse_ps2(state, body_up_ps2 * wheel.suspension_force * sub_dt, pivot_world_ps2)
 
@@ -753,6 +759,18 @@ func _prime_wheels_from_current_transform() -> void:
 		wheel.center_offset = length_min
 		wheel.compression = 0.0
 		wheel.prev_compression = wheel.compression
+
+
+func _paired_axle_wheel(wheel):
+	for other in wheels:
+		if other == wheel:
+			continue
+		if other.axle != wheel.axle:
+			continue
+		if other.side == wheel.side:
+			continue
+		return other
+	return null
 
 
 func _debug_local_from_ps2(world_point_ps2: Vector3) -> Vector3:

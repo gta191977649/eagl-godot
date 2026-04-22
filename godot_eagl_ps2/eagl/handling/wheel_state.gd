@@ -20,6 +20,7 @@ var spring_coefficient = 50.0
 var rebound_damping = 5.0
 var bump_damping = 5.0
 var bump_stop_coefficient = 20.0
+var anti_roll_coefficient = 0.0
 
 var lateral_grip = 1.0
 var longitudinal_grip = 1.0
