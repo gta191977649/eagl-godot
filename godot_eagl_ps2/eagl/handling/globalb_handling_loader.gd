@@ -122,9 +122,9 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 		radii.append(float(wheel_entry.get("wheel_radius", 0.33)))
 	config.wheel_radii = PackedFloat32Array(radii)
 
-	config.front_travel_limit = _row_float(globalb_row, 0x1ac, config.front_travel_limit)
-	config.front_rest_length = _row_float(globalb_row, 0x1b0, config.front_rest_length)
-	config.front_reference_length = _row_float(globalb_row, 0x1b4, config.front_reference_length)
+	# HP2_PhysicsCar_Construct_FUN_00137100 feeds the 0x1A0..0x1DC blocks into
+	# the tire/contact objects and the 0x230..0x268 blocks into the suspension
+	# objects. Do not alias the tire coefficients back onto suspension lengths.
 	config.hp2_front_tire_0x1a0 = _row_float(globalb_row, 0x1a0, config.hp2_front_tire_0x1a0)
 	config.hp2_front_tire_0x1a4 = _row_float(globalb_row, 0x1a4, config.hp2_front_tire_0x1a4)
 	config.hp2_front_tire_0x1a8 = _row_float(globalb_row, 0x1a8, config.hp2_front_tire_0x1a8)
@@ -133,9 +133,6 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.hp2_front_tire_0x1b4 = _row_float(globalb_row, 0x1b4, config.hp2_front_tire_0x1b4)
 	config.hp2_front_tire_0x1b8 = _row_float(globalb_row, 0x1b8, config.hp2_front_tire_0x1b8)
 	config.hp2_front_tire_0x1bc = _row_float(globalb_row, 0x1bc, config.hp2_front_tire_0x1bc)
-	config.rear_travel_limit = _row_float(globalb_row, 0x1cc, config.rear_travel_limit)
-	config.rear_rest_length = _row_float(globalb_row, 0x1d0, config.rear_rest_length)
-	config.rear_reference_length = _row_float(globalb_row, 0x1d4, config.rear_reference_length)
 	config.hp2_rear_tire_0x1c0 = _row_float(globalb_row, 0x1c0, config.hp2_rear_tire_0x1c0)
 	config.hp2_rear_tire_0x1c4 = _row_float(globalb_row, 0x1c4, config.hp2_rear_tire_0x1c4)
 	config.hp2_rear_tire_0x1c8 = _row_float(globalb_row, 0x1c8, config.hp2_rear_tire_0x1c8)

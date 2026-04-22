@@ -135,7 +135,7 @@ func _update_telemetry() -> void:
 	lines.append("")
 	for wheel in snapshot.get("wheels", []):
 		lines.append(
-			"%s  cur=%5.3f raw=%5.3f vel=%+5.3f [%5.3f..%5.3f] %s  F=%6.0f" % [
+			"%s  cmp=%5.3f len=%+5.3f dlen=%+5.3f [%+5.3f..%+5.3f] %s  load=%6.0f" % [
 				String(wheel.get("slot", "--")),
 				float(wheel.get("compression", 0.0)),
 				float(wheel.get("suspension_distance", 0.0)),
@@ -171,19 +171,13 @@ func _ensure_key_action(action_name: String, keycodes: Array[int]) -> void:
 func _load_car_visual() -> void:
 	if car.config == null or _car_loader == null:
 		return
-	var existing := car.get_node_or_null("CarVisual")
-	if existing != null:
-		car.remove_child(existing)
-		existing.free()
-		car.refresh_visual_bindings()
 	var visual = _car_loader.load(car.config.car_name, car.config)
 	if visual == null:
 		_set_status("Car visual failed: %s" % _car_loader.last_error)
 		push_warning("Failed to load car visual for %s: %s" % [car.config.car_name, _car_loader.last_error])
 		return
 	_set_status("")
-	car.add_child(visual)
-	car.refresh_visual_bindings()
+	car.set_visual_root(visual)
 	_print_vehicle_debug_info(visual)
 	_sync_ui_from_car()
 

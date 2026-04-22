@@ -2,6 +2,7 @@ class_name CarController
 extends RigidBody3D
 
 const CarConfigScript = preload("res://eagl/handling/car_config.gd")
+const CarVisualRigScript = preload("res://eagl/assets/car/car_visual_rig.gd")
 const RoadSurfaceSamplerScript = preload("res://eagl/handling/road_surface_sampler.gd")
 const WheelStateScript = preload("res://eagl/handling/wheel_state.gd")
 const MathUtils = preload("res://eagl/utils/math_utils.gd")
@@ -20,7 +21,7 @@ const HP2_HANDBRAKE_SCALE := {
 	"RL": 1.0,
 	"RR": 1.0,
 }
-const HP2_STABILITY_BASE_FORCE_SCALE = 0.85
+const HP2_STABILITY_BASE_FORCE_SCALE = 1.0
 const HP2_STABILITY_HANDBRAKE_ACTIVE = 0.5
 const HP2_STABILITY_HANDBRAKE_MIN_BLEND = 0.5
 const HP2_STABILITY_HANDBRAKE_RELEASE_RATE = 1.0
@@ -28,6 +29,7 @@ const HP2_STABILITY_HANDBRAKE_APPLY_RATE = 20.0
 const HP2_STABILITY_HANDBRAKE_SLIP_BYPASS_RAD = 0.349065899848938
 const HP2_STABILITY_SPEED_RANGE = 30.0
 const HP2_STABILITY_MAX_EXTRA_GAIN = 0.7
+const HP2_SUSPENSION_BUMP_STOP_SCALE = 32.0
 const HP2_ALT_BRANCH_SPEED_SCALE = 1.5
 const HP2_ALT_BRANCH_ENTRY_SPEED = 15.0
 const HP2_ALT_BRANCH_ENTRY_SLIP_LIMIT_RAD = 0.1963493824005127
@@ -45,6 +47,11 @@ const HP2_TIRE_POWER_BIAS = 1.5
 const HP2_TIRE_LOCK_SCALE = 1.2
 const HP2_TIRE_LOCK_ANGULAR_SPEED_BIAS = 0.1
 const HP2_TIRE_MIN_FORCE_EPSILON = 0.001
+const HP2_TIRE_STATIC_HOLD_SPEED_MPS = 0.35
+const HP2_TIRE_STATIC_HOLD_INPUT_EPSILON = 0.02
+const HP2_TIRE_LOW_SPEED_SLIP_BLEND_MPS = 5.0
+const HP2_TIRE_LOW_SPEED_SLIDE_LONG_SLIP = 2.0
+const HP2_TIRE_STATIC_FORCE_BOOST = 1.2
 
 @export var config = null
 @export var auto_build_visuals = true
@@ -74,19 +81,14 @@ var _hp2_state_3ac = 1.0
 var _hp2_state_3b0 = 0.0
 var _debug_snapshot = {}
 
-var _visual_root: Node3D
-var _body_visual: MeshInstance3D
-var _wheel_visuals = {}
-var _wheel_roll_visuals = {}
-var _wheel_suspension_nodes = {}
-var _debug_pivot_nodes = {}
-var _debug_dummy_nodes = {}
+var _visual_rig = CarVisualRigScript.new()
 var _debug_mesh_instance: MeshInstance3D
 var _debug_mesh = ImmediateMesh.new()
 var _debug_material: StandardMaterial3D
 
 
 func _ready() -> void:
+	_visual_rig.set_owner(self)
 	if config == null:
 		config = CarConfigScript.new()
 
@@ -137,9 +139,8 @@ func apply_config(new_config) -> void:
 	wheels = config.build_wheel_states()
 	_fit_chassis_collision_shape()
 	refresh_visual_bindings()
-	if auto_build_visuals and _wheel_visuals.is_empty():
+	if auto_build_visuals and not _visual_rig.has_wheel_visuals():
 		_ensure_generated_visuals()
-		refresh_visual_bindings()
 	_prime_wheels_from_current_transform()
 	set_debug_overlay_enabled(draw_debug)
 	_update_visuals()
@@ -184,39 +185,13 @@ func set_debug_overlay_enabled(enabled: bool) -> void:
 
 
 func refresh_visual_bindings() -> void:
-	_wheel_visuals.clear()
-	_wheel_roll_visuals.clear()
-	_wheel_suspension_nodes.clear()
-	_debug_pivot_nodes.clear()
-	_debug_dummy_nodes.clear()
-	_visual_root = null
-	_body_visual = null
-	var visual_root := get_node_or_null("CarVisual") as Node3D
-	if visual_root == null:
-		return
-	_visual_root = visual_root
-	_visual_root.position = _ps2_to_godot(-config.physics_origin_offset_ps2)
-	for slot_id in ["FL", "FR", "RL", "RR"]:
-		var pivot_node := visual_root.get_node_or_null("WheelPivots/%s" % slot_id)
-		if pivot_node != null:
-			_debug_pivot_nodes[slot_id] = pivot_node
-		var suspension_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension" % slot_id)
-		if suspension_node != null:
-			_wheel_suspension_nodes[slot_id] = suspension_node
-			var steer_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer" % slot_id)
-			if steer_node != null:
-				_wheel_visuals[slot_id] = steer_node
-			var roll_node := visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer/Roll/Spin" % slot_id)
-			if roll_node == null:
-				roll_node = visual_root.get_node_or_null("WheelPivots/%s/Suspension/Steer/Roll" % slot_id)
-			if roll_node != null:
-				_wheel_roll_visuals[slot_id] = roll_node
-	var dummies_root := visual_root.get_node_or_null("Dummies")
-	if dummies_root != null:
-		for child in dummies_root.get_children():
-			if child is Node3D:
-				_debug_dummy_nodes[String(child.name)] = child
-	_fit_collision_shape_to_visual_bounds()
+	var physics_origin_offset_ps2: Vector3 = config.physics_origin_offset_ps2 if config != null else Vector3.ZERO
+	_visual_rig.refresh_bindings(physics_origin_offset_ps2)
+
+
+func set_visual_root(visual: Node3D) -> void:
+	var physics_origin_offset_ps2: Vector3 = config.physics_origin_offset_ps2 if config != null else Vector3.ZERO
+	_visual_rig.replace_visual_root(visual, physics_origin_offset_ps2)
 
 
 func get_debug_snapshot() -> Dictionary:
@@ -252,7 +227,7 @@ func _step_vehicle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 	engine_rpm = _compute_rpm(speed_mps, driven_angular_speed, sub_dt)
 	_update_gear()
 
-	var engine_force_total = config.sample_engine_force(speed_mps, engine_rpm) * _throttle_input * config.get_gear_ratio(current_gear) * config.final_drive_ratio
+	var engine_wheel_torque_total = config.sample_engine_force(speed_mps, engine_rpm) * _throttle_input * config.get_gear_ratio(current_gear) * config.final_drive_ratio
 
 	for wheel in wheels:
 		if not wheel.grounded:
@@ -262,7 +237,8 @@ func _step_vehicle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 		if wheel_heading_ps2.length_squared() <= 0.0001:
 			wheel_heading_ps2 = body_forward_ps2
 
-		var drive_force = engine_force_total * drive_bias
+		var drive_torque = engine_wheel_torque_total * drive_bias
+		var drive_force = drive_torque / maxf(wheel.wheel_radius, 0.01)
 		var brake_force = config.brake_force * _brake_input * _hp2_service_brake_scale(wheel.slot_id)
 		brake_force += config.handbrake_force * _handbrake_input * _hp2_handbrake_scale(wheel.slot_id)
 		var wheel_right_ps2 = _wheel_right_axis_ps2(transform.basis, wheel)
@@ -318,7 +294,11 @@ func _step_suspension_for_wheel(
 	var wheel_right_ps2 = _wheel_right_axis_ps2(transform.basis, wheel)
 	wheel.forward_speed = wheel_velocity_ps2.dot(wheel_heading_ps2)
 	wheel.lateral_speed = wheel_velocity_ps2.dot(wheel_right_ps2)
-	wheel.angular_speed = wheel.forward_speed / maxf(wheel.wheel_radius, 0.01)
+	var free_rolling_angular_speed: float = wheel.forward_speed / maxf(wheel.wheel_radius, 0.01)
+	if wheel.hp2_lock_active:
+		wheel.angular_speed = 0.0
+	else:
+		wheel.angular_speed = free_rolling_angular_speed
 	wheel.roll_angle += wheel.angular_speed * sub_dt
 
 	if surface_sampler == null:
@@ -388,7 +368,9 @@ func _step_suspension_for_wheel(
 	var pair = _paired_axle_wheel(wheel)
 	if pair != null:
 		anti_roll_force = wheel.anti_roll_coefficient * (clamped_length - pair.current_length)
-	var overtravel_force = wheel.bump_stop_coefficient * wheel.over_limit
+	# HP2's suspension update applies a shared bump-stop scale here rather than
+	# a per-car tuning value from the row block.
+	var overtravel_force = HP2_SUSPENSION_BUMP_STOP_SCALE * wheel.over_limit
 
 	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + anti_roll_force + overtravel_force, 0.0)
 	wheel.load_ratio = wheel.suspension_force / maxf(wheel.preload_force, 1.0)
@@ -451,16 +433,16 @@ func _hp2_stability_force_limit_scale(body_forward_ps2: Vector3, linear_speed_ps
 			1.0
 		)
 
-	var pitch_gain = absf(body_forward_ps2.z) + 1.0
+	var base_gain = absf(body_forward_ps2.z) + 1.0
 	var slip_abs = absf(signed_slip_angle)
 	if _handbrake_input > HP2_STABILITY_HANDBRAKE_ACTIVE and slip_abs < HP2_STABILITY_HANDBRAKE_SLIP_BYPASS_RAD:
-		return HP2_STABILITY_BASE_FORCE_SCALE * ((_hp2_handbrake_stability_blend * (pitch_gain - 1.0)) + 1.0)
+		return 1.0 + _hp2_handbrake_stability_blend * maxf(base_gain - 1.0, 0.0)
 
 	var speed_alpha = clampf(linear_speed_ps2 / HP2_STABILITY_SPEED_RANGE, 0.0, 1.0)
 	var extra_gain = slip_abs * (config.hp2_row_0x310 + config.hp2_row_0x314) * speed_alpha
 	extra_gain = minf(extra_gain, HP2_STABILITY_MAX_EXTRA_GAIN)
-	var stability_gain = pitch_gain + extra_gain
-	return HP2_STABILITY_BASE_FORCE_SCALE * ((_hp2_handbrake_stability_blend * (stability_gain - 1.0)) + 1.0)
+	var stability_gain = base_gain + extra_gain
+	return 1.0 + _hp2_handbrake_stability_blend * maxf(stability_gain - 1.0, 0.0)
 
 
 func _update_hp2_alt_branch_state(speed_scaled: float, sub_dt: float) -> void:
@@ -631,7 +613,8 @@ func _hp2_tire_force_local_for_wheel(
 	force_limit_scale: float
 ) -> Vector2:
 	var requested_lateral_force = _hp2_requested_lateral_force_for_wheel(wheel, sub_dt, force_limit_scale)
-	var local_force = Vector2(requested_longitudinal_force, requested_lateral_force)
+	var static_hold_force = _hp2_static_hold_force_for_wheel(wheel, sub_dt, force_limit_scale)
+	var local_force = Vector2(requested_longitudinal_force + static_hold_force, requested_lateral_force)
 	var slip_vector = Vector2(
 		wheel.angular_speed * wheel.wheel_radius - wheel.forward_speed,
 		-wheel.lateral_speed
@@ -653,8 +636,10 @@ func _hp2_tire_force_local_for_wheel(
 
 
 func _hp2_requested_lateral_force_for_wheel(wheel, sub_dt: float, force_limit_scale: float) -> float:
-	var desired_force = -wheel.lateral_speed * _hp2_tire_slide_force_scale_for_wheel(wheel) * config.mass_kg * 0.25 / maxf(sub_dt, 0.0001)
-	var max_force = _hp2_slide_force_limit_for_wheel(wheel, force_limit_scale)
+	var low_speed_blend = _hp2_low_speed_blend_for_wheel(wheel)
+	var response_scale = lerpf(0.55, 1.0, low_speed_blend)
+	var desired_force = -wheel.lateral_speed * _hp2_tire_lateral_response_scale_for_wheel(wheel) * response_scale * config.mass_kg * 0.25 / maxf(sub_dt, 0.0001)
+	var max_force = _hp2_combined_force_limit_for_wheel(wheel, force_limit_scale)
 	return clampf(desired_force, -max_force, max_force)
 
 
@@ -666,8 +651,25 @@ func _hp2_combined_force_limit_for_wheel(wheel, force_limit_scale: float) -> flo
 	return wheel.suspension_force * _hp2_tire_combined_force_scale_for_wheel(wheel) * force_limit_scale
 
 
+func _hp2_static_hold_force_for_wheel(wheel, sub_dt: float, force_limit_scale: float) -> float:
+	var has_driver_longitudinal_input := (
+		absf(_throttle_input) > HP2_TIRE_STATIC_HOLD_INPUT_EPSILON
+		or absf(_brake_input) > HP2_TIRE_STATIC_HOLD_INPUT_EPSILON
+		or absf(_handbrake_input) > HP2_TIRE_STATIC_HOLD_INPUT_EPSILON
+	)
+	if has_driver_longitudinal_input:
+		return 0.0
+	if absf(wheel.forward_speed) > HP2_TIRE_STATIC_HOLD_SPEED_MPS:
+		return 0.0
+	var hold_force = -wheel.forward_speed * config.mass_kg * 0.25 / maxf(sub_dt, 0.0001)
+	var hold_limit = _hp2_combined_force_limit_for_wheel(wheel, force_limit_scale)
+	return clampf(hold_force, -hold_limit, hold_limit)
+
+
 func _hp2_clamp_local_tire_force(wheel, local_force: Vector2, force_limit_scale: float) -> Vector2:
 	var combined_force_limit = _hp2_combined_force_limit_for_wheel(wheel, force_limit_scale)
+	if not wheel.hp2_is_sliding:
+		combined_force_limit *= lerpf(HP2_TIRE_STATIC_FORCE_BOOST, 1.0, _hp2_low_speed_blend_for_wheel(wheel))
 	var biased_force = local_force
 	var power_bias_active = biased_force.x > 0.0 and not wheel.hp2_lock_active
 	if power_bias_active:
@@ -689,7 +691,9 @@ func _hp2_clamp_local_tire_force(wheel, local_force: Vector2, force_limit_scale:
 func _hp2_wheel_is_sliding(wheel, longitudinal_slip: float) -> bool:
 	if wheel.hp2_lock_active:
 		return true
-	if HP2_TIRE_MIN_LONG_SLIP < absf(longitudinal_slip):
+	var low_speed_blend = _hp2_low_speed_blend_for_wheel(wheel)
+	var longitudinal_threshold = lerpf(HP2_TIRE_LOW_SPEED_SLIDE_LONG_SLIP, HP2_TIRE_MIN_LONG_SLIP, low_speed_blend)
+	if longitudinal_threshold < absf(longitudinal_slip):
 		return true
 	return _hp2_tire_slip_angle_threshold_deg_for_wheel(wheel) < wheel.hp2_local_slip_angle_deg
 
@@ -697,7 +701,14 @@ func _hp2_wheel_is_sliding(wheel, longitudinal_slip: float) -> bool:
 func _hp2_local_velocity_slip_angle_deg(wheel) -> float:
 	if wheel.forward_speed == 0.0 and wheel.lateral_speed == 0.0:
 		return 0.0
-	return absf(rad_to_deg(atan2(wheel.lateral_speed, wheel.forward_speed)))
+	var forward_abs = absf(wheel.forward_speed)
+	var raw_angle_deg = absf(rad_to_deg(atan2(wheel.lateral_speed, maxf(forward_abs, 0.001))))
+	return raw_angle_deg * _hp2_low_speed_blend_for_wheel(wheel)
+
+
+func _hp2_low_speed_blend_for_wheel(wheel) -> float:
+	var planar_speed = sqrt(wheel.forward_speed * wheel.forward_speed + wheel.lateral_speed * wheel.lateral_speed)
+	return clampf(planar_speed / HP2_TIRE_LOW_SPEED_SLIP_BLEND_MPS, 0.0, 1.0)
 
 
 func _hp2_tire_slip_angle_threshold_deg_for_wheel(wheel) -> float:
@@ -764,6 +775,18 @@ func _hp2_tire_slide_force_scale_for_wheel(wheel) -> float:
 	if wheel.is_front():
 		return config.hp2_front_tire_0x1b0
 	return config.hp2_rear_tire_0x1d0
+
+
+func _hp2_tire_lateral_response_scale_for_wheel(wheel) -> float:
+	var response_scale := 0.0
+	var fallback_scale := _hp2_tire_combined_force_scale_for_wheel(wheel)
+	if wheel.is_front():
+		response_scale = config.hp2_front_tire_0x1a8
+	else:
+		response_scale = config.hp2_rear_tire_0x1c8
+	if absf(response_scale) <= HP2_TIRE_MIN_FORCE_EPSILON:
+		return fallback_scale
+	return response_scale
 
 
 func _hp2_tire_combined_force_scale_for_wheel(wheel) -> float:
@@ -843,41 +866,7 @@ func _update_debug_snapshot() -> void:
 
 
 func _ensure_generated_visuals() -> void:
-	if not _wheel_visuals.is_empty():
-		return
-	_visual_root = get_node_or_null("GeneratedVisuals")
-	if _visual_root == null:
-		_visual_root = Node3D.new()
-		_visual_root.name = "GeneratedVisuals"
-		add_child(_visual_root)
-
-	_body_visual = _visual_root.get_node_or_null("Body") as MeshInstance3D
-	if _body_visual == null:
-		_body_visual = MeshInstance3D.new()
-		_body_visual.name = "Body"
-		var body_mesh = BoxMesh.new()
-		body_mesh.size = _ps2_to_godot(config.body_size_ps2).abs()
-		_body_visual.mesh = body_mesh
-		var material = StandardMaterial3D.new()
-		material.albedo_color = Color(0.82, 0.08, 0.05, 1.0)
-		_body_visual.material_override = material
-		_body_visual.position = _ps2_to_godot(config.center_of_mass_ps2)
-		_visual_root.add_child(_body_visual)
-
-	for wheel in wheels:
-		if _wheel_visuals.has(wheel.slot_id):
-			continue
-		var wheel_visual = MeshInstance3D.new()
-		wheel_visual.name = wheel.slot_id
-		var wheel_mesh = SphereMesh.new()
-		wheel_mesh.radius = wheel.wheel_radius
-		wheel_mesh.height = wheel.wheel_radius * 2.0
-		wheel_visual.mesh = wheel_mesh
-		var wheel_material = StandardMaterial3D.new()
-		wheel_material.albedo_color = Color(0.08, 0.08, 0.08, 1.0)
-		wheel_visual.material_override = wheel_material
-		_visual_root.add_child(wheel_visual)
-		_wheel_visuals[wheel.slot_id] = wheel_visual
+	_visual_rig.ensure_generated_visuals(config, wheels)
 
 
 func _ensure_debug_mesh() -> void:
@@ -898,29 +887,7 @@ func _ensure_debug_mesh() -> void:
 
 
 func _update_visuals() -> void:
-	for wheel in wheels:
-		var wheel_visual = _wheel_visuals.get(wheel.slot_id, null)
-		var suspension_node = _wheel_suspension_nodes.get(wheel.slot_id, null)
-		var pivot_node = _debug_pivot_nodes.get(wheel.slot_id, null)
-		if _is_live_node3d(suspension_node) and _is_live_node3d(pivot_node) and _is_live_node3d(_visual_root):
-			var suspension_transform: Node3D = suspension_node
-			suspension_transform.position = _ps2_to_godot(wheel.world_wheel_center_ps2 - wheel.world_pivot_ps2)
-		elif _is_live_node3d(wheel_visual):
-			var target_position = _ps2_to_godot(wheel.world_wheel_center_ps2)
-			var wheel_node: Node3D = wheel_visual
-			wheel_node.global_position = target_position
-		if not _is_live_node3d(wheel_visual):
-			continue
-		var steer_node: Node3D = wheel_visual
-		var steer_rotation = steer_node.rotation
-		steer_rotation.y = wheel.steer_angle
-		steer_node.rotation = steer_rotation
-		var roll_visual = _wheel_roll_visuals.get(wheel.slot_id, null)
-		if _is_live_node3d(roll_visual):
-			var roll_node: Node3D = roll_visual
-			var roll_rotation = roll_node.rotation
-			roll_rotation.x = wheel.roll_angle * float(roll_node.get_meta("eagl_spin_direction", 1.0))
-			roll_node.rotation = roll_rotation
+	_visual_rig.update_from_wheels(wheels)
 
 
 func _rebuild_debug_mesh() -> void:
@@ -969,19 +936,21 @@ func _rebuild_debug_mesh() -> void:
 		_add_circle_marker(center, maxf(wheel.wheel_radius, 0.05), _debug_local_direction_ps2(_wheel_axle_ps2(global_transform.basis, wheel)), Color(1.0, 0.75, 0.15, 0.9), 18)
 		if wheel.grounded:
 			_add_circle_marker(contact, 0.09, _debug_local_direction_ps2(wheel.normal_ps2), Color(0.25, 1.0, 0.3, 0.8), 14)
-	for slot_id in _debug_pivot_nodes.keys():
-		var pivot_node: Node3D = _debug_pivot_nodes[slot_id]
+	var debug_pivot_nodes = _visual_rig.debug_pivot_nodes
+	for slot_id in debug_pivot_nodes.keys():
+		var pivot_node: Node3D = debug_pivot_nodes[slot_id]
 		if not _is_live_node3d(pivot_node):
-			_debug_pivot_nodes.erase(slot_id)
+			debug_pivot_nodes.erase(slot_id)
 			continue
 		var pivot_position = _debug_local_from_global(pivot_node.global_position)
 		_add_cross_marker(pivot_position, 0.12, Color(1.0, 0.35, 0.15, 1.0))
 		_add_circle_marker(pivot_position, 0.18, _debug_local_direction_global((pivot_node.global_basis * pivot_basis.y).normalized()), Color(1.0, 0.55, 0.15, 1.0))
 		_add_axis_marker(pivot_position, _debug_local_basis(pivot_node.global_basis * pivot_basis), 0.22)
-	for dummy_name in _debug_dummy_nodes.keys():
-		var dummy_node: Node3D = _debug_dummy_nodes[dummy_name]
+	var debug_dummy_nodes = _visual_rig.debug_dummy_nodes
+	for dummy_name in debug_dummy_nodes.keys():
+		var dummy_node: Node3D = debug_dummy_nodes[dummy_name]
 		if not _is_live_node3d(dummy_node):
-			_debug_dummy_nodes.erase(dummy_name)
+			debug_dummy_nodes.erase(dummy_name)
 			continue
 		var dummy_color := Color(0.85, 0.3, 1.0, 1.0) if dummy_name.ends_with("_PIVOT") else Color(0.35, 0.95, 0.85, 1.0)
 		var dummy_position = _debug_local_from_global(dummy_node.global_position)
@@ -1104,46 +1073,7 @@ func _fit_chassis_collision_shape() -> void:
 
 
 func _fit_collision_shape_to_visual_bounds() -> void:
-	var collision_shape := get_node_or_null("CollisionShape3D") as CollisionShape3D
-	if collision_shape == null:
-		return
-	var box_shape := collision_shape.shape as BoxShape3D
-	if box_shape == null:
-		return
-	var body_root := get_node_or_null("CarVisual/Body") as Node3D
-	if body_root == null:
-		return
-	var has_bounds := false
-	var min_point := Vector3.ZERO
-	var max_point := Vector3.ZERO
-	for child in body_root.get_children():
-		if not (child is MeshInstance3D):
-			continue
-		var mesh_instance := child as MeshInstance3D
-		var local_aabb := mesh_instance.get_aabb()
-		var corners := [
-			local_aabb.position,
-			local_aabb.position + Vector3(local_aabb.size.x, 0.0, 0.0),
-			local_aabb.position + Vector3(0.0, local_aabb.size.y, 0.0),
-			local_aabb.position + Vector3(0.0, 0.0, local_aabb.size.z),
-			local_aabb.position + Vector3(local_aabb.size.x, local_aabb.size.y, 0.0),
-			local_aabb.position + Vector3(local_aabb.size.x, 0.0, local_aabb.size.z),
-			local_aabb.position + Vector3(0.0, local_aabb.size.y, local_aabb.size.z),
-			local_aabb.position + local_aabb.size,
-		]
-		for corner in corners:
-			var p: Vector3 = to_local(mesh_instance.global_transform * corner)
-			if not has_bounds:
-				min_point = p
-				max_point = p
-				has_bounds = true
-			else:
-				min_point = min_point.min(p)
-				max_point = max_point.max(p)
-	if not has_bounds:
-		return
-	box_shape.size = (max_point - min_point).abs()
-	collision_shape.position = (min_point + max_point) * 0.5
+	_visual_rig.fit_collision_shape_to_visual_bounds()
 
 
 func _add_body_forward_marker() -> void:
