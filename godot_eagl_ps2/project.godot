@@ -30,5 +30,3 @@ game_root="/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA"
 [rendering]
 
 rendering_device/driver.windows="d3d12"
-renderer/rendering_method="gl_compatibility"
-renderer/rendering_method.mobile="gl_compatibility"

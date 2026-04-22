@@ -41,6 +41,14 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var front_max_compression = 0.125
 @export var front_min_compression = -0.13
 @export var front_reference_length = 0.0
+@export var hp2_front_tire_0x1a0 = 0.0
+@export var hp2_front_tire_0x1a4 = 0.0
+@export var hp2_front_tire_0x1a8 = 0.0
+@export var hp2_front_tire_0x1ac = 0.0
+@export var hp2_front_tire_0x1b0 = 0.0
+@export var hp2_front_tire_0x1b4 = 0.0
+@export var hp2_front_tire_0x1b8 = 0.0
+@export var hp2_front_tire_0x1bc = 0.0
 
 @export var rear_progressive_spring_scale = 4.5
 @export var rear_spring_coefficient = 53.0
@@ -53,6 +61,14 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var rear_max_compression = 0.115
 @export var rear_min_compression = -0.115
 @export var rear_reference_length = 0.0
+@export var hp2_rear_tire_0x1c0 = 0.0
+@export var hp2_rear_tire_0x1c4 = 0.0
+@export var hp2_rear_tire_0x1c8 = 0.0
+@export var hp2_rear_tire_0x1cc = 0.0
+@export var hp2_rear_tire_0x1d0 = 0.0
+@export var hp2_rear_tire_0x1d4 = 0.0
+@export var hp2_rear_tire_0x1d8 = 0.0
+@export var hp2_rear_tire_0x1dc = 0.0
 
 @export var steering_response = 3.42
 @export var steering_return = 3.42
@@ -77,6 +93,14 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var yaw_damping = 1.8
 @export var yaw_assist = 1350.0
 @export var steering_yaw_assist = 680.0
+@export var hp2_row_0x300 = 0.0
+@export var hp2_row_0x304 = 0.0
+@export var hp2_row_0x308 = 0.0
+@export var hp2_row_0x310 = 0.0
+@export var hp2_row_0x314 = 0.0
+@export var hp2_row_0x318 = 0.0
+@export var hp2_row_0x31c = 0.0
+@export var hp2_row_0x320 = 0.0
 
 @export var final_drive_ratio = 4.0
 @export var reverse_gear_ratio = -2.97
@@ -104,11 +128,12 @@ func build_wheel_states() -> Array:
 		if index >= wheel_local_positions_ps2.size() or index >= wheel_radii.size():
 			break
 		var wheel = WheelStateScript.new()
+		var physics_local_position: Vector3 = wheel_local_positions_ps2[index] - physics_origin_offset_ps2
 		wheel.slot_id = SLOT_IDS[index]
 		wheel.axle = SLOT_AXLES[index]
 		wheel.side = SLOT_SIDES[index]
-		wheel.pivot_local_position_ps2 = wheel_local_positions_ps2[index]
-		wheel.local_position_ps2 = wheel_local_positions_ps2[index]
+		wheel.pivot_local_position_ps2 = physics_local_position
+		wheel.local_position_ps2 = physics_local_position
 		wheel.wheel_radius = wheel_radii[index]
 		if wheel.is_front():
 			wheel.progressive_spring_scale = front_progressive_spring_scale

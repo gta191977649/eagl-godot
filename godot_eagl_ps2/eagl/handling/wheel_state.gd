@@ -52,6 +52,13 @@ var forward_speed = 0.0
 var lateral_speed = 0.0
 var angular_speed = 0.0
 var load_ratio = 0.0
+var hp2_spin_accumulator = 0.0
+var hp2_lock_active = false
+var hp2_pair_force_scale = 1.0
+var hp2_longitudinal_slip = 0.0
+var hp2_local_slip_angle_deg = 0.0
+var hp2_force_saturation = 0.0
+var hp2_is_sliding = false
 
 
 func reset_runtime() -> void:
@@ -78,6 +85,13 @@ func reset_runtime() -> void:
 	lateral_speed = 0.0
 	angular_speed = 0.0
 	load_ratio = 0.0
+	hp2_spin_accumulator = 0.0
+	hp2_lock_active = false
+	hp2_pair_force_scale = 1.0
+	hp2_longitudinal_slip = 0.0
+	hp2_local_slip_angle_deg = 0.0
+	hp2_force_saturation = 0.0
+	hp2_is_sliding = false
 
 
 func is_front() -> bool:

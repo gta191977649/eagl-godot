@@ -8,22 +8,50 @@ const MathUtils = preload("res://eagl/utils/math_utils.gd")
 
 const SUBSTEP_TARGET_DT = 0.0044
 const GRAVITY_MPS2 = 9.8
-const REST_SETTLE_LINEAR_SPEED = 0.12
-const REST_SETTLE_ANGULAR_SPEED = 0.12
-const REST_SETTLE_TRAVEL_SPEED = 0.02
-const REST_SETTLE_LINEAR_DAMP = 4.0
-const REST_SETTLE_ANGULAR_DAMP = 6.0
-const REST_FREEZE_LINEAR_SPEED = 0.03
-const REST_FREEZE_ANGULAR_SPEED = 0.03
-const GROUNDED_HEAVE_DAMPING = 6.0
-const GROUNDED_PITCH_DAMPING = 950.0
-const GROUNDED_ROLL_DAMPING = 950.0
+const HP2_SERVICE_BRAKE_SCALE := {
+	"FL": 1.0,
+	"FR": 1.0,
+	"RL": 0.6,
+	"RR": 0.6,
+}
+const HP2_HANDBRAKE_SCALE := {
+	"FL": 0.0,
+	"FR": 0.0,
+	"RL": 1.0,
+	"RR": 1.0,
+}
+const HP2_STABILITY_BASE_FORCE_SCALE = 0.85
+const HP2_STABILITY_HANDBRAKE_ACTIVE = 0.5
+const HP2_STABILITY_HANDBRAKE_MIN_BLEND = 0.5
+const HP2_STABILITY_HANDBRAKE_RELEASE_RATE = 1.0
+const HP2_STABILITY_HANDBRAKE_APPLY_RATE = 20.0
+const HP2_STABILITY_HANDBRAKE_SLIP_BYPASS_RAD = 0.349065899848938
+const HP2_STABILITY_SPEED_RANGE = 30.0
+const HP2_STABILITY_MAX_EXTRA_GAIN = 0.7
+const HP2_ALT_BRANCH_SPEED_SCALE = 1.5
+const HP2_ALT_BRANCH_ENTRY_SPEED = 15.0
+const HP2_ALT_BRANCH_ENTRY_SLIP_LIMIT_RAD = 0.1963493824005127
+const HP2_ALT_BRANCH_EXIT_SLIP_LIMIT_RAD = 0.30000001192092896
+const HP2_ALT_BRANCH_ENTRY_SPIN_MIN = 1.5
+const HP2_ALT_BRANCH_ENTRY_SPIN_MAX = 3.0
+const HP2_ALT_BRANCH_CLEAR_SPIN = 1.0
+const HP2_ALT_BRANCH_PAIR_SCALE_DEFAULT = 0.4
+const HP2_ALT_BRANCH_PAIR_HOLD_TIME = 1.0
+const HP2_ALT_BRANCH_PAIR_CLEAR_DELAY = 0.1666666716337204
+const HP2_WHEEL_SPIN_SERVICE_SCALE = 4.0
+const HP2_WHEEL_SPIN_HANDBRAKE_SCALE = 10.0
+const HP2_TIRE_MIN_LONG_SLIP = 0.5
+const HP2_TIRE_POWER_BIAS = 1.5
+const HP2_TIRE_LOCK_SCALE = 1.2
+const HP2_TIRE_LOCK_ANGULAR_SPEED_BIAS = 0.1
+const HP2_TIRE_MIN_FORCE_EPSILON = 0.001
 
 @export var config = null
 @export var auto_build_visuals = true
 @export var draw_debug = true
 @export var debug_normal_length = 0.45
 @export var debug_axis_length = 0.65
+@export var hp2_state_39c_enabled = false
 
 var surface_sampler = null
 var wheels: Array = []
@@ -37,6 +65,13 @@ var _steering_input = 0.0
 var _handbrake_input = 0.0
 var _steering_state = 0.0
 var _steering_engaged = false
+var _hp2_handbrake_stability_blend = 1.0
+var _hp2_force_limit_scale = HP2_STABILITY_BASE_FORCE_SCALE
+var _hp2_state_39c = 0
+var _hp2_state_3a4 = 0
+var _hp2_state_3a8 = 0.0
+var _hp2_state_3ac = 1.0
+var _hp2_state_3b0 = 0.0
 var _debug_snapshot = {}
 
 var _visual_root: Node3D
@@ -57,6 +92,7 @@ func _ready() -> void:
 
 	custom_integrator = true
 	gravity_scale = 0.0
+	can_sleep = false
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
 	apply_config(config)
 
@@ -89,12 +125,15 @@ func apply_config(new_config) -> void:
 		return
 	config = new_config
 	mass = config.mass_kg
-	center_of_mass = _ps2_to_godot(config.center_of_mass_ps2)
+	center_of_mass = _ps2_to_godot(config.center_of_mass_ps2 - config.physics_origin_offset_ps2)
 	engine_rpm = maxf(config.idle_rpm, 900.0)
 	current_gear = 1
 	signed_slip_angle = 0.0
 	_steering_state = 0.0
 	_steering_engaged = false
+	_hp2_handbrake_stability_blend = 1.0
+	_hp2_force_limit_scale = HP2_STABILITY_BASE_FORCE_SCALE
+	_reset_hp2_alt_branch_state()
 	wheels = config.build_wheel_states()
 	_fit_chassis_collision_shape()
 	refresh_visual_bindings()
@@ -121,6 +160,9 @@ func reset_runtime_state(target_transform: Transform3D = transform) -> void:
 	_handbrake_input = 0.0
 	_steering_state = 0.0
 	_steering_engaged = false
+	_hp2_handbrake_stability_blend = 1.0
+	_hp2_force_limit_scale = HP2_STABILITY_BASE_FORCE_SCALE
+	_reset_hp2_alt_branch_state()
 	for wheel in wheels:
 		wheel.reset_runtime()
 	_prime_wheels_from_current_transform()
@@ -153,6 +195,7 @@ func refresh_visual_bindings() -> void:
 	if visual_root == null:
 		return
 	_visual_root = visual_root
+	_visual_root.position = _ps2_to_godot(-config.physics_origin_offset_ps2)
 	for slot_id in ["FL", "FR", "RL", "RR"]:
 		var pivot_node := visual_root.get_node_or_null("WheelPivots/%s" % slot_id)
 		if pivot_node != null:
@@ -185,14 +228,15 @@ func _step_vehicle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 	var body_origin_ps2 = _godot_to_ps2(transform.origin)
 	var body_up_ps2 = _basis_axis_ps2(transform.basis, Vector3(0.0, 0.0, 1.0))
 	var body_forward_ps2 = _basis_axis_ps2(transform.basis, Vector3(1.0, 0.0, 0.0))
-	var body_right_ps2 = _basis_axis_ps2(transform.basis, Vector3(0.0, 1.0, 0.0))
 	var linear_velocity_ps2 = _godot_to_ps2(state.linear_velocity)
 	var flat_velocity_ps2 = _horizontal_ps2(linear_velocity_ps2)
 	var speed_mps = flat_velocity_ps2.length()
 
 	state.apply_impulse(Vector3.DOWN * config.mass_kg * GRAVITY_MPS2 * sub_dt)
 	_update_steering_state(speed_mps, sub_dt)
-	_update_body_slip(body_forward_ps2, body_up_ps2, flat_velocity_ps2)
+	_update_body_slip(body_forward_ps2, flat_velocity_ps2)
+	_hp2_force_limit_scale = _hp2_stability_force_limit_scale(body_forward_ps2, linear_velocity_ps2.length(), sub_dt)
+	_update_hp2_alt_branch_state(speed_mps * HP2_ALT_BRANCH_SPEED_SCALE, sub_dt)
 
 	var driven_angular_speed = 0.0
 	var driven_count = 0
@@ -219,24 +263,24 @@ func _step_vehicle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
 			wheel_heading_ps2 = body_forward_ps2
 
 		var drive_force = engine_force_total * drive_bias
-		var brake_force = config.brake_force * _brake_input
-		if wheel.is_rear():
-			brake_force += config.handbrake_force * _handbrake_input
-
-		var drive_force_ps2 = wheel_heading_ps2 * drive_force
-		var braking_direction = -signf(_safe_speed_sign(wheel.forward_speed, speed_mps)) * wheel_heading_ps2
-		var brake_force_ps2 = braking_direction * brake_force
-		var lateral_force_ps2 = _lateral_force_for_wheel(wheel, sub_dt)
-		var longitudinal_force_ps2 = _longitudinal_limit_force(wheel, drive_force_ps2 + brake_force_ps2)
-
-		_apply_impulse_ps2(state, lateral_force_ps2 * sub_dt, wheel.contact_point_ps2)
-		_apply_impulse_ps2(state, longitudinal_force_ps2 * sub_dt, wheel.contact_point_ps2)
+		var brake_force = config.brake_force * _brake_input * _hp2_service_brake_scale(wheel.slot_id)
+		brake_force += config.handbrake_force * _handbrake_input * _hp2_handbrake_scale(wheel.slot_id)
+		var wheel_right_ps2 = _wheel_right_axis_ps2(transform.basis, wheel)
+		var wheel_force_limit_scale = _hp2_force_limit_scale * wheel.hp2_pair_force_scale
+		var brake_force_scalar = -signf(_safe_speed_sign(wheel.forward_speed, speed_mps)) * brake_force
+		var tire_force_local_ps2: Vector2 = _hp2_tire_force_local_for_wheel(
+			wheel,
+			drive_force + brake_force_scalar,
+			speed_mps * HP2_ALT_BRANCH_SPEED_SCALE,
+			sub_dt,
+			wheel_force_limit_scale
+		)
+		var tire_force_ps2 = wheel_heading_ps2 * tire_force_local_ps2.x + wheel_right_ps2 * tire_force_local_ps2.y
+		_apply_impulse_ps2(state, tire_force_ps2 * sub_dt, wheel.contact_point_ps2)
+		_update_hp2_wheel_spin_accumulator(wheel, speed_mps * HP2_ALT_BRANCH_SPEED_SCALE)
 
 	var drag_force_ps2 = _drag_force_ps2(flat_velocity_ps2, speed_mps)
 	_apply_impulse_ps2(state, drag_force_ps2 * sub_dt, body_origin_ps2)
-	_apply_grounded_chassis_damping(state, body_origin_ps2, body_up_ps2, body_forward_ps2, body_right_ps2, sub_dt)
-	_apply_torque_impulse_ps2(state, _yaw_assist_torque_ps2(body_up_ps2, state, speed_mps) * sub_dt)
-	_apply_rest_settle(state, sub_dt)
 
 
 func _step_suspension_for_wheel(
@@ -385,29 +429,297 @@ func _update_steering_state(speed_mps: float, sub_dt: float) -> void:
 	_steering_state = move_toward(_steering_state, target_angle, response * sub_dt)
 
 
-func _update_body_slip(body_forward_ps2: Vector3, body_up_ps2: Vector3, flat_velocity_ps2: Vector3) -> void:
-	if flat_velocity_ps2.length() < 0.25:
+func _update_body_slip(body_forward_ps2: Vector3, flat_velocity_ps2: Vector3) -> void:
+	if flat_velocity_ps2.dot(body_forward_ps2) < 5.0:
 		signed_slip_angle = 0.0
 		return
-	signed_slip_angle = _signed_angle_on_axis(body_forward_ps2, flat_velocity_ps2.normalized(), body_up_ps2)
+	var body_heading_deg = rad_to_deg(atan2(body_forward_ps2.y, body_forward_ps2.x))
+	var velocity_heading_deg = rad_to_deg(atan2(flat_velocity_ps2.y, flat_velocity_ps2.x))
+	var slip_deg = wrapf(body_heading_deg - velocity_heading_deg + 180.0, 0.0, 360.0) - 180.0
+	signed_slip_angle = deg_to_rad(slip_deg)
 
 
-func _lateral_force_for_wheel(wheel, sub_dt: float) -> Vector3:
-	var slip_abs = absf(rad_to_deg(signed_slip_angle))
-	var reduction_range = maxf(config.slip_grip_reduction_end_deg - config.slip_grip_reduction_start_deg, 0.001)
-	var reduction_alpha = clampf((slip_abs - config.slip_grip_reduction_start_deg) / reduction_range, 0.0, 1.0)
-	var grip_scale = lerpf(1.0, config.drift_grip_scale, reduction_alpha)
-	var desired_force = -wheel.lateral_speed * wheel.lateral_grip * config.mass_kg * 0.25 / maxf(sub_dt, 0.0001)
-	var max_force = wheel.suspension_force * wheel.lateral_grip * grip_scale
+func _hp2_stability_force_limit_scale(body_forward_ps2: Vector3, linear_speed_ps2: float, sub_dt: float) -> float:
+	if _handbrake_input > HP2_STABILITY_HANDBRAKE_ACTIVE:
+		_hp2_handbrake_stability_blend = maxf(
+			_hp2_handbrake_stability_blend - sub_dt * HP2_STABILITY_HANDBRAKE_APPLY_RATE,
+			HP2_STABILITY_HANDBRAKE_MIN_BLEND
+		)
+	else:
+		_hp2_handbrake_stability_blend = minf(
+			_hp2_handbrake_stability_blend + sub_dt * HP2_STABILITY_HANDBRAKE_RELEASE_RATE,
+			1.0
+		)
+
+	var pitch_gain = absf(body_forward_ps2.z) + 1.0
+	var slip_abs = absf(signed_slip_angle)
+	if _handbrake_input > HP2_STABILITY_HANDBRAKE_ACTIVE and slip_abs < HP2_STABILITY_HANDBRAKE_SLIP_BYPASS_RAD:
+		return HP2_STABILITY_BASE_FORCE_SCALE * ((_hp2_handbrake_stability_blend * (pitch_gain - 1.0)) + 1.0)
+
+	var speed_alpha = clampf(linear_speed_ps2 / HP2_STABILITY_SPEED_RANGE, 0.0, 1.0)
+	var extra_gain = slip_abs * (config.hp2_row_0x310 + config.hp2_row_0x314) * speed_alpha
+	extra_gain = minf(extra_gain, HP2_STABILITY_MAX_EXTRA_GAIN)
+	var stability_gain = pitch_gain + extra_gain
+	return HP2_STABILITY_BASE_FORCE_SCALE * ((_hp2_handbrake_stability_blend * (stability_gain - 1.0)) + 1.0)
+
+
+func _update_hp2_alt_branch_state(speed_scaled: float, sub_dt: float) -> void:
+	if hp2_state_39c_enabled:
+		_hp2_state_39c = 1
+	else:
+		_hp2_state_39c = 0
+
+	if _hp2_state_39c != 1:
+		_hp2_state_3a4 = 0
+		_hp2_state_3a8 = 0.0
+		_hp2_state_3ac = 1.0
+		_hp2_state_3b0 = 0.0
+		_apply_hp2_pair_force_scales()
+		return
+
+	if _hp2_state_3a4 == 0:
+		if speed_scaled <= 0.0:
+			_apply_hp2_pair_force_scales()
+			return
+		if speed_scaled < HP2_ALT_BRANCH_ENTRY_SPEED:
+			_apply_hp2_pair_force_scales()
+			return
+		if absf(signed_slip_angle) >= HP2_ALT_BRANCH_ENTRY_SLIP_LIMIT_RAD:
+			_apply_hp2_pair_force_scales()
+			return
+		_try_enter_hp2_alt_pair_state(speed_scaled)
+		_apply_hp2_pair_force_scales()
+		return
+
+	_hp2_state_3a8 -= sub_dt
+	if _hp2_state_3a8 < 0.0:
+		_clear_hp2_alt_pair_state()
+		_apply_hp2_pair_force_scales()
+		return
+	if absf(signed_slip_angle) > HP2_ALT_BRANCH_EXIT_SLIP_LIMIT_RAD:
+		_clear_hp2_alt_pair_state()
+		_apply_hp2_pair_force_scales()
+		return
+	if _all_hp2_spin_accumulators_below(HP2_ALT_BRANCH_CLEAR_SPIN):
+		_hp2_state_3b0 += sub_dt
+		if HP2_ALT_BRANCH_PAIR_CLEAR_DELAY < _hp2_state_3b0:
+			_clear_hp2_alt_pair_state()
+	else:
+		_hp2_state_3b0 = 0.0
+	_apply_hp2_pair_force_scales()
+
+
+func _try_enter_hp2_alt_pair_state(speed_scaled: float) -> void:
+	if wheels.size() < 4:
+		return
+	var trigger_index := -1
+	var pair_selector := 0
+	if wheels[2].hp2_spin_accumulator <= HP2_ALT_BRANCH_ENTRY_SPIN_MIN:
+		if HP2_ALT_BRANCH_ENTRY_SPIN_MIN < wheels[3].hp2_spin_accumulator:
+			trigger_index = 2
+			if wheels[3].hp2_spin_accumulator < wheels[2].hp2_spin_accumulator:
+				pair_selector = 1
+			else:
+				trigger_index = 3
+				pair_selector = 2
+		elif HP2_ALT_BRANCH_ENTRY_SPIN_MIN < wheels[0].hp2_spin_accumulator or HP2_ALT_BRANCH_ENTRY_SPIN_MIN < wheels[1].hp2_spin_accumulator:
+			trigger_index = 1
+			if wheels[0].hp2_spin_accumulator < wheels[1].hp2_spin_accumulator:
+				pair_selector = 1
+			else:
+				trigger_index = 0
+				pair_selector = 2
+	else:
+		trigger_index = 2
+		if wheels[3].hp2_spin_accumulator < wheels[2].hp2_spin_accumulator:
+			pair_selector = 1
+		else:
+			trigger_index = 3
+			pair_selector = 2
+
+	if trigger_index < 0 or pair_selector == 0:
+		return
+
+	var trigger_spin = wheels[trigger_index].hp2_spin_accumulator
+	var trigger_alpha = clampf(
+		(trigger_spin - HP2_ALT_BRANCH_ENTRY_SPIN_MIN) / maxf(HP2_ALT_BRANCH_ENTRY_SPIN_MAX - HP2_ALT_BRANCH_ENTRY_SPIN_MIN, 0.0001),
+		0.0,
+		1.0
+	)
+	_hp2_state_3a4 = pair_selector
+	_hp2_state_3a8 = HP2_ALT_BRANCH_PAIR_HOLD_TIME
+	_hp2_state_3b0 = 0.0
+	_hp2_state_3ac = HP2_ALT_BRANCH_PAIR_SCALE_DEFAULT + (speed_scaled / HP2_ALT_BRANCH_ENTRY_SPEED) * (1.0 - trigger_alpha) * (1.0 - HP2_ALT_BRANCH_PAIR_SCALE_DEFAULT)
+
+
+func _clear_hp2_alt_pair_state() -> void:
+	_hp2_state_3a4 = 0
+	_hp2_state_3a8 = 0.0
+	_hp2_state_3ac = 1.0
+	_hp2_state_3b0 = 0.0
+
+
+func _apply_hp2_pair_force_scales() -> void:
+	for wheel in wheels:
+		wheel.hp2_pair_force_scale = 1.0
+	if _hp2_state_3a4 == 1:
+		if wheels.size() >= 4:
+			wheels[0].hp2_pair_force_scale = _hp2_state_3ac
+			wheels[3].hp2_pair_force_scale = _hp2_state_3ac
+	elif _hp2_state_3a4 == 2:
+		if wheels.size() >= 4:
+			wheels[1].hp2_pair_force_scale = _hp2_state_3ac
+			wheels[2].hp2_pair_force_scale = _hp2_state_3ac
+
+
+func _all_hp2_spin_accumulators_below(threshold: float) -> bool:
+	for wheel in wheels:
+		if threshold <= wheel.hp2_spin_accumulator:
+			return false
+	return true
+
+
+func _update_hp2_wheel_spin_accumulator(wheel, speed_scaled: float) -> void:
+	var wheel_sign = signf(wheel.angular_speed)
+	if wheel_sign > 0.0:
+		wheel.hp2_spin_accumulator -= HP2_WHEEL_SPIN_SERVICE_SCALE * _hp2_service_brake_scale(wheel.slot_id) * config.hp2_row_0x304 * _brake_input
+		wheel.hp2_spin_accumulator -= HP2_WHEEL_SPIN_HANDBRAKE_SCALE * _hp2_handbrake_wheel_signal(wheel.slot_id, speed_scaled) * config.hp2_row_0x308
+	else:
+		wheel.hp2_spin_accumulator += HP2_WHEEL_SPIN_SERVICE_SCALE * _hp2_service_brake_scale(wheel.slot_id) * config.hp2_row_0x304 * _brake_input
+		wheel.hp2_spin_accumulator += HP2_WHEEL_SPIN_HANDBRAKE_SCALE * _hp2_handbrake_wheel_signal(wheel.slot_id, speed_scaled) * config.hp2_row_0x308
+	if wheel.hp2_lock_active:
+		wheel.hp2_spin_accumulator = 0.0
+
+
+func _hp2_handbrake_wheel_signal(slot_id: String, speed_scaled: float) -> float:
+	var wheel_signal = _handbrake_input * _hp2_handbrake_scale(slot_id)
+	if _hp2_state_39c == 0:
+		if 0.2 < wheel_signal:
+			wheel_signal += 0.5
+	elif 0.2 < wheel_signal and HP2_ALT_BRANCH_EXIT_SLIP_LIMIT_RAD < absf(signed_slip_angle) and speed_scaled < 80.0:
+		wheel_signal += 0.5
+	return wheel_signal
+
+
+func _reset_hp2_alt_branch_state() -> void:
+	_hp2_state_39c = 1 if hp2_state_39c_enabled else 0
+	_hp2_state_3a4 = 0
+	_hp2_state_3a8 = 0.0
+	_hp2_state_3ac = 1.0
+	_hp2_state_3b0 = 0.0
+
+
+func _lateral_force_for_wheel(wheel, sub_dt: float, force_limit_scale: float) -> Vector3:
+	var desired_force = -wheel.lateral_speed * _hp2_tire_slide_force_scale_for_wheel(wheel) * config.mass_kg * 0.25 / maxf(sub_dt, 0.0001)
+	var max_force = wheel.suspension_force * _hp2_tire_slide_force_scale_for_wheel(wheel) * force_limit_scale
 	var force_magnitude = clampf(desired_force, -max_force, max_force)
 	return _wheel_right_axis_ps2(global_transform.basis, wheel) * force_magnitude
 
 
-func _longitudinal_limit_force(wheel, requested_force_ps2: Vector3) -> Vector3:
-	var max_force = wheel.suspension_force * wheel.longitudinal_grip
+func _longitudinal_limit_force(wheel, requested_force_ps2: Vector3, force_limit_scale: float) -> Vector3:
+	var max_force = wheel.suspension_force * _hp2_tire_combined_force_scale_for_wheel(wheel) * force_limit_scale
 	if requested_force_ps2.length() <= max_force:
 		return requested_force_ps2
 	return requested_force_ps2.normalized() * max_force
+
+
+func _hp2_tire_force_local_for_wheel(
+	wheel,
+	requested_longitudinal_force: float,
+	speed_scaled: float,
+	sub_dt: float,
+	force_limit_scale: float
+) -> Vector2:
+	var requested_lateral_force = _hp2_requested_lateral_force_for_wheel(wheel, sub_dt, force_limit_scale)
+	var local_force = Vector2(requested_longitudinal_force, requested_lateral_force)
+	var slip_vector = Vector2(
+		wheel.angular_speed * wheel.wheel_radius - wheel.forward_speed,
+		-wheel.lateral_speed
+	)
+	var slide_force_limit = _hp2_slide_force_limit_for_wheel(wheel, force_limit_scale)
+	wheel.hp2_longitudinal_slip = slip_vector.x
+	wheel.hp2_local_slip_angle_deg = _hp2_local_velocity_slip_angle_deg(wheel)
+	_update_hp2_wheel_lock_state(wheel, slide_force_limit, slip_vector, speed_scaled)
+	if _hp2_wheel_is_sliding(wheel, slip_vector.x):
+		var slip_length = slip_vector.length()
+		if HP2_TIRE_MIN_FORCE_EPSILON < slide_force_limit and HP2_TIRE_MIN_FORCE_EPSILON < slip_length:
+			local_force = slip_vector * (slide_force_limit / slip_length)
+		else:
+			local_force = Vector2.ZERO
+		wheel.hp2_is_sliding = true
+	else:
+		wheel.hp2_is_sliding = false
+	return _hp2_clamp_local_tire_force(wheel, local_force, force_limit_scale)
+
+
+func _hp2_requested_lateral_force_for_wheel(wheel, sub_dt: float, force_limit_scale: float) -> float:
+	var desired_force = -wheel.lateral_speed * _hp2_tire_slide_force_scale_for_wheel(wheel) * config.mass_kg * 0.25 / maxf(sub_dt, 0.0001)
+	var max_force = _hp2_slide_force_limit_for_wheel(wheel, force_limit_scale)
+	return clampf(desired_force, -max_force, max_force)
+
+
+func _hp2_slide_force_limit_for_wheel(wheel, force_limit_scale: float) -> float:
+	return wheel.suspension_force * _hp2_tire_slide_force_scale_for_wheel(wheel) * force_limit_scale
+
+
+func _hp2_combined_force_limit_for_wheel(wheel, force_limit_scale: float) -> float:
+	return wheel.suspension_force * _hp2_tire_combined_force_scale_for_wheel(wheel) * force_limit_scale
+
+
+func _hp2_clamp_local_tire_force(wheel, local_force: Vector2, force_limit_scale: float) -> Vector2:
+	var combined_force_limit = _hp2_combined_force_limit_for_wheel(wheel, force_limit_scale)
+	var biased_force = local_force
+	var power_bias_active = biased_force.x > 0.0 and not wheel.hp2_lock_active
+	if power_bias_active:
+		biased_force.x *= HP2_TIRE_POWER_BIAS
+	var force_magnitude = biased_force.length()
+	if combined_force_limit <= HP2_TIRE_MIN_FORCE_EPSILON:
+		wheel.hp2_force_saturation = 1.0
+		if power_bias_active:
+			biased_force.x /= HP2_TIRE_POWER_BIAS
+		return biased_force
+	wheel.hp2_force_saturation = minf(force_magnitude / combined_force_limit, 1.0)
+	if force_magnitude <= combined_force_limit or force_magnitude <= HP2_TIRE_MIN_FORCE_EPSILON:
+		if power_bias_active:
+			biased_force.x /= HP2_TIRE_POWER_BIAS
+		return biased_force
+	return biased_force * (combined_force_limit / force_magnitude)
+
+
+func _hp2_wheel_is_sliding(wheel, longitudinal_slip: float) -> bool:
+	if wheel.hp2_lock_active:
+		return true
+	if HP2_TIRE_MIN_LONG_SLIP < absf(longitudinal_slip):
+		return true
+	return _hp2_tire_slip_angle_threshold_deg_for_wheel(wheel) < wheel.hp2_local_slip_angle_deg
+
+
+func _hp2_local_velocity_slip_angle_deg(wheel) -> float:
+	if wheel.forward_speed == 0.0 and wheel.lateral_speed == 0.0:
+		return 0.0
+	return absf(rad_to_deg(atan2(wheel.lateral_speed, wheel.forward_speed)))
+
+
+func _hp2_tire_slip_angle_threshold_deg_for_wheel(wheel) -> float:
+	if wheel.is_front():
+		return config.hp2_front_tire_0x1a0
+	return config.hp2_rear_tire_0x1c0
+
+
+func _update_hp2_wheel_lock_state(wheel, slide_force_limit: float, slip_vector: Vector2, speed_scaled: float) -> void:
+	var slip_length = slip_vector.length()
+	var longitudinal_contact_force = 0.0
+	if HP2_TIRE_MIN_FORCE_EPSILON < slide_force_limit and HP2_TIRE_MIN_FORCE_EPSILON < slip_length:
+		longitudinal_contact_force = absf(wheel.forward_speed) * (slide_force_limit / slip_length)
+	var service_term = HP2_WHEEL_SPIN_SERVICE_SCALE * _hp2_service_brake_scale(wheel.slot_id) * config.hp2_row_0x304 * _brake_input
+	var handbrake_term = HP2_WHEEL_SPIN_HANDBRAKE_SCALE * _hp2_handbrake_wheel_signal(wheel.slot_id, speed_scaled) * config.hp2_row_0x308
+	var lock_threshold = (service_term + handbrake_term) * HP2_TIRE_LOCK_SCALE
+	if lock_threshold <= longitudinal_contact_force * wheel.wheel_radius + absf(wheel.angular_speed) * HP2_TIRE_LOCK_ANGULAR_SPEED_BIAS:
+		wheel.hp2_lock_active = false
+		return
+	wheel.hp2_lock_active = lock_threshold > 1.0
+	if wheel.hp2_lock_active:
+		wheel.angular_speed = 0.0
 
 
 func _drag_force_ps2(flat_velocity_ps2: Vector3, speed_mps: float) -> Vector3:
@@ -416,82 +728,6 @@ func _drag_force_ps2(flat_velocity_ps2: Vector3, speed_mps: float) -> Vector3:
 	var rolling_force = flat_velocity_ps2.normalized() * -config.rolling_resistance * config.mass_kg * GRAVITY_MPS2
 	var aero_force = flat_velocity_ps2.normalized() * -config.aero_drag * speed_mps * speed_mps * config.mass_kg
 	return rolling_force + aero_force
-
-
-func _apply_rest_settle(state: PhysicsDirectBodyState3D, sub_dt: float) -> void:
-	if not _can_rest_settle(state):
-		return
-	state.linear_velocity = state.linear_velocity.move_toward(Vector3.ZERO, REST_SETTLE_LINEAR_DAMP * sub_dt)
-	state.angular_velocity = state.angular_velocity.move_toward(Vector3.ZERO, REST_SETTLE_ANGULAR_DAMP * sub_dt)
-	if state.linear_velocity.length() <= REST_FREEZE_LINEAR_SPEED:
-		state.linear_velocity = Vector3.ZERO
-	if state.angular_velocity.length() <= REST_FREEZE_ANGULAR_SPEED:
-		state.angular_velocity = Vector3.ZERO
-	for wheel in wheels:
-		if absf(wheel.travel_velocity) > REST_SETTLE_TRAVEL_SPEED:
-			continue
-		wheel.travel_velocity = 0.0
-		wheel.compression_velocity = 0.0
-		wheel.previous_length = wheel.current_length
-
-
-func _apply_grounded_chassis_damping(
-	state: PhysicsDirectBodyState3D,
-	body_origin_ps2: Vector3,
-	body_up_ps2: Vector3,
-	body_forward_ps2: Vector3,
-	body_right_ps2: Vector3,
-	sub_dt: float
-) -> void:
-	var grounded_count := 0
-	for wheel in wheels:
-		if wheel.grounded:
-			grounded_count += 1
-	if grounded_count == 0:
-		return
-	var grounded_alpha := float(grounded_count) / float(wheels.size())
-	var linear_velocity_ps2 := _godot_to_ps2(state.linear_velocity)
-	var vertical_speed := linear_velocity_ps2.dot(body_up_ps2)
-	var heave_force_ps2: Vector3 = body_up_ps2 * (-vertical_speed * config.mass_kg * GROUNDED_HEAVE_DAMPING * grounded_alpha)
-	_apply_impulse_ps2(state, heave_force_ps2 * sub_dt, body_origin_ps2)
-	var angular_velocity_ps2 := _godot_to_ps2(state.angular_velocity)
-	var pitch_rate := angular_velocity_ps2.dot(body_right_ps2)
-	var roll_rate := angular_velocity_ps2.dot(body_forward_ps2)
-	var attitude_torque_ps2: Vector3 = body_right_ps2 * (-pitch_rate * GROUNDED_PITCH_DAMPING * grounded_alpha)
-	attitude_torque_ps2 += body_forward_ps2 * (-roll_rate * GROUNDED_ROLL_DAMPING * grounded_alpha)
-	_apply_torque_impulse_ps2(state, attitude_torque_ps2 * sub_dt)
-
-
-func _can_rest_settle(state: PhysicsDirectBodyState3D) -> bool:
-	if absf(_throttle_input) > 0.01 or absf(_brake_input) > 0.01:
-		return false
-	if absf(_handbrake_input) > 0.01 or absf(_steering_input) > 0.01:
-		return false
-	if state.linear_velocity.length() > REST_SETTLE_LINEAR_SPEED:
-		return false
-	if state.angular_velocity.length() > REST_SETTLE_ANGULAR_SPEED:
-		return false
-	if wheels.is_empty():
-		return false
-	for wheel in wheels:
-		if not wheel.grounded:
-			return false
-		if absf(wheel.travel_velocity) > REST_SETTLE_TRAVEL_SPEED:
-			return false
-	return true
-
-
-func _yaw_assist_torque_ps2(body_up_ps2: Vector3, state: PhysicsDirectBodyState3D, speed_mps: float) -> Vector3:
-	if speed_mps * 3.6 < config.stabilization_min_speed_kph:
-		return body_up_ps2 * (-_godot_to_ps2(state.angular_velocity).z * config.yaw_damping)
-
-	var slip_deg = absf(rad_to_deg(signed_slip_angle))
-	var drift_range = maxf(config.drift_slip_deg - config.stabilization_slip_deg, 0.001)
-	var slip_alpha = clampf((slip_deg - config.stabilization_slip_deg) / drift_range, 0.0, 1.0)
-	var steer_assist = _steering_state * config.steering_yaw_assist * clampf(speed_mps / 30.0, 0.0, 1.0)
-	var stabilize = -signf(signed_slip_angle) * config.yaw_assist * slip_alpha
-	var yaw_rate_damping = -_godot_to_ps2(state.angular_velocity).z * config.yaw_damping
-	return body_up_ps2 * (stabilize + yaw_rate_damping + steer_assist)
 
 
 func _wheel_heading_ps2(basis: Basis, body_up_ps2: Vector3, wheel) -> Vector3:
@@ -514,6 +750,26 @@ func _wheel_axle_ps2(basis: Basis, wheel) -> Vector3:
 	if axle_ps2.length_squared() <= 0.0001:
 		axle_ps2 = _basis_axis_ps2(basis, Vector3(0.0, 1.0, 0.0))
 	return axle_ps2.normalized()
+
+
+func _hp2_service_brake_scale(slot_id: String) -> float:
+	return float(HP2_SERVICE_BRAKE_SCALE.get(slot_id, 1.0))
+
+
+func _hp2_handbrake_scale(slot_id: String) -> float:
+	return float(HP2_HANDBRAKE_SCALE.get(slot_id, 0.0))
+
+
+func _hp2_tire_slide_force_scale_for_wheel(wheel) -> float:
+	if wheel.is_front():
+		return config.hp2_front_tire_0x1b0
+	return config.hp2_rear_tire_0x1d0
+
+
+func _hp2_tire_combined_force_scale_for_wheel(wheel) -> float:
+	if wheel.is_front():
+		return config.hp2_front_tire_0x1ac
+	return config.hp2_rear_tire_0x1cc
 
 
 func _apply_impulse_ps2(state: PhysicsDirectBodyState3D, impulse_ps2: Vector3, world_position_ps2: Vector3) -> void:
@@ -561,6 +817,13 @@ func _update_debug_snapshot() -> void:
 			"travel_velocity": wheel.travel_velocity,
 			"grounded": wheel.grounded,
 			"force": wheel.suspension_force,
+			"hp2_spin_accumulator": wheel.hp2_spin_accumulator,
+			"hp2_lock_active": wheel.hp2_lock_active,
+			"hp2_pair_force_scale": wheel.hp2_pair_force_scale,
+			"hp2_longitudinal_slip": wheel.hp2_longitudinal_slip,
+			"hp2_local_slip_angle_deg": wheel.hp2_local_slip_angle_deg,
+			"hp2_force_saturation": wheel.hp2_force_saturation,
+			"hp2_is_sliding": wheel.hp2_is_sliding,
 		})
 
 	_debug_snapshot = {
@@ -568,6 +831,13 @@ func _update_debug_snapshot() -> void:
 		"rpm": engine_rpm,
 		"gear": current_gear,
 		"slip_angle_deg": rad_to_deg(signed_slip_angle),
+		"hp2_force_limit_scale": _hp2_force_limit_scale,
+		"hp2_handbrake_stability_blend": _hp2_handbrake_stability_blend,
+		"hp2_state_39c": _hp2_state_39c,
+		"hp2_state_3a4": _hp2_state_3a4,
+		"hp2_state_3a8": _hp2_state_3a8,
+		"hp2_state_3ac": _hp2_state_3ac,
+		"hp2_state_3b0": _hp2_state_3b0,
 		"wheels": wheel_rows,
 	}
 
@@ -830,7 +1100,7 @@ func _fit_chassis_collision_shape() -> void:
 	if box_shape == null:
 		return
 	box_shape.size = _ps2_to_godot(config.body_size_ps2).abs()
-	collision_shape.position = _ps2_to_godot(Vector3(0.0, 0.0, config.body_size_ps2.z * 0.5))
+	collision_shape.position = _ps2_to_godot(Vector3(0.0, 0.0, config.body_size_ps2.z * 0.5) - config.physics_origin_offset_ps2)
 
 
 func _fit_collision_shape_to_visual_bounds() -> void:
