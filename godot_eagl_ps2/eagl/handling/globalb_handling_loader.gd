@@ -85,6 +85,11 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.row_index = int(row.get("row_index", -1))
 	config.duplicate_index = int(row.get("duplicate_index", 1))
 	config.drive_type = drive_type
+	config.globalb_vehicle_type_id = int(row.get("vehicle_type_id", config.globalb_vehicle_type_id))
+	config.globalb_vehicle_class_id = int(row.get("vehicle_class_id", config.globalb_vehicle_class_id))
+	config.globalb_handling_profile_id = int(row.get("handling_profile_id", config.globalb_handling_profile_id))
+	config.globalb_handling_profile_count = int(row.get("handling_profile_count", config.globalb_handling_profile_count))
+	config.globalb_handling_profile_sequence = PackedInt32Array(row.get("handling_profile_sequence", []))
 	config.mass_kg = _field_value(floats, "mass", config.mass_kg)
 	# Keep the rigid-body COM neutral until the executable path for the 0x0F0..0x0F8
 	# triplet is confirmed. HP2 does use the 0x110 X value for axle preload balance,
@@ -210,11 +215,20 @@ func _parse_globalb_row(globalb_path: String, car_name: String, duplicate_index:
 	for field_name in HP2_GLOBALB_INFERRED_INT_OFFSETS.keys():
 		var offset := int(HP2_GLOBALB_INFERRED_INT_OFFSETS[field_name])
 		ints[field_name] = {"value": Binary.u32(bundle, row_base + offset)}
+	var handling_profile_count := int(Binary.u8(bundle, row_base + 0x0E5))
+	var handling_profile_sequence: Array[int] = []
+	for index in range(handling_profile_count):
+		handling_profile_sequence.append(int(Binary.u8(bundle, row_base + 0x544 + index)))
 	return {
 		"car_name": car_name.to_upper(),
 		"row_index": car_row,
 		"row_offset": row_base,
 		"duplicate_index": duplicate_index,
+		"vehicle_type_id": Binary.u32(bundle, row_base + 0x538),
+		"vehicle_class_id": int(Binary.u8(bundle, row_base + 0x0E6)),
+		"handling_profile_id": Binary.u32(bundle, row_base + 0x554),
+		"handling_profile_count": handling_profile_count,
+		"handling_profile_sequence": handling_profile_sequence,
 		"wheel_slots": wheel_slots,
 		"inferred_float_fields": floats,
 		"inferred_int_fields": ints,

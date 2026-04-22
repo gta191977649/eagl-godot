@@ -52,6 +52,12 @@ func build_scene(asset, config = null) -> Node3D:
 	root.set_meta("eagl_wheel_slots", asset.wheel_slots.duplicate(true))
 	var primary_body_variant := _pick_primary_body_variant(asset)
 	root.set_meta("eagl_primary_body_variant", primary_body_variant)
+	if config != null:
+		root.set_meta("eagl_vehicle_type_id", int(config.globalb_vehicle_type_id))
+		root.set_meta("eagl_vehicle_class_id", int(config.globalb_vehicle_class_id))
+		root.set_meta("eagl_handling_profile_id", int(config.globalb_handling_profile_id))
+		root.set_meta("eagl_handling_profile_count", int(config.globalb_handling_profile_count))
+		root.set_meta("eagl_handling_profile_sequence", Array(config.globalb_handling_profile_sequence))
 
 	var body_root := Node3D.new()
 	body_root.name = "Body"
@@ -120,16 +126,17 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 
 		var roll_root := Node3D.new()
 		roll_root.name = "Roll"
-		var base_yaw := _wheel_base_yaw(slot_info)
-		roll_root.rotation.y = base_yaw
-		roll_root.set_meta("eagl_base_yaw", base_yaw)
+		var initial_base_yaw := _wheel_base_yaw(slot_info)
+		roll_root.rotation.y = initial_base_yaw
+		roll_root.set_meta("eagl_base_yaw", initial_base_yaw)
 		roll_root.set_meta("eagl_slot_side", String(slot_info.get("side", "")))
 		roll_root.set_meta("eagl_locator_orientation_index", int(slot_info.get("locator_orientation_index", -1)))
 		steer_root.add_child(roll_root)
 
 		var spin_root := Node3D.new()
 		spin_root.name = "Spin"
-		spin_root.set_meta("eagl_spin_direction", _wheel_spin_direction(slot_info))
+		var spin_direction := _wheel_spin_direction(slot_info)
+		spin_root.set_meta("eagl_spin_direction", spin_direction)
 		spin_root.set_meta("eagl_slot_side", String(slot_info.get("side", "")))
 		spin_root.set_meta("eagl_locator_orientation_index", int(slot_info.get("locator_orientation_index", -1)))
 		roll_root.add_child(spin_root)
@@ -138,6 +145,7 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 		var tire_template: MeshInstance3D = tire_selection.get("template", null)
 		if tire_template != null:
 			var tire_node := _duplicate_mesh_instance(tire_template, "Tire")
+			tire_node.transform = _canonical_wheel_part_transform(tire_template)
 			tire_node.set_meta("eagl_source_object", tire_selection.get("object_name", ""))
 			tire_node.set_meta("eagl_detail_suffix", tire_selection.get("detail_suffix", ""))
 			tire_node.set_meta("eagl_detail_level", tire_selection.get("detail_level", -1))
@@ -215,10 +223,9 @@ func _duplicate_mesh_instance(template: MeshInstance3D, node_name: String) -> Me
 
 
 func _select_normal_wheel_visuals(asset, tire_meshes: Dictionary, config = null) -> Dictionary:
-	var front_choice := _best_tire_choice(asset, tire_meshes, "front", _expected_wheel_diameter(config, "front"))
-	var rear_choice := _best_tire_choice(asset, tire_meshes, "rear", _expected_wheel_diameter(config, "rear"))
-	if rear_choice.is_empty():
-		rear_choice = front_choice
+	var detail_choices := _resolved_tire_detail_choices(asset, tire_meshes, config)
+	var front_choice := _best_tire_choice_for_axle(detail_choices.get("front", {}), config, "front")
+	var rear_choice := _best_tire_choice_for_axle(detail_choices.get("rear", {}), config, "rear")
 	var selection := {}
 	for slot_id in SLOT_IDS:
 		var choice := front_choice if slot_id in ["FL", "FR"] else rear_choice
@@ -226,40 +233,75 @@ func _select_normal_wheel_visuals(asset, tire_meshes: Dictionary, config = null)
 	return selection
 
 
-func _best_tire_choice(asset, tire_meshes: Dictionary, axle: String, expected_diameter: float = 0.0) -> Dictionary:
-	var prefix := "_TIRE_FRONT_" if axle == "front" else "_TIRE_REAR_"
-	var detail_level := 0
+func _resolved_tire_detail_choices(asset, tire_meshes: Dictionary, config = null) -> Dictionary:
+	var front_choices := {}
+	var rear_choices := {}
 	for suffix in TIRE_DETAIL_SUFFIXES:
-		var object_name := "%s%s" % [prefix, suffix]
-		if not tire_meshes.has(object_name):
-			detail_level += 1
-			continue
-		var template: MeshInstance3D = tire_meshes[object_name]
-		if template == null:
-			detail_level += 1
-			continue
-		var size := template.mesh.get_aabb().size.abs() if template.mesh != null else Vector3.ZERO
-		var largest_dimension := maxf(size.x, maxf(size.y, size.z))
-		if expected_diameter > 0.0001 and largest_dimension < expected_diameter * 0.35:
-			detail_level += 1
-			continue
-		return {
-			"axle": axle,
-			"source_axle": axle,
-			"detail_suffix": suffix,
-			"detail_level": detail_level,
-			"object_name": _full_object_name(asset.car_id, object_name),
-			"template": template,
-		}
+		front_choices[suffix] = _named_tire_choice(asset, tire_meshes, "front", suffix)
+		rear_choices[suffix] = _named_tire_choice(asset, tire_meshes, "rear", suffix)
 
-	if axle == "rear":
-		var fallback := _best_tire_choice(asset, tire_meshes, "front", expected_diameter)
-		if not fallback.is_empty():
-			fallback = fallback.duplicate(true)
-			fallback["axle"] = "rear"
-			fallback["source_axle"] = "front"
-		return fallback
-	return {}
+	if config != null and int(config.globalb_vehicle_type_id) == 2:
+		front_choices["C"] = _retarget_tire_choice(front_choices.get("B", {}), "front", "C", "vehicle_type_2_front_c_uses_front_b")
+		rear_choices["C"] = _retarget_tire_choice(rear_choices.get("B", {}), "rear", "C", "vehicle_type_2_rear_c_uses_rear_b")
+
+	if Dictionary(rear_choices.get("A", {})).is_empty():
+		rear_choices["A"] = _retarget_tire_choice(front_choices.get("A", {}), "rear", "A", "rear_a_falls_back_to_front_a")
+	if Dictionary(rear_choices.get("B", {})).is_empty():
+		rear_choices["B"] = _retarget_tire_choice(front_choices.get("B", {}), "rear", "B", "rear_b_falls_back_to_front_b")
+	if Dictionary(rear_choices.get("C", {})).is_empty():
+		rear_choices["C"] = _retarget_tire_choice(front_choices.get("C", {}), "rear", "C", "rear_c_falls_back_to_front_c")
+
+	return {
+		"front": front_choices,
+		"rear": rear_choices,
+	}
+
+
+func _named_tire_choice(asset, tire_meshes: Dictionary, axle: String, detail_suffix: String) -> Dictionary:
+	var object_name := "_TIRE_%s_%s" % [axle.to_upper(), detail_suffix]
+	if not tire_meshes.has(object_name):
+		return {}
+	var template: MeshInstance3D = tire_meshes[object_name]
+	if template == null:
+		return {}
+	return {
+		"axle": axle,
+		"source_axle": axle,
+		"detail_suffix": detail_suffix,
+		"detail_level": TIRE_DETAIL_SUFFIXES.find(detail_suffix),
+		"actual_detail_suffix": detail_suffix,
+		"object_name": _full_object_name(asset.car_id, object_name),
+		"template": template,
+	}
+
+
+func _retarget_tire_choice(choice: Dictionary, axle: String, detail_suffix: String, reason: String) -> Dictionary:
+	if choice.is_empty():
+		return {}
+	var out := choice.duplicate(true)
+	out["axle"] = axle
+	out["detail_suffix"] = detail_suffix
+	out["detail_level"] = TIRE_DETAIL_SUFFIXES.find(detail_suffix)
+	out["selection_reason"] = reason
+	if not out.has("actual_detail_suffix"):
+		out["actual_detail_suffix"] = String(choice.get("detail_suffix", ""))
+	return out
+
+
+func _best_tire_choice_for_axle(choices: Dictionary, config, axle: String) -> Dictionary:
+	var expected_diameter := _expected_wheel_diameter(config, axle)
+	var best_choice := {}
+	var best_score := INF
+	for suffix in TIRE_DETAIL_SUFFIXES:
+		var choice: Dictionary = choices.get(suffix, {})
+		if choice.is_empty():
+			continue
+		var template: MeshInstance3D = choice.get("template", null)
+		var score := _wheel_template_score(template, expected_diameter, int(choice.get("detail_level", -1)))
+		if score < best_score:
+			best_score = score
+			best_choice = choice
+	return best_choice
 
 
 func _expected_wheel_diameter(config, axle: String) -> float:
@@ -279,8 +321,14 @@ func _expected_wheel_diameter(config, axle: String) -> float:
 func _wheel_template_score(template: MeshInstance3D, expected_diameter: float, detail_level: int) -> float:
 	if template == null or template.mesh == null:
 		return INF
-	var size := template.mesh.get_aabb().size.abs()
-	var largest_dimension := maxf(size.x, maxf(size.y, size.z))
+	var local_size := template.mesh.get_aabb().size.abs()
+	var basis := template.transform.basis
+	var transformed_size := Vector3(
+		absf(basis.x.x) * local_size.x + absf(basis.y.x) * local_size.y + absf(basis.z.x) * local_size.z,
+		absf(basis.x.y) * local_size.x + absf(basis.y.y) * local_size.y + absf(basis.z.y) * local_size.z,
+		absf(basis.x.z) * local_size.x + absf(basis.y.z) * local_size.y + absf(basis.z.z) * local_size.z
+	)
+	var largest_dimension := maxf(transformed_size.x, maxf(transformed_size.y, transformed_size.z))
 	if expected_diameter <= 0.0001:
 		return -largest_dimension + float(detail_level) * 0.01
 	var dimension_error := absf(largest_dimension - expected_diameter)
@@ -289,14 +337,56 @@ func _wheel_template_score(template: MeshInstance3D, expected_diameter: float, d
 
 
 func _runtime_part_local_transform(obj: Dictionary) -> Transform3D:
-	var object_name := String(obj.get("name", "")).to_upper()
 	var source_transform := MathUtils.ps2_rows_to_godot_transform(obj.get("transform", []))
 	var basis := source_transform.basis.orthonormalized()
 	if basis.determinant() < 0.0:
 		basis = Basis(-basis.x, basis.y, basis.z).orthonormalized()
-	if object_name.contains("_TIRE_") or object_name.contains("_BRAKE_"):
-		basis = (basis * Basis(Vector3.UP, PI * 0.5)).orthonormalized()
 	return Transform3D(basis, Vector3.ZERO)
+
+
+func _canonical_wheel_part_transform(template: MeshInstance3D) -> Transform3D:
+	if template == null:
+		return Transform3D.IDENTITY
+	var basis := template.transform.basis.orthonormalized()
+	if template.mesh == null:
+		return Transform3D(basis, Vector3.ZERO)
+	var axle_direction := _wheel_mesh_axle_direction(template.mesh.get_aabb().size.abs(), basis)
+	if axle_direction.length_squared() <= 0.000001:
+		return Transform3D(basis, Vector3.ZERO)
+	var correction := _rotation_between_vectors(axle_direction, Vector3.RIGHT)
+	return Transform3D((correction * basis).orthonormalized(), Vector3.ZERO)
+
+
+func _wheel_mesh_axle_direction(mesh_size: Vector3, basis: Basis) -> Vector3:
+	var axle_axis := 0
+	var smallest := mesh_size.x
+	if mesh_size.y < smallest:
+		axle_axis = 1
+		smallest = mesh_size.y
+	if mesh_size.z < smallest:
+		axle_axis = 2
+	match axle_axis:
+		1:
+			return basis.y.normalized()
+		2:
+			return basis.z.normalized()
+		_:
+			return basis.x.normalized()
+
+
+func _rotation_between_vectors(from: Vector3, to: Vector3) -> Basis:
+	var from_dir := from.normalized()
+	var to_dir := to.normalized()
+	var dot := clampf(from_dir.dot(to_dir), -1.0, 1.0)
+	if dot >= 0.9999:
+		return Basis.IDENTITY
+	if dot <= -0.9999:
+		var axis := from_dir.cross(Vector3.UP)
+		if axis.length_squared() <= 0.000001:
+			axis = from_dir.cross(Vector3.FORWARD)
+		return Basis(axis.normalized(), PI)
+	var axis := from_dir.cross(to_dir).normalized()
+	return Basis(axis, acos(dot))
 
 
 func _wheel_base_yaw(slot_info: Dictionary) -> float:
@@ -309,6 +399,8 @@ func _wheel_base_yaw(slot_info: Dictionary) -> float:
 func _wheel_spin_direction(slot_info: Dictionary) -> float:
 	var side := String(slot_info.get("side", ""))
 	return -1.0 if side == "right" else 1.0
+
+
 
 
 func _full_object_name(car_id: String, suffix: String) -> String:

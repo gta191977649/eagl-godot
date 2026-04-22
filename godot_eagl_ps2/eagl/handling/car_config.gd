@@ -11,6 +11,11 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var row_index = -1
 @export var duplicate_index = 1
 @export_enum("FWD", "RWD", "AWD") var drive_type = "RWD"
+@export var globalb_vehicle_type_id = -1
+@export var globalb_vehicle_class_id = -1
+@export var globalb_handling_profile_id = -1
+@export var globalb_handling_profile_count = 0
+@export var globalb_handling_profile_sequence = PackedInt32Array()
 
 @export var mass_kg = 1000.0
 @export var center_of_mass_ps2 = Vector3.ZERO

@@ -119,6 +119,14 @@ func _update_telemetry() -> void:
 		lines.append(_status_message)
 	lines.append("")
 	lines.append("Car:   %s" % _current_car_display_name())
+	if car != null and car.config != null:
+		lines.append("Type:  %d   Class: %d   Profile: %d" % [
+			int(car.config.globalb_vehicle_type_id),
+			int(car.config.globalb_vehicle_class_id),
+			int(car.config.globalb_handling_profile_id),
+		])
+		if car.config.globalb_handling_profile_count > 0:
+			lines.append("PSeq:  %s" % _format_profile_sequence(car.config.globalb_handling_profile_sequence))
 	lines.append("Speed: %5.1f km/h" % float(snapshot.get("speed_kph", 0.0)))
 	lines.append("RPM:   %5.0f" % float(snapshot.get("rpm", 0.0)))
 	lines.append("Gear:  %d" % int(snapshot.get("gear", 1)))
@@ -663,6 +671,12 @@ func _print_vehicle_debug_info(visual: Node3D) -> void:
 	])
 	print("EAGL vehicle wheel pivots: %s" % ", ".join(PackedStringArray(wheel_pivots)))
 	print("EAGL vehicle dummies: %s" % ", ".join(PackedStringArray(dummies)))
+	print("EAGL vehicle globalb: type=%d class=%d profile=%d seq=%s" % [
+		int(visual.get_meta("eagl_vehicle_type_id", -1)),
+		int(visual.get_meta("eagl_vehicle_class_id", -1)),
+		int(visual.get_meta("eagl_handling_profile_id", -1)),
+		_format_profile_sequence(PackedInt32Array(visual.get_meta("eagl_handling_profile_sequence", PackedInt32Array()))),
+	])
 	if not wheel_selection.is_empty():
 		var wheel_lines: Array[String] = []
 		for slot_id in ["FL", "FR", "RL", "RR"]:
@@ -675,3 +689,12 @@ func _print_vehicle_debug_info(visual: Node3D) -> void:
 				String(entry.get("detail_suffix", "")),
 			])
 		print("EAGL vehicle wheel visuals: %s" % ", ".join(wheel_lines))
+
+
+func _format_profile_sequence(sequence: PackedInt32Array) -> String:
+	if sequence.is_empty():
+		return "-"
+	var parts: Array[String] = []
+	for value in sequence:
+		parts.append(str(value))
+	return ",".join(parts)
