@@ -249,8 +249,8 @@ func _step_suspension_for_wheel(
 	wheel.normal_ps2 = Vector3(0.0, 0.0, 1.0)
 	wheel.contact_point_ps2 = sample_world_ps2
 	wheel.world_wheel_center_ps2 = sample_world_ps2
-	wheel.suspension_distance = wheel.rest_length
-	wheel.center_offset = maxf(wheel.rest_length - wheel.wheel_radius, 0.0)
+	wheel.suspension_distance = wheel.min_travel
+	wheel.center_offset = wheel.min_travel
 	wheel.overtravel = 0.0
 	wheel.suspension_force = 0.0
 
@@ -265,10 +265,18 @@ func _step_suspension_for_wheel(
 	if surface_sampler == null:
 		return
 
+	var length_min := minf(wheel.min_travel, wheel.max_travel)
+	var length_max := maxf(wheel.min_travel, wheel.max_travel)
+	var travel_range := maxf(length_max - length_min, 0.0001)
+	var previous_length := clampf(wheel.suspension_distance, length_min, length_max)
+
 	var surface: Dictionary = surface_sampler.sample_surface(wheel_contact_query_ps2)
 	if surface.is_empty():
 		wheel.compression = 0.0
-		wheel.compression_velocity = (wheel.compression - wheel.prev_compression) / maxf(sub_dt, 0.0001)
+		wheel.compression_velocity = 0.0
+		wheel.suspension_distance = length_min
+		wheel.center_offset = length_min
+		wheel.world_wheel_center_ps2 = sample_world_ps2 + body_up_ps2 * length_min
 		return
 
 	var suspension_axis_ps2 = body_up_ps2
@@ -277,19 +285,23 @@ func _step_suspension_for_wheel(
 	var denom = surface_normal.dot(suspension_axis_ps2)
 	if absf(denom) <= 0.0001:
 		wheel.compression = 0.0
-		wheel.compression_velocity = (wheel.compression - wheel.prev_compression) / maxf(sub_dt, 0.0001)
+		wheel.compression_velocity = 0.0
+		wheel.suspension_distance = length_min
+		wheel.center_offset = length_min
+		wheel.world_wheel_center_ps2 = sample_world_ps2 + body_up_ps2 * length_min
 		return
 
 	var t = surface_normal.dot(surface_point - sample_world_ps2) / denom
 	var suspension_distance = t + wheel.wheel_radius
-	var clamped_length = clampf(suspension_distance, wheel.min_travel, wheel.max_travel)
-	wheel.compression = clamped_length
-	wheel.compression_velocity = (wheel.compression - wheel.prev_compression) / maxf(sub_dt, 0.0001)
-	wheel.grounded = suspension_distance >= wheel.min_travel
+	var clamped_length = clampf(suspension_distance, length_min, length_max)
+	var compression_length = clampf(clamped_length - length_min, 0.0, travel_range)
+	wheel.compression = compression_length / travel_range
+	wheel.compression_velocity = (clamped_length - previous_length) / maxf(sub_dt, 0.0001)
+	wheel.grounded = suspension_distance >= length_min
 	wheel.material_id = int(surface.get("material_id", -1))
 	wheel.normal_ps2 = surface_normal
 	wheel.suspension_distance = suspension_distance
-	wheel.overtravel = maxf(suspension_distance - wheel.max_travel, 0.0)
+	wheel.overtravel = maxf(suspension_distance - length_max, 0.0)
 	wheel.contact_point_ps2 = sample_world_ps2 + suspension_axis_ps2 * t
 	wheel.center_offset = clamped_length
 	wheel.world_wheel_center_ps2 = sample_world_ps2 + suspension_axis_ps2 * clamped_length
@@ -298,12 +310,14 @@ func _step_suspension_for_wheel(
 		wheel.suspension_force = 0.0
 		return
 
-	var progressive_sample = maxf(wheel.compression, 0.0)
-	var spring_force = wheel.spring_coefficient * wheel.compression * (1.0 + wheel.progressive_spring_scale * progressive_sample)
+	var progressive_sample = clampf(wheel.compression, 0.0, 1.0)
+	var spring_force = wheel.spring_coefficient * progressive_sample * (1.0 + wheel.progressive_spring_scale * progressive_sample)
 	var damping = wheel.rebound_damping if wheel.compression_velocity > 0.0 else wheel.bump_damping
 	var damper_force = damping * wheel.compression_velocity
-	var bump_force = wheel.bump_stop_coefficient * (wheel.compression - wheel.reference_length)
-	var overtravel_force = 0.0
+	var bump_force = 0.0
+	if absf(wheel.reference_length) > 0.0001:
+		bump_force = wheel.bump_stop_coefficient * maxf(clamped_length - wheel.reference_length, 0.0)
+	var overtravel_force = wheel.bump_stop_coefficient * wheel.overtravel
 
 	wheel.suspension_force = maxf(wheel.preload_force + spring_force + damper_force + bump_force + overtravel_force, 0.0)
 	wheel.load_ratio = wheel.suspension_force / maxf(wheel.preload_force, 1.0)
@@ -731,12 +745,13 @@ func _prime_wheels_from_current_transform() -> void:
 		var attachment_world_ps2 = _transform_point_ps2(global_transform, wheel.local_position_ps2)
 		wheel.world_pivot_ps2 = pivot_world_ps2
 		wheel.world_attachment_ps2 = attachment_world_ps2
-		wheel.world_wheel_center_ps2 = attachment_world_ps2 + body_up_ps2 * wheel.rest_length
+		var length_min := minf(wheel.min_travel, wheel.max_travel)
+		wheel.world_wheel_center_ps2 = attachment_world_ps2 + body_up_ps2 * length_min
 		wheel.contact_point_ps2 = attachment_world_ps2
 		wheel.normal_ps2 = body_up_ps2
-		wheel.suspension_distance = wheel.rest_length
-		wheel.center_offset = wheel.rest_length
-		wheel.compression = clampf(wheel.rest_length, wheel.min_travel, wheel.max_travel)
+		wheel.suspension_distance = length_min
+		wheel.center_offset = length_min
+		wheel.compression = 0.0
 		wheel.prev_compression = wheel.compression
 
 

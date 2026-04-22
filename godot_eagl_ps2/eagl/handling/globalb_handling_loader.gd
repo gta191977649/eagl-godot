@@ -86,8 +86,9 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.duplicate_index = int(row.get("duplicate_index", 1))
 	config.drive_type = drive_type
 	config.mass_kg = _field_value(floats, "mass", config.mass_kg)
-	# The 0x0F0..0x0F8 triplet is still not verified against the runtime path. Keep
-	# the rigid-body COM neutral until that field is confirmed from the executable.
+	# Keep the rigid-body COM neutral until the executable path for the 0x0F0..0x0F8
+	# triplet is confirmed. HP2 does use the 0x110 X value for axle preload balance,
+	# but that does not prove it is the Godot rigid-body center of mass.
 	config.center_of_mass_ps2 = Vector3.ZERO
 	config.body_size_ps2 = Vector3(
 		_field_value(floats, "body_length", config.body_size_ps2.x),

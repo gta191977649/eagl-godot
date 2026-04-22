@@ -203,8 +203,14 @@ func _rear_axle_preload() -> float:
 
 
 func _axle_preload_split() -> Dictionary:
-	var front_x: float = front_axle_center_x() - physics_origin_offset_ps2.x
-	var rear_x: float = rear_axle_center_x() - physics_origin_offset_ps2.x
+	# HP2 uses the row + 0x110 X value to bias front/rear wheel preload in
+	# FUN_001375f0, but that value has not been verified as the rigid-body COM
+	# handed to Godot. Keep axle-load balance separate from center_of_mass_ps2.
+	var load_origin_x: float = physics_origin_offset_ps2.x
+	if absf(load_origin_x) <= 0.0001:
+		load_origin_x = center_of_mass_ps2.x
+	var front_x: float = front_axle_center_x() - load_origin_x
+	var rear_x: float = rear_axle_center_x() - load_origin_x
 	var denom: float = front_x - rear_x
 	if absf(denom) <= 0.0001:
 		var equal_share: float = mass_kg * 9.8 * 0.25
@@ -212,7 +218,6 @@ func _axle_preload_split() -> Dictionary:
 			"front_each": equal_share,
 			"rear_each": equal_share,
 		}
-
 	var rear_each_fraction: float = (front_x / denom) * 0.5
 	var front_each_fraction: float = 0.5 - rear_each_fraction
 	var total_load: float = mass_kg * 9.8
