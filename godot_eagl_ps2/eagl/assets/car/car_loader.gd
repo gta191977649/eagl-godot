@@ -116,7 +116,7 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 			continue
 		var slot_id: String = SLOT_IDS[index]
 		var slot_info: Dictionary = slot_metadata.get(slot_id, {})
-		var pivot_position_ps2: Vector3 = slot_info.get("resolved_visual_position_ps2", config.wheel_local_positions_ps2[index])
+		var pivot_position_ps2: Vector3 = slot_info.get("runtime_pivot_position_ps2", config.wheel_local_positions_ps2[index])
 		var wheel_root := Node3D.new()
 		wheel_root.name = slot_id
 		wheel_root.position = MathUtils.ps2_to_godot_vec3(pivot_position_ps2)
@@ -192,6 +192,8 @@ func _wheel_slot_metadata_by_id(wheel_slots: Array, config) -> Dictionary:
 		merged["visual_position_godot"] = MathUtils.ps2_to_godot_vec3(visual_position_ps2)
 		merged["resolved_visual_position_ps2"] = resolved_visual_position_ps2
 		merged["resolved_visual_position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
+		merged["runtime_pivot_position_ps2"] = resolved_visual_position_ps2
+		merged["runtime_pivot_position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
 		merged["position_ps2"] = resolved_visual_position_ps2
 		merged["position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
 		merged["visual_position_source_resolved"] = "locator" if resolved_visual_position_ps2.is_equal_approx(visual_position_ps2) else "physics_hardpoint"
@@ -213,6 +215,8 @@ func _wheel_slot_metadata_by_id(wheel_slots: Array, config) -> Dictionary:
 			"visual_position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
 			"resolved_visual_position_ps2": position_ps2,
 			"resolved_visual_position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
+			"runtime_pivot_position_ps2": position_ps2,
+			"runtime_pivot_position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
 			"position_ps2": position_ps2,
 			"position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
 			"visual_position_source_resolved": "config_fallback",
@@ -234,11 +238,6 @@ func _resolved_visual_pivot_position_ps2(physics_position_ps2: Vector3, locator_
 
 
 func _body_visual_offset_ps2(config) -> Vector3:
-	if config != null:
-		# GEOMETRY.BIN body solids and locator records already share the same authored local space.
-		# Until the 0x34020 body-root graph is decoded, applying GLOBALB body-center values here only
-		# introduces extra shell drift relative to the original geometry-local wheel references.
-		return Vector3.ZERO
 	return Vector3.ZERO
 
 

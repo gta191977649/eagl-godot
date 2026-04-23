@@ -29,8 +29,8 @@ const ORIGINAL_WHEEL_SLOT_SPECS := [
 		"axle": "front",
 		"side": "left",
 		"families": [
-			{"hashes": [HP2_TIRE_DUMMY_FRONT_LEFT], "source": "front_tire_dummy"},
 			{"hashes": [HP2_FRONT_WHEEL_LOCATOR_LEFT], "source": "front_wheel_locator"},
+			{"hashes": [HP2_TIRE_DUMMY_FRONT_LEFT], "source": "front_tire_dummy"},
 		],
 	},
 	{
@@ -38,8 +38,8 @@ const ORIGINAL_WHEEL_SLOT_SPECS := [
 		"axle": "front",
 		"side": "right",
 		"families": [
-			{"hashes": [HP2_TIRE_DUMMY_FRONT_RIGHT], "source": "front_tire_dummy"},
 			{"hashes": [HP2_FRONT_WHEEL_LOCATOR_RIGHT], "source": "front_wheel_locator"},
+			{"hashes": [HP2_TIRE_DUMMY_FRONT_RIGHT], "source": "front_tire_dummy"},
 		],
 	},
 	{
@@ -47,8 +47,8 @@ const ORIGINAL_WHEEL_SLOT_SPECS := [
 		"axle": "rear",
 		"side": "left",
 		"families": [
-			{"hashes": [HP2_TIRE_DUMMY_REAR_LEFT], "source": "rear_tire_dummy"},
 			{"hashes": [HP2_REAR_WHEEL_LOCATOR_LEFT], "source": "rear_wheel_locator"},
+			{"hashes": [HP2_TIRE_DUMMY_REAR_LEFT], "source": "rear_tire_dummy"},
 		],
 	},
 	{
@@ -56,8 +56,8 @@ const ORIGINAL_WHEEL_SLOT_SPECS := [
 		"axle": "rear",
 		"side": "right",
 		"families": [
-			{"hashes": [HP2_TIRE_DUMMY_REAR_RIGHT], "source": "rear_tire_dummy"},
 			{"hashes": [HP2_REAR_WHEEL_LOCATOR_RIGHT], "source": "rear_wheel_locator"},
+			{"hashes": [HP2_TIRE_DUMMY_REAR_RIGHT], "source": "rear_tire_dummy"},
 		],
 	},
 ]
