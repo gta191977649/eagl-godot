@@ -3,7 +3,6 @@ extends Node3D
 const CarLoaderScript = preload("res://eagl/assets/car/car_loader.gd")
 const CarConfigScript = preload("res://eagl/handling/car_config.gd")
 const GlobalBHandlingLoaderScript = preload("res://eagl/handling/globalb_handling_loader.gd")
-const RoadSurfaceSamplerScript = preload("res://eagl/handling/road_surface_sampler.gd")
 const DEFAULT_PLATFORM := "EAGL_HOTPUSUIT2_PS2"
 
 const GROUND_SIZE = 20000.0
@@ -36,7 +35,6 @@ const CAMERA_FILL_LIGHT_RANGE = 28.0
 @onready var flat_track_shape: CollisionShape3D = $FlatTrack/CollisionShape3D
 @onready var flat_track_mesh: MeshInstance3D = $FlatTrack/MeshInstance3D
 
-var _sampler = null
 var _car_loader = null
 var _status_message := ""
 var _camera_yaw := 0.0
@@ -52,11 +50,19 @@ func _enter_tree() -> void:
 	var car_node = get_node_or_null("Car")
 	if car_node == null:
 		return
-	if car_node.config == null:
-		car_node.config = _build_runtime_config_for_car(_resolved_initial_car_id())
-	var loaded_config = _load_handling_config(car_node)
+	var initial_car_id := _resolved_initial_car_id()
+	var initial_duplicate := 1
+	var initial_drive_type := _default_drive_type()
+	if car_node.config != null:
+		if String(car_node.config.car_name) != "":
+			initial_car_id = String(car_node.config.car_name)
+		initial_duplicate = int(car_node.config.duplicate_index)
+		initial_drive_type = String(car_node.config.drive_type)
+	var loaded_config = _load_authoritative_handling_config(initial_car_id, initial_duplicate, initial_drive_type)
 	if loaded_config != null:
 		car_node.config = loaded_config
+	elif car_node.config == null:
+		car_node.config = _build_runtime_config_for_car(initial_car_id, initial_duplicate, initial_drive_type)
 	if car_node.config != null:
 		_seat_car_from_config(car_node)
 
@@ -75,9 +81,6 @@ func _ready() -> void:
 	_ensure_input_actions()
 	_setup_ground()
 	_setup_lighting()
-	_sampler = RoadSurfaceSamplerScript.new()
-	_sampler.build_from_flat_plane(GROUND_SIZE, GROUND_SIZE, 0.0, 1)
-	car.set_surface_sampler(_sampler)
 	_bind_ui()
 	_seed_camera_from_car()
 	_spawn_transform = _spawn_transform_for_config(car.config)
@@ -85,6 +88,7 @@ func _ready() -> void:
 	_car_loader = CarLoaderScript.new(resolved_root)
 	_load_car_visual()
 	car.reset_runtime_state(_spawn_transform)
+	car.sync_wheel_slots_from_visual()
 	_rebuild_car_entries()
 	_sync_ui_from_car()
 
@@ -95,7 +99,7 @@ func _process(delta: float) -> void:
 
 
 func _update_camera(delta: float) -> void:
-	var forward: Vector3 = car.global_transform.basis * Vector3.RIGHT
+	var forward: Vector3 = car.global_transform.basis * Vector3(0.0, 0.0, 1.0)
 	var desired_target = car.global_transform.origin + Vector3.UP * CAMERA_TARGET_HEIGHT + forward * CAMERA_LOOK_AHEAD
 	var horizontal_radius = cos(_camera_pitch) * CAMERA_DISTANCE
 	var orbit_offset = Vector3(
@@ -131,19 +135,31 @@ func _update_telemetry() -> void:
 	lines.append("RPM:   %5.0f" % float(snapshot.get("rpm", 0.0)))
 	lines.append("Gear:  %d" % int(snapshot.get("gear", 1)))
 	lines.append("Slip:  %+5.1f deg" % float(snapshot.get("slip_angle_deg", 0.0)))
+	lines.append("Mass:  %5.0f kg %s" % [
+		float(snapshot.get("mass_kg", 0.0)),
+		"(est)" if bool(snapshot.get("mass_is_estimate", false)) else "",
+	])
+	lines.append("Drv:   %d  Gain: %.6f" % [
+		int(snapshot.get("driven_wheel_count", 0)),
+		float(snapshot.get("engine_force_gain", 0.0)),
+	])
+	lines.append("LAcc:  %5.2f  Drag: %6.1f" % [
+		float(snapshot.get("hp2_launch_accel_reference", 0.0)),
+		float(snapshot.get("drag_force", 0.0)),
+	])
+	lines.append("EngT:  %6.1f" % float(snapshot.get("engine_force_total", 0.0)))
 	lines.append("Mouse: %s" % ("orbit" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED else "click to capture"))
 	lines.append("")
 	for wheel in snapshot.get("wheels", []):
 		lines.append(
-			"%s  cur=%5.3f raw=%5.3f vel=%+5.3f [%5.3f..%5.3f] %s  F=%6.0f" % [
+			"%s  %s rpm=%6.0f skid=%4.2f steer=%+5.1f eng=%5.1f brk=%5.1f" % [
 				String(wheel.get("slot", "--")),
-				float(wheel.get("compression", 0.0)),
-				float(wheel.get("suspension_distance", 0.0)),
-				float(wheel.get("travel_velocity", 0.0)),
-				float(wheel.get("min_travel", 0.0)),
-				float(wheel.get("max_travel", 0.0)),
 				"GRD" if bool(wheel.get("grounded", false)) else "AIR",
-				float(wheel.get("force", 0.0)),
+				float(wheel.get("rpm", 0.0)),
+				float(wheel.get("skid", 0.0)),
+				float(wheel.get("steering_deg", 0.0)),
+				float(wheel.get("engine_force", 0.0)),
+				float(wheel.get("brake_force", 0.0)),
 			]
 		)
 	telemetry.text = "\n".join(lines)
@@ -171,19 +187,14 @@ func _ensure_key_action(action_name: String, keycodes: Array[int]) -> void:
 func _load_car_visual() -> void:
 	if car.config == null or _car_loader == null:
 		return
-	var existing := car.get_node_or_null("CarVisual")
-	if existing != null:
-		car.remove_child(existing)
-		existing.free()
-		car.refresh_visual_bindings()
 	var visual = _car_loader.load(car.config.car_name, car.config)
 	if visual == null:
 		_set_status("Car visual failed: %s" % _car_loader.last_error)
 		push_warning("Failed to load car visual for %s: %s" % [car.config.car_name, _car_loader.last_error])
+		car.replace_visual(null)
 		return
 	_set_status("")
-	car.add_child(visual)
-	car.refresh_visual_bindings()
+	car.replace_visual(visual)
 	_print_vehicle_debug_info(visual)
 	_sync_ui_from_car()
 
@@ -210,23 +221,43 @@ func _resolved_handling_json_path() -> String:
 
 
 func _load_handling_config(car_node) -> Resource:
+	if car_node == null or car_node.config == null:
+		return null
+	return _load_authoritative_handling_config(
+		String(car_node.config.car_name),
+		int(car_node.config.duplicate_index),
+		String(car_node.config.drive_type)
+	)
+
+
+func _load_authoritative_handling_config(car_name: String, duplicate_index: int = 1, drive_type: String = "") -> Resource:
+	if car_name == "":
+		return null
+	var resolved_drive_type := drive_type if drive_type != "" else _default_drive_type()
+	var loader = GlobalBHandlingLoaderScript.new()
+	var globalb_path := _resolved_globalb_path()
+	if globalb_path != "":
+		var binary_loaded = loader.load_config_from_globalb(globalb_path, car_name, duplicate_index, resolved_drive_type)
+		if binary_loaded != null:
+			print("EAGL handling config: car=%s duplicate=%d source=GLOBALB.BUN path=%s" % [
+				binary_loaded.car_name,
+				int(binary_loaded.duplicate_index),
+				globalb_path,
+			])
+			return binary_loaded
 	var json_path := _resolved_handling_json_path()
 	if json_path == "" or not FileAccess.file_exists(json_path):
 		return null
-	var existing = car_node.config
-	if existing == null:
+	var json_loaded = loader.load_config(json_path, car_name, duplicate_index, resolved_drive_type)
+	if json_loaded == null:
+		push_warning("Failed to load handling JSON config for %s from %s" % [car_name, json_path])
 		return null
-	var loader = GlobalBHandlingLoaderScript.new()
-	var loaded = loader.load_config(json_path, existing.car_name, existing.duplicate_index, existing.drive_type)
-	if loaded == null:
-		push_warning("Failed to load handling JSON config for %s from %s" % [existing.car_name, json_path])
-		return null
-	print("EAGL handling config override: car=%s duplicate=%d json=%s" % [
-		loaded.car_name,
-		int(loaded.duplicate_index),
+	print("EAGL handling config: car=%s duplicate=%d source=json path=%s" % [
+		json_loaded.car_name,
+		int(json_loaded.duplicate_index),
 		json_path,
 	])
-	return loaded
+	return json_loaded
 
 
 func _seat_car_from_config(car_node) -> void:
@@ -304,6 +335,39 @@ func _append_car_binary_entries(seen: Dictionary) -> void:
 	var cars_dir := _resolved_cars_dir()
 	if cars_dir == "":
 		return
+	var loader = GlobalBHandlingLoaderScript.new()
+	var globalb_path := _resolved_globalb_path()
+	if globalb_path != "":
+		var globalb_entries: Array[Dictionary] = loader.list_globalb_entries(globalb_path)
+		globalb_entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			var car_a := String(a.get("car_name", ""))
+			var car_b := String(b.get("car_name", ""))
+			if car_a == car_b:
+				return int(a.get("duplicate_index", 1)) < int(b.get("duplicate_index", 1))
+			return car_a < car_b
+		)
+		for row in globalb_entries:
+			var car_id := String(row.get("car_name", ""))
+			if not _car_asset_exists(cars_dir, car_id):
+				continue
+			var drive_type := String(row.get("drive_type", _drive_type_for_car(car_id)))
+			var duplicate_index := int(row.get("duplicate_index", 1))
+			var entry_key := _entry_key(car_id, duplicate_index, drive_type)
+			if seen.has(entry_key):
+				continue
+			seen[entry_key] = true
+			_car_entries.append({
+				"key": entry_key,
+				"label": _format_car_entry_label(car_id, duplicate_index, drive_type, "Binary"),
+				"source": "car_binary",
+				"car_name": car_id,
+				"duplicate_index": duplicate_index,
+				"drive_type": drive_type,
+				"globalb_row_index": int(row.get("row_index", -1)),
+				"handling_profile_id": int(row.get("handling_profile_id", -1)),
+				"vehicle_class_id": int(row.get("vehicle_class_id", -1)),
+			})
+		return
 	var dir := DirAccess.open(cars_dir)
 	if dir == null:
 		return
@@ -323,17 +387,18 @@ func _append_car_binary_entries(seen: Dictionary) -> void:
 	dir.list_dir_end()
 	car_ids.sort()
 	for car_id in car_ids:
-		var entry_key := _entry_key(car_id, 1, _default_drive_type())
+		var drive_type := _drive_type_for_car(car_id)
+		var entry_key := _entry_key(car_id, 1, drive_type)
 		if seen.has(entry_key):
 			continue
 		seen[entry_key] = true
 		_car_entries.append({
 			"key": entry_key,
-			"label": _format_car_entry_label(car_id, 1, "", "Binary"),
+			"label": _format_car_entry_label(car_id, 1, drive_type, "Binary"),
 			"source": "car_binary",
 			"car_name": car_id,
 			"duplicate_index": 1,
-			"drive_type": _default_drive_type(),
+			"drive_type": drive_type,
 		})
 
 
@@ -413,7 +478,11 @@ func _current_car_display_name() -> String:
 
 
 func _default_drive_type() -> String:
-	if car != null and car.config != null:
+	return "RWD"
+
+
+func _drive_type_for_car(car_name: String) -> String:
+	if car != null and car.config != null and String(car.config.car_name).to_upper() == car_name.to_upper():
 		return String(car.config.drive_type)
 	return "RWD"
 
@@ -458,7 +527,9 @@ func _switch_to_car_index(index: int) -> void:
 	_spawn_transform = _spawn_transform_for_config(new_config)
 	_load_car_visual()
 	car.reset_runtime_state(_spawn_transform)
+	car.sync_wheel_slots_from_visual()
 	_seed_camera_from_car()
+	_rebuild_car_entries()
 	_selected_car_index = index
 	_set_status("Loaded %s" % String(entry.get("label", "car")))
 	_sync_ui_from_car()
@@ -486,17 +557,9 @@ func _on_overlay_toggled(enabled: bool) -> void:
 
 func _build_runtime_config_for_car(car_name: String, duplicate_index: int = 1, drive_type: String = ""):
 	var resolved_drive_type: String = drive_type if drive_type != "" else _default_drive_type()
-	var json_path: String = _resolved_handling_json_path()
-	var loader = GlobalBHandlingLoaderScript.new()
-	if json_path != "" and FileAccess.file_exists(json_path):
-		var loaded = loader.load_config(json_path, car_name, duplicate_index, resolved_drive_type)
-		if loaded != null:
-			return loaded
-	var globalb_path := _resolved_globalb_path()
-	if globalb_path != "":
-		var loaded = loader.load_config_from_globalb(globalb_path, car_name, duplicate_index, resolved_drive_type)
-		if loaded != null:
-			return loaded
+	var loaded = _load_authoritative_handling_config(car_name, duplicate_index, resolved_drive_type)
+	if loaded != null:
+		return loaded
 	var config = CarConfigScript.new()
 	if car != null and car.config != null:
 		config = car.config.duplicate(true)
@@ -566,6 +629,12 @@ func _resolved_initial_car_id() -> String:
 	return first_car_id
 
 
+func _car_asset_exists(cars_dir: String, car_id: String) -> bool:
+	var geometry_bin := cars_dir.path_join(car_id).path_join("GEOMETRY.BIN")
+	var geometry_lzc := cars_dir.path_join(car_id).path_join("GEOMETRY.LZC")
+	return FileAccess.file_exists(geometry_bin) or FileAccess.file_exists(geometry_lzc)
+
+
 func _setup_ground() -> void:
 	var shape := flat_track_shape.shape as BoxShape3D
 	if shape != null:
@@ -625,7 +694,7 @@ void fragment() {
 
 
 func _seed_camera_from_car() -> void:
-	var forward: Vector3 = (car.global_transform.basis * Vector3.RIGHT).normalized()
+	var forward: Vector3 = (car.global_transform.basis * Vector3(0.0, 0.0, 1.0)).normalized()
 	_camera_yaw = atan2(-forward.z, forward.x)
 	_camera_target_position = car.global_transform.origin + Vector3.UP * CAMERA_TARGET_HEIGHT
 

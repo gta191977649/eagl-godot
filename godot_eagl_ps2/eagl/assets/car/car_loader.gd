@@ -7,6 +7,9 @@ const MathUtils = preload("res://eagl/utils/math_utils.gd")
 
 const SLOT_IDS := ["FL", "FR", "RL", "RR"]
 const TIRE_DETAIL_SUFFIXES := ["A", "B", "C"]
+const VISUAL_PIVOT_MAX_LONGITUDINAL_DELTA_PS2 := 0.18
+const VISUAL_PIVOT_MAX_LATERAL_DELTA_PS2 := 0.18
+const VISUAL_PIVOT_MAX_VERTICAL_DELTA_PS2 := 0.14
 
 var parser = CarParserPS2Script.new()
 var mesh_builder = MeshBuilderScript.new()
@@ -61,6 +64,8 @@ func build_scene(asset, config = null) -> Node3D:
 
 	var body_root := Node3D.new()
 	body_root.name = "Body"
+	if config != null:
+		body_root.position = _body_visual_offset_godot(config)
 	root.add_child(body_root)
 
 	var wheels_root := Node3D.new()
@@ -111,9 +116,10 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 			continue
 		var slot_id: String = SLOT_IDS[index]
 		var slot_info: Dictionary = slot_metadata.get(slot_id, {})
+		var pivot_position_ps2: Vector3 = slot_info.get("resolved_visual_position_ps2", config.wheel_local_positions_ps2[index])
 		var wheel_root := Node3D.new()
 		wheel_root.name = slot_id
-		wheel_root.position = MathUtils.ps2_to_godot_vec3(config.wheel_local_positions_ps2[index])
+		wheel_root.position = MathUtils.ps2_to_godot_vec3(pivot_position_ps2)
 		wheels_root.add_child(wheel_root)
 
 		var suspension_root := Node3D.new()
@@ -146,6 +152,7 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 		if tire_template != null:
 			var tire_node := _duplicate_mesh_instance(tire_template, "Tire")
 			tire_node.transform = _canonical_wheel_part_transform(tire_template)
+			_match_tire_visual_radius(tire_node, float(config.wheel_radii[index]))
 			tire_node.set_meta("eagl_source_object", tire_selection.get("object_name", ""))
 			tire_node.set_meta("eagl_detail_suffix", tire_selection.get("detail_suffix", ""))
 			tire_node.set_meta("eagl_detail_level", tire_selection.get("detail_level", -1))
@@ -158,12 +165,12 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 
 		var dummy := Node3D.new()
 		dummy.name = "%s_PIVOT" % slot_id
-		dummy.position = MathUtils.ps2_to_godot_vec3(config.wheel_local_positions_ps2[index])
+		dummy.position = MathUtils.ps2_to_godot_vec3(pivot_position_ps2)
 		dummies_root.add_child(dummy)
 
 	var center_dummy := Node3D.new()
 	center_dummy.name = "BODY_CENTER"
-	center_dummy.position = MathUtils.ps2_to_godot_vec3(config.center_of_mass_ps2)
+	center_dummy.position = _body_visual_offset_godot(config)
 	dummies_root.add_child(center_dummy)
 
 
@@ -174,7 +181,21 @@ func _wheel_slot_metadata_by_id(wheel_slots: Array, config) -> Dictionary:
 		var slot_id := String(slot_dict.get("slot_id", ""))
 		if slot_id == "":
 			continue
-		by_id[slot_id] = slot_dict.duplicate(true)
+		var merged := slot_dict.duplicate(true)
+		var slot_index := SLOT_IDS.find(slot_id)
+		var physics_position_ps2: Vector3 = config.wheel_local_positions_ps2[slot_index] if slot_index >= 0 and slot_index < config.wheel_local_positions_ps2.size() else Vector3.ZERO
+		var visual_position_ps2: Vector3 = merged.get("position_ps2", physics_position_ps2)
+		var resolved_visual_position_ps2 := _resolved_visual_pivot_position_ps2(physics_position_ps2, visual_position_ps2)
+		merged["physics_position_ps2"] = physics_position_ps2
+		merged["physics_position_godot"] = MathUtils.ps2_to_godot_vec3(physics_position_ps2)
+		merged["visual_position_ps2"] = visual_position_ps2
+		merged["visual_position_godot"] = MathUtils.ps2_to_godot_vec3(visual_position_ps2)
+		merged["resolved_visual_position_ps2"] = resolved_visual_position_ps2
+		merged["resolved_visual_position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
+		merged["position_ps2"] = resolved_visual_position_ps2
+		merged["position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
+		merged["visual_position_source_resolved"] = "locator" if resolved_visual_position_ps2.is_equal_approx(visual_position_ps2) else "physics_hardpoint"
+		by_id[slot_id] = merged
 	for index in range(SLOT_IDS.size()):
 		var slot_id: String = SLOT_IDS[index]
 		if by_id.has(slot_id):
@@ -186,12 +207,43 @@ func _wheel_slot_metadata_by_id(wheel_slots: Array, config) -> Dictionary:
 			"slot_id": slot_id,
 			"axle": axle,
 			"side": side,
+			"physics_position_ps2": position_ps2,
+			"physics_position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
+			"visual_position_ps2": position_ps2,
+			"visual_position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
+			"resolved_visual_position_ps2": position_ps2,
+			"resolved_visual_position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
 			"position_ps2": position_ps2,
 			"position_godot": MathUtils.ps2_to_godot_vec3(position_ps2),
+			"visual_position_source_resolved": "config_fallback",
 			"source": "config_fallback",
 			"locator_orientation_index": 0 if axle == "front" else 1,
 		}
 	return by_id
+
+
+func _resolved_visual_pivot_position_ps2(physics_position_ps2: Vector3, locator_position_ps2: Vector3) -> Vector3:
+	var delta := locator_position_ps2 - physics_position_ps2
+	if absf(delta.x) > VISUAL_PIVOT_MAX_LONGITUDINAL_DELTA_PS2:
+		return physics_position_ps2
+	if absf(delta.y) > VISUAL_PIVOT_MAX_LATERAL_DELTA_PS2:
+		return physics_position_ps2
+	if absf(delta.z) > VISUAL_PIVOT_MAX_VERTICAL_DELTA_PS2:
+		return physics_position_ps2
+	return locator_position_ps2
+
+
+func _body_visual_offset_ps2(config) -> Vector3:
+	if config != null and config.body_center_ps2 is Vector3:
+		# The GLOBALB 0x0F0..0x0F8 triplet is not the full visual body-root translation.
+		# Applying its X/Y components shifts the shell sideways relative to wheel hardpoints.
+		# Keep only the vertical component here until the 0x34020 node/channel graph is wired up.
+		return Vector3(0.0, 0.0, config.body_center_ps2.z)
+	return Vector3.ZERO
+
+
+func _body_visual_offset_godot(config) -> Vector3:
+	return MathUtils.ps2_to_godot_vec3(_body_visual_offset_ps2(config))
 
 
 func _collect_named_meshes(asset, suffixes: Array[String]) -> Dictionary:
@@ -355,6 +407,19 @@ func _canonical_wheel_part_transform(template: MeshInstance3D) -> Transform3D:
 		return Transform3D(basis, Vector3.ZERO)
 	var correction := _rotation_between_vectors(axle_direction, Vector3.RIGHT)
 	return Transform3D((correction * basis).orthonormalized(), Vector3.ZERO)
+
+
+func _match_tire_visual_radius(tire_node: MeshInstance3D, expected_radius: float) -> void:
+	if tire_node == null or tire_node.mesh == null:
+		return
+	if expected_radius <= 0.0001:
+		return
+	var local_aabb: AABB = tire_node.transform * tire_node.mesh.get_aabb()
+	var visual_radius := maxf(local_aabb.size.y, local_aabb.size.z) * 0.5
+	if visual_radius <= 0.0001:
+		return
+	var uniform_scale := expected_radius / visual_radius
+	tire_node.scale = Vector3.ONE * uniform_scale
 
 
 func _wheel_mesh_axle_direction(mesh_size: Vector3, basis: Basis) -> Vector3:

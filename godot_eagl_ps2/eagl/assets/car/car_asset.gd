@@ -5,6 +5,7 @@ var car_id = ""
 var objects: Array[Dictionary] = []
 var part_bundles: Array[Dictionary] = []
 var assembly_summary: Dictionary = {}
+var assembly_tables: Dictionary = {}
 var locators: Array[Dictionary] = []
 var wheel_slots: Array[Dictionary] = []
 
@@ -19,6 +20,7 @@ func summary() -> Dictionary:
 		"object_count": objects.size(),
 		"part_bundle_count": part_bundles.size(),
 		"assembly_summary": assembly_summary,
+		"assembly_tables": assembly_tables,
 		"locator_count": locators.size(),
 		"wheel_slot_count": wheel_slots.size(),
 		"warnings": warnings,

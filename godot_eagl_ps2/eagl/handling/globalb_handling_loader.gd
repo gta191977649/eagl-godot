@@ -15,12 +15,17 @@ const HP2_GLOBALB_WHEEL_VECTOR_OFFSETS := {
 	"RL": 0x180,
 }
 const HP2_GLOBALB_INFERRED_FLOAT_OFFSETS := {
+	"physics_mass_tonnes": 0x1E0,
 	"body_length": 0x1E4,
 	"body_width": 0x1E8,
 	"body_height": 0x1EC,
-	"steering_response": 0x278,
-	"steering_return": 0x27C,
-	"steering_lock_scale": 0x280,
+	"body_transform_m00": 0x1F0,
+	"body_transform_m11": 0x204,
+	"body_transform_m22": 0x218,
+	"body_transform_m33": 0x22C,
+	"front_drive_scale": 0x278,
+	"rear_drive_scale": 0x27C,
+	"rear_drive_bias": 0x280,
 	"rolling_resistance": 0x284,
 	"final_drive_ratio": 0x28C,
 	"reverse_gear_ratio": 0x290,
@@ -30,7 +35,7 @@ const HP2_GLOBALB_INFERRED_FLOAT_OFFSETS := {
 	"gear_ratio_4": 0x2A4,
 	"gear_ratio_5": 0x2A8,
 	"gear_ratio_6": 0x2AC,
-	"mass": 0x2B0,
+	"engine_idle_rpm": 0x2B0,
 	"engine_peak_rpm": 0x2B4,
 	"engine_redline_rpm": 0x2B8,
 	"aero_drag": 0x2BC,
@@ -74,6 +79,53 @@ func load_config_from_globalb(globalb_path: String, car_name: String, duplicate_
 	return _config_from_row(row, drive_type, globalb_path)
 
 
+func list_globalb_entries(globalb_path: String) -> Array[Dictionary]:
+	if globalb_path == "" or not FileAccess.file_exists(globalb_path):
+		return []
+	var bundle := Binary.load_bundle_bytes(globalb_path)
+	if bundle.is_empty():
+		return []
+	var chunks: Array[Dictionary] = _track_parser._parse_chunks(bundle)
+	var chunk := _first_chunk(chunks, CHUNK_GLOBAL_CAR_TABLE)
+	if chunk.is_empty():
+		return []
+	var table_base := (int(chunk.get("offset", 0)) + 0x17) & ~0xF
+	var table_end := int(chunk.get("end_offset", bundle.size()))
+	var entries: Array[Dictionary] = []
+	var duplicate_counts := {}
+	for row_index in range(_globalb_row_count(table_base, table_end)):
+		var row_base := table_base + row_index * HP2_GLOBALB_ROW_STRIDE
+		var car_name := _globalb_car_name(bundle, row_base)
+		if car_name == "":
+			continue
+		var duplicate_index := int(duplicate_counts.get(car_name, 0)) + 1
+		duplicate_counts[car_name] = duplicate_index
+		var handling_profile_count := int(Binary.u8(bundle, row_base + 0x0E5))
+		var handling_profile_sequence: Array[int] = []
+		for index in range(handling_profile_count):
+			handling_profile_sequence.append(int(Binary.u8(bundle, row_base + 0x544 + index)))
+		entries.append({
+			"car_name": car_name,
+			"row_index": row_index,
+			"row_offset": row_base,
+			"duplicate_index": duplicate_index,
+			"front_drive_scale": Binary.f32(bundle, row_base + 0x278),
+			"rear_drive_scale": Binary.f32(bundle, row_base + 0x27C),
+			"rear_drive_bias": Binary.f32(bundle, row_base + 0x280),
+			"drive_type": _drive_type_from_split(
+				Binary.f32(bundle, row_base + 0x278),
+				Binary.f32(bundle, row_base + 0x27C),
+				Binary.f32(bundle, row_base + 0x280)
+			),
+			"vehicle_type_id": Binary.u32(bundle, row_base + 0x538),
+			"vehicle_class_id": int(Binary.u8(bundle, row_base + 0x0E6)),
+			"handling_profile_id": Binary.u32(bundle, row_base + 0x554),
+			"handling_profile_count": handling_profile_count,
+			"handling_profile_sequence": handling_profile_sequence,
+		})
+	return entries
+
+
 func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String):
 	var config: CarConfig = CarConfigScript.new()
 	var floats: Dictionary = row.get("inferred_float_fields", {})
@@ -90,15 +142,32 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.globalb_handling_profile_id = int(row.get("handling_profile_id", config.globalb_handling_profile_id))
 	config.globalb_handling_profile_count = int(row.get("handling_profile_count", config.globalb_handling_profile_count))
 	config.globalb_handling_profile_sequence = PackedInt32Array(row.get("handling_profile_sequence", []))
-	config.mass_kg = _field_value(floats, "mass", config.mass_kg)
+	var physics_mass_tonnes := _row_float(globalb_row, 0x1E0, _field_value(floats, "physics_mass_tonnes", 0.0))
+	if physics_mass_tonnes > 0.001:
+		config.mass_kg = physics_mass_tonnes * 1000.0
+		config.mass_kg_is_estimate = false
+	else:
+		config.mass_kg = _field_value_any(floats, ["physics_mass_kg", "mass_kg"], config.mass_kg)
+		config.mass_kg_is_estimate = not floats.has("physics_mass_kg") and not floats.has("mass_kg")
 	# Keep the rigid-body COM neutral until the executable path for the 0x0F0..0x0F8
 	# triplet is confirmed. HP2 does use the 0x110 X value for axle preload balance,
 	# but that does not prove it is the Godot rigid-body center of mass.
 	config.center_of_mass_ps2 = Vector3.ZERO
+	config.body_center_ps2 = Vector3(
+		_row_float(globalb_row, 0x0F0, 0.0),
+		_row_float(globalb_row, 0x0F4, 0.0),
+		_row_float(globalb_row, 0x0F8, 0.0)
+	)
 	config.body_size_ps2 = Vector3(
 		_field_value(floats, "body_length", config.body_size_ps2.x),
 		_field_value(floats, "body_width", config.body_size_ps2.y),
 		_field_value(floats, "body_height", config.body_size_ps2.z)
+	)
+	config.body_transform_diagonal = Vector4(
+		_row_float(globalb_row, 0x1F0, _field_value_any(floats, ["body_transform_m00", "aero_reference"], config.body_transform_diagonal.x)),
+		_row_float(globalb_row, 0x204, _field_value(floats, "body_transform_m11", config.body_transform_diagonal.y)),
+		_row_float(globalb_row, 0x218, _field_value(floats, "body_transform_m22", config.body_transform_diagonal.z)),
+		_row_float(globalb_row, 0x22C, _field_value(floats, "body_transform_m33", config.body_transform_diagonal.w))
 	)
 	config.physics_origin_offset_ps2 = Vector3(
 		_row_float(globalb_row, 0x110, 0.0),
@@ -144,9 +213,10 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.rear_bump_damping = _row_float(globalb_row, 0x25c, config.rear_bump_damping)
 	config.rear_anti_roll_coefficient = _row_float(globalb_row, 0x260, config.rear_anti_roll_coefficient)
 
-	config.steering_response = _field_value(floats, "steering_response", config.steering_response)
-	config.steering_return = _field_value(floats, "steering_return", config.steering_return)
-	config.steering_lock_scale = _field_value(floats, "steering_lock_scale", config.steering_lock_scale)
+	config.front_drive_scale = _row_float(globalb_row, 0x278, _field_value_any(floats, ["front_drive_scale", "steering_response"], config.front_drive_scale))
+	config.rear_drive_scale = _row_float(globalb_row, 0x27C, _field_value_any(floats, ["rear_drive_scale", "steering_return"], config.rear_drive_scale))
+	config.rear_drive_bias = _row_float(globalb_row, 0x280, _field_value_any(floats, ["rear_drive_bias", "steering_lock_scale"], config.rear_drive_bias))
+	config.update_drive_type_from_drivetrain()
 	config.rolling_resistance = _field_value(floats, "rolling_resistance", config.rolling_resistance)
 	config.aero_drag = _field_value(floats, "aero_drag", config.aero_drag)
 
@@ -158,6 +228,7 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 		forward_gears.append(_field_value(floats, "gear_ratio_%d" % gear, 1.0))
 	config.forward_gears = PackedFloat32Array(forward_gears)
 
+	config.idle_rpm = _row_float(globalb_row, 0x2B0, _field_value_any(floats, ["engine_idle_rpm", "mass"], config.idle_rpm))
 	config.engine_peak_rpm = _field_value(floats, "engine_peak_rpm", config.engine_peak_rpm)
 	config.engine_redline_rpm = _field_value(floats, "engine_redline_rpm", config.engine_redline_rpm)
 	config.shift_up_rpm = config.engine_redline_rpm * 0.96
@@ -241,6 +312,13 @@ func _field_value(fields: Dictionary, field_name: String, fallback: float) -> fl
 	return float(fields[field_name].get("value", fallback))
 
 
+func _field_value_any(fields: Dictionary, field_names: Array[String], fallback: float) -> float:
+	for field_name in field_names:
+		if fields.has(field_name):
+			return float(fields[field_name].get("value", fallback))
+	return fallback
+
+
 func _first_chunk(chunks: Array[Dictionary], chunk_id: int) -> Dictionary:
 	for chunk in _track_parser._walk_chunks(chunks):
 		if int(chunk.get("id", 0)) == chunk_id:
@@ -284,3 +362,13 @@ func _row_float(row: PackedByteArray, offset: int, fallback: float) -> float:
 	if row.is_empty() or offset < 0 or offset + 4 > row.size():
 		return fallback
 	return Binary.f32(row, offset)
+
+
+func _drive_type_from_split(front_scale: float, rear_scale: float, rear_bias: float) -> String:
+	var rear_weight := clampf(rear_bias, 0.0, 1.0) * maxf(rear_scale, 0.0)
+	var front_weight := clampf(1.0 - rear_bias, 0.0, 1.0) * maxf(front_scale, 0.0)
+	if front_weight <= 0.001:
+		return "RWD"
+	if rear_weight <= 0.001:
+		return "FWD"
+	return "AWD"

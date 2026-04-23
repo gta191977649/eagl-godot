@@ -1,0 +1,31 @@
+[gd_scene format=3 uid="uid://bx30y3w6dic5l"]
+
+[ext_resource type="Script" uid="uid://da7aou0uxr25h" path="res://eagl/entity/car_vehicle_body.gd" id="1"]
+
+[sub_resource type="BoxShape3D" id="1"]
+size = Vector3(1.9, 1.2, 4.6)
+
+[node name="Car" type="VehicleBody3D" unique_id=1550938097]
+continuous_cd = true
+script = ExtResource("1")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2079859238]
+shape = SubResource("1")
+
+[node name="VisualRoot" type="Node3D" parent="." unique_id=1632257779]
+
+[node name="FL" type="VehicleWheel3D" parent="." unique_id=208913392]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.72, 0.33, 1.3)
+use_as_steering = true
+
+[node name="FR" type="VehicleWheel3D" parent="." unique_id=752313244]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.72, 0.33, 1.3)
+use_as_steering = true
+
+[node name="RL" type="VehicleWheel3D" parent="." unique_id=605951071]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.72, 0.33, -1.3)
+use_as_traction = true
+
+[node name="RR" type="VehicleWheel3D" parent="." unique_id=1542697328]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.72, 0.33, -1.3)
+use_as_traction = true

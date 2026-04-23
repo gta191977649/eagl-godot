@@ -1,7 +1,7 @@
-[gd_scene format=3 uid="uid://ccsn403ygawdo"]
+[gd_scene load_steps=8 format=3 uid="uid://ccsn403ygawdo"]
 
 [ext_resource type="Script" uid="uid://bp3rlrj7y2s3l" path="res://eagl/debug/car_debug.gd" id="1"]
-[ext_resource type="Script" uid="uid://dfwo66bhira15" path="res://eagl/handling/car_controller.gd" id="2"]
+[ext_resource type="PackedScene" path="res://eagl/entity/Car.tscn" id="2"]
 
 [sub_resource type="Environment" id="1"]
 background_mode = 2
@@ -19,9 +19,6 @@ roughness = 0.95
 
 [sub_resource type="BoxMesh" id="4"]
 size = Vector3(600, 1, 600)
-
-[sub_resource type="BoxShape3D" id="5"]
-size = Vector3(4.6, 1.2, 1.9)
 
 [node name="CarDebug" type="Node3D" unique_id=1852505387]
 script = ExtResource("1")
@@ -45,14 +42,8 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
 material_override = SubResource("2")
 mesh = SubResource("4")
 
-[node name="Car" type="RigidBody3D" parent="." unique_id=1860729170]
+[node name="Car" parent="." instance=ExtResource("2")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.16, 0)
-continuous_cd = true
-script = ExtResource("2")
-auto_build_visuals = false
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Car" unique_id=995590640]
-shape = SubResource("5")
 
 [node name="FollowCamera" type="Camera3D" parent="." unique_id=1739694075]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 4, 0)

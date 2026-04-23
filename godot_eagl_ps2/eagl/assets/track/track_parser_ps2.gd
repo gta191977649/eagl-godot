@@ -161,6 +161,22 @@ func _parse_mesh_object(object_chunk: Dictionary, bundle: PackedByteArray) -> Di
 	return {
 		"name": name_info["name"],
 		"chunk_offset": object_chunk["offset"],
+		"solid_version": Binary.u16(header_payload, 0x0C) if header_payload.size() >= 0x0E else 0,
+		"solid_flags": Binary.u16(header_payload, 0x0E) if header_payload.size() >= 0x10 else 0,
+		"num_polys": Binary.s16(header_payload, 0x14) if header_payload.size() >= 0x16 else 0,
+		"num_unique_verts": Binary.s16(header_payload, 0x16) if header_payload.size() >= 0x18 else 0,
+		"num_textures": Binary.s8(header_payload, 0x19) if header_payload.size() >= 0x1A else 0,
+		"num_light_materials": Binary.s8(header_payload, 0x1A) if header_payload.size() >= 0x1B else 0,
+		"aabb_min": Vector3(
+			Binary.f32(header_payload, 0x40),
+			Binary.f32(header_payload, 0x44),
+			Binary.f32(header_payload, 0x48)
+		) if header_payload.size() >= 0x4C else Vector3.ZERO,
+		"aabb_max": Vector3(
+			Binary.f32(header_payload, 0x50),
+			Binary.f32(header_payload, 0x54),
+			Binary.f32(header_payload, 0x58)
+		) if header_payload.size() >= 0x5C else Vector3.ZERO,
 		"transform": _read_transform(header_payload, name_info["start"]),
 		"blocks": blocks,
 		"texture_hashes": texture_hashes,

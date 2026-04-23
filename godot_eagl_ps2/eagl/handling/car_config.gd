@@ -18,8 +18,11 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var globalb_handling_profile_sequence = PackedInt32Array()
 
 @export var mass_kg = 1000.0
+@export var mass_kg_is_estimate = false
 @export var center_of_mass_ps2 = Vector3.ZERO
+@export var body_center_ps2 = Vector3.ZERO
 @export var body_size_ps2 = Vector3(4.6, 1.9, 1.2)
+@export var body_transform_diagonal = Vector4(1.0, 1.0, 1.0, 1.0)
 @export var physics_origin_offset_ps2 = Vector3.ZERO
 
 @export var wheel_local_positions_ps2: Array[Vector3] = [
@@ -81,6 +84,9 @@ const SLOT_SIDES = ["left", "right", "left", "right"]
 @export var final_drive_ratio = 4.0
 @export var reverse_gear_ratio = -2.97
 @export var forward_gears = PackedFloat32Array([2.97, 2.07, 1.43, 1.0, 0.84, 0.56])
+@export var front_drive_scale = 1.0
+@export var rear_drive_scale = 1.0
+@export var rear_drive_bias = 1.0
 @export var idle_rpm = 900.0
 @export var engine_peak_rpm = 6500.0
 @export var engine_redline_rpm = 7200.0
@@ -161,33 +167,47 @@ func top_gear() -> int:
 
 
 func drive_bias_for_slot(slot_id: String) -> float:
-	match drive_type:
-		"FWD":
-			return 0.5 if slot_id in ["FL", "FR"] else 0.0
-		"AWD":
-			return 0.25
-		_:
-			return 0.5 if slot_id in ["RL", "RR"] else 0.0
+	var split := drivetrain_axle_bias()
+	if slot_id in ["FL", "FR"]:
+		return split["front"] * 0.5
+	return split["rear"] * 0.5
 
 
 func driven_average_radius() -> float:
 	var total = 0.0
-	var count = 0
+	var weight_total = 0.0
 	for index in range(SLOT_IDS.size()):
-		if drive_bias_for_slot(SLOT_IDS[index]) <= 0.0 or index >= wheel_radii.size():
+		if index >= wheel_radii.size():
 			continue
-		total += wheel_radii[index]
-		count += 1
-	return total / float(count) if count > 0 else 0.33
+		var weight := drive_bias_for_slot(SLOT_IDS[index])
+		if weight <= 0.0:
+			continue
+		total += wheel_radii[index] * weight
+		weight_total += weight
+	return total / weight_total if weight_total > 0.0 else 0.33
 
 
 func sample_engine_force(speed_mps: float, rpm: float) -> float:
 	var speed_kph = speed_mps * 3.6
-	var speed_factor = 1.0 - clampf(speed_kph / maxf(top_speed_reference_kph, 1.0), 0.0, 1.0)
-	var rpm_span = maxf(engine_redline_rpm - idle_rpm, 1.0)
-	var peak_offset = absf(rpm - engine_peak_rpm) / rpm_span
-	var rpm_factor = clampf(1.0 - peak_offset * 1.35, 0.35, 1.0)
+	var speed_ratio := clampf(speed_kph / maxf(top_speed_reference_kph, 1.0), 0.0, 1.4)
+	var speed_factor := 1.0
+	if speed_ratio > 0.55:
+		var fade_alpha := clampf((speed_ratio - 0.55) / 0.45, 0.0, 1.0)
+		var fade_curve := fade_alpha * fade_alpha * (3.0 - 2.0 * fade_alpha)
+		speed_factor = lerpf(1.0, 0.16, fade_curve)
+	if speed_ratio > 1.0:
+		speed_factor *= clampf(1.0 - (speed_ratio - 1.0) * 2.0, 0.0, 1.0)
+	var rpm_factor := _rpm_force_factor(rpm)
 	return engine_force_scale * speed_factor * rpm_factor
+
+
+func _rpm_force_factor(rpm: float) -> float:
+	var clamped_rpm := clampf(rpm, idle_rpm, engine_redline_rpm)
+	if clamped_rpm <= engine_peak_rpm:
+		var rise_alpha := clampf((clamped_rpm - idle_rpm) / maxf(engine_peak_rpm - idle_rpm, 1.0), 0.0, 1.0)
+		return lerpf(0.58, 1.0, pow(rise_alpha, 0.7))
+	var fall_alpha := clampf((clamped_rpm - engine_peak_rpm) / maxf(engine_redline_rpm - engine_peak_rpm, 1.0), 0.0, 1.0)
+	return lerpf(1.0, 0.78, pow(fall_alpha, 1.1))
 
 
 func front_axle_center_x() -> float:
@@ -214,6 +234,34 @@ func _front_axle_preload() -> float:
 func _rear_axle_preload() -> float:
 	var split = _axle_preload_split()
 	return split["rear_each"]
+
+
+func drivetrain_axle_bias() -> Dictionary:
+	var rear_weight := clampf(rear_drive_bias, 0.0, 1.0) * maxf(rear_drive_scale, 0.0)
+	var front_weight := clampf(1.0 - rear_drive_bias, 0.0, 1.0) * maxf(front_drive_scale, 0.0)
+	var total := front_weight + rear_weight
+	if total <= 0.0001:
+		match drive_type:
+			"FWD":
+				return {"front": 1.0, "rear": 0.0}
+			"AWD":
+				return {"front": 0.5, "rear": 0.5}
+			_:
+				return {"front": 0.0, "rear": 1.0}
+	return {
+		"front": front_weight / total,
+		"rear": rear_weight / total,
+	}
+
+
+func update_drive_type_from_drivetrain() -> void:
+	var split := drivetrain_axle_bias()
+	if split["front"] <= 0.001:
+		drive_type = "RWD"
+	elif split["rear"] <= 0.001:
+		drive_type = "FWD"
+	else:
+		drive_type = "AWD"
 
 
 func _axle_preload_split() -> Dictionary:

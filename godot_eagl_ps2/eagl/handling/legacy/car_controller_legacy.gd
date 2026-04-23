@@ -1,3 +1,6 @@
+# Legacy reverse-engineered HP2 controller kept for reference only.
+# Runtime use has been replaced by the VehicleBody3D-based entity in
+# res://eagl/entity/Car.tscn.
 class_name CarController
 extends RigidBody3D
 

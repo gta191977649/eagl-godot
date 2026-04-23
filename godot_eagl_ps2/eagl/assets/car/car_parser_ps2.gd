@@ -14,6 +14,52 @@ const HP2_TIRE_DUMMY_REAR_LEFT := 0x7EFCF06F
 const HP2_TIRE_DUMMY_REAR_RIGHT := 0x5F09C5E2
 const HP2_TIRE_DUMMY_REAR_LEFT_AUX := 0xBEA9AEE6
 const HP2_TIRE_DUMMY_REAR_RIGHT_AUX := 0x944E5339
+const HP2_FRONT_WHEEL_LOCATOR_LEFT := 0x05F63788
+const HP2_FRONT_WHEEL_LOCATOR_RIGHT := 0xC52BF01B
+const HP2_REAR_WHEEL_LOCATOR_LEFT := 0xD947F346
+const HP2_REAR_WHEEL_LOCATOR_RIGHT := 0x02B52399
+
+# Derived from HP2_AttachedPartLocatorScan_FUN_00120360:
+# the game recognizes fixed locator hash families, then attaches runtime wheel parts to those records.
+# We follow the same model instead of using generic position-based fallback.
+const ORIGINAL_WHEEL_SLOT_SPECS := [
+	{
+		"slot_id": "FL",
+		"axle": "front",
+		"side": "left",
+		"families": [
+			{"hashes": [HP2_TIRE_DUMMY_FRONT_LEFT], "source": "front_tire_dummy"},
+			{"hashes": [HP2_FRONT_WHEEL_LOCATOR_LEFT], "source": "front_wheel_locator"},
+		],
+	},
+	{
+		"slot_id": "FR",
+		"axle": "front",
+		"side": "right",
+		"families": [
+			{"hashes": [HP2_TIRE_DUMMY_FRONT_RIGHT], "source": "front_tire_dummy"},
+			{"hashes": [HP2_FRONT_WHEEL_LOCATOR_RIGHT], "source": "front_wheel_locator"},
+		],
+	},
+	{
+		"slot_id": "RL",
+		"axle": "rear",
+		"side": "left",
+		"families": [
+			{"hashes": [HP2_TIRE_DUMMY_REAR_LEFT], "source": "rear_tire_dummy"},
+			{"hashes": [HP2_REAR_WHEEL_LOCATOR_LEFT], "source": "rear_wheel_locator"},
+		],
+	},
+	{
+		"slot_id": "RR",
+		"axle": "rear",
+		"side": "right",
+		"families": [
+			{"hashes": [HP2_TIRE_DUMMY_REAR_RIGHT], "source": "rear_tire_dummy"},
+			{"hashes": [HP2_REAR_WHEEL_LOCATOR_RIGHT], "source": "rear_wheel_locator"},
+		],
+	},
+]
 
 
 func parse(files: Dictionary):
@@ -33,6 +79,7 @@ func parse(files: Dictionary):
 	var chunks = _parse_chunks(bundle)
 	asset.part_bundles = _parse_part_bundles(chunks, bundle)
 	asset.assembly_summary = _parse_assembly_summary(chunks, bundle)
+	asset.assembly_tables = _parse_assembly_tables(chunks, bundle)
 	_parse_objects_into(asset, chunks, bundle)
 	asset.locators = _parse_locator_records(chunks, bundle)
 	asset.wheel_slots = _infer_wheel_slots(asset.locators)
@@ -41,6 +88,7 @@ func parse(files: Dictionary):
 	asset.metadata["parser"] = "CarParserPS2"
 	asset.metadata["locators"] = asset.locators.duplicate(true)
 	asset.metadata["wheel_slots"] = asset.wheel_slots.duplicate(true)
+	asset.metadata["assembly_tables"] = asset.assembly_tables.duplicate(true)
 	return asset
 
 
@@ -103,6 +151,56 @@ func _parse_assembly_summary(chunks: Array[Dictionary], bundle: PackedByteArray)
 	}
 
 
+func _parse_assembly_tables(chunks: Array[Dictionary], bundle: PackedByteArray) -> Dictionary:
+	var root := {}
+	for chunk in chunks:
+		if int(chunk.get("id", 0)) == CHUNK_CAR_ASSEMBLY_ROOT:
+			root = chunk
+			break
+	if root.is_empty():
+		return {}
+
+	var out := {}
+	var header_chunk := _child_with_id(root, CHUNK_CAR_ASSEMBLY_HEADER)
+	if not header_chunk.is_empty():
+		var payload := _payload(bundle, header_chunk)
+		if payload.size() >= 0x30:
+			out["header_pairs"] = {
+				"translation_keys_and_channels": _u16_pair(Binary.u32(payload, 0x10)),
+				"rotation_keys_and_bytes": _u16_pair(Binary.u32(payload, 0x14)),
+				"index_count_and_bytes": _u16_pair(Binary.u32(payload, 0x18)),
+				"node_count_and_bytes": _u16_pair(Binary.u32(payload, 0x1C)),
+				"graph_count_and_bytes": _u16_pair(Binary.u32(payload, 0x20)),
+				"offset_pair_0": _u16_pair(Binary.u32(payload, 0x24)),
+				"offset_pair_1": _u16_pair(Binary.u32(payload, 0x28)),
+				"offset_pair_2": _u16_pair(Binary.u32(payload, 0x2C)),
+			}
+
+	var translation_chunk := _child_with_id(root, 0x00034024)
+	if not translation_chunk.is_empty():
+		out["translation_keys"] = _parse_assembly_translation_keys(_payload(bundle, translation_chunk))
+
+	var rotation_chunk := _child_with_id(root, 0x00034022)
+	if not rotation_chunk.is_empty():
+		out["rotation_keys"] = _parse_assembly_rotation_keys(_payload(bundle, rotation_chunk))
+
+	var channel_chunk := _child_with_id(root, 0x00034023)
+	if not channel_chunk.is_empty():
+		out["channel_records"] = _parse_assembly_u32_triplets(_payload(bundle, channel_chunk))
+
+	var graph_chunk := _child_with_id(root, 0x00034025)
+	if not graph_chunk.is_empty():
+		var payload := _payload(bundle, graph_chunk)
+		out["graph_header_words"] = _parse_assembly_u32_words(payload, 0x40)
+		out["graph_payload_size"] = payload.size()
+
+	var align_chunk := _child_with_id(root, 0x00034026)
+	if not align_chunk.is_empty():
+		out["align_payload"] = _parse_assembly_u32_words(_payload(bundle, align_chunk), 0x10)
+
+	return out
+
+
 func _read_attachment_refs(chunk: Dictionary, bundle: PackedByteArray) -> Array[int]:
 	if chunk.is_empty():
 		return []
@@ -113,6 +211,65 @@ func _read_attachment_refs(chunk: Dictionary, bundle: PackedByteArray) -> Array[
 		if value != 0 and value != 0x11111111:
 			refs.append(value)
 	return refs
+
+
+func _parse_assembly_translation_keys(payload: PackedByteArray) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if payload.size() < 8:
+		return out
+	for offset in range(8, payload.size() - 0x13, 0x14):
+		out.append({
+			"word_00": Binary.u32(payload, offset + 0x00),
+			"position_ps2": Vector3(
+				Binary.f32(payload, offset + 0x04),
+				Binary.f32(payload, offset + 0x08),
+				Binary.f32(payload, offset + 0x0C)
+			),
+			"tag": Binary.u32(payload, offset + 0x10),
+		})
+	return out
+
+
+func _parse_assembly_rotation_keys(payload: PackedByteArray) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for offset in range(0, payload.size() - 0x17, 0x18):
+		out.append({
+			"header": Binary.u32(payload, offset + 0x00),
+			"quat_x": Binary.f32(payload, offset + 0x04),
+			"quat_y": Binary.f32(payload, offset + 0x08),
+			"quat_z": Binary.f32(payload, offset + 0x0C),
+			"quat_w": Binary.f32(payload, offset + 0x10),
+			"tag": Binary.u32(payload, offset + 0x14),
+		})
+	return out
+
+
+func _parse_assembly_u32_triplets(payload: PackedByteArray) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if payload.size() >= 8 and Binary.u32(payload, 0x00) == 0x11111111 and Binary.u32(payload, 0x04) == 0x11111111:
+		payload = payload.slice(8)
+	for offset in range(0, payload.size() - 0x0B, 0x0C):
+		out.append({
+			"word_00": Binary.u32(payload, offset + 0x00),
+			"word_04": Binary.u32(payload, offset + 0x04),
+			"word_08": Binary.u32(payload, offset + 0x08),
+		})
+	return out
+
+
+func _parse_assembly_u32_words(payload: PackedByteArray, byte_limit: int) -> Array[int]:
+	var out: Array[int] = []
+	var limit := mini(payload.size(), byte_limit)
+	for offset in range(0, limit - 3, 4):
+		out.append(Binary.u32(payload, offset))
+	return out
+
+
+func _u16_pair(value: int) -> Dictionary:
+	return {
+		"lo": value & 0xFFFF,
+		"hi": (value >> 16) & 0xFFFF,
+	}
 
 
 func _parse_locator_records(chunks: Array[Dictionary], bundle: PackedByteArray) -> Array[Dictionary]:
@@ -146,67 +303,52 @@ func _parse_locator_records(chunks: Array[Dictionary], bundle: PackedByteArray) 
 
 
 func _infer_wheel_slots(locators: Array[Dictionary]) -> Array[Dictionary]:
-	var by_id := {}
-	for source_slots in [_infer_wheel_slots_from_runtime_dummies(locators), _infer_wheel_slots_from_locator_positions(locators)]:
-		for slot in source_slots:
-			var slot_dict: Dictionary = slot
-			var slot_id := String(slot_dict.get("slot_id", ""))
-			if slot_id == "" or by_id.has(slot_id):
-				continue
-			by_id[slot_id] = slot_dict
 	var out: Array[Dictionary] = []
-	for slot_id in ["FL", "FR", "RL", "RR"]:
-		if by_id.has(slot_id):
-			out.append(by_id[slot_id])
+	for spec in ORIGINAL_WHEEL_SLOT_SPECS:
+		var slot := _infer_wheel_slot_from_original_locators(locators, spec)
+		if not slot.is_empty():
+			out.append(slot)
 	return out
 
 
-func _infer_wheel_slots_from_runtime_dummies(locators: Array[Dictionary]) -> Array[Dictionary]:
-	var specs := [
-		{"slot_id": "FL", "axle": "front", "side": "left", "hashes": [HP2_TIRE_DUMMY_FRONT_LEFT]},
-		{"slot_id": "FR", "axle": "front", "side": "right", "hashes": [HP2_TIRE_DUMMY_FRONT_RIGHT]},
-		{"slot_id": "RL", "axle": "rear", "side": "left", "hashes": [HP2_TIRE_DUMMY_REAR_LEFT, HP2_TIRE_DUMMY_REAR_LEFT_AUX]},
-		{"slot_id": "RR", "axle": "rear", "side": "right", "hashes": [HP2_TIRE_DUMMY_REAR_RIGHT, HP2_TIRE_DUMMY_REAR_RIGHT_AUX]},
-	]
-	var out: Array[Dictionary] = []
-	for spec in specs:
-		var matches := _runtime_dummy_matches(locators, spec)
+func _infer_wheel_slot_from_original_locators(locators: Array[Dictionary], spec: Dictionary) -> Dictionary:
+	var families: Array = spec.get("families", [])
+	for family_variant in families:
+		var family: Dictionary = family_variant
+		var matches := _slot_locator_matches(locators, spec, family.get("hashes", []))
 		if matches.is_empty():
 			continue
 		var primary_match: Dictionary = matches[0]
-		for locator in matches:
-			var hash := int(locator.get("hash_08", 0))
-			if hash == int(spec.get("hashes", [0])[0]):
-				primary_match = locator
-				break
 		var p := _average_locator_position(matches)
-		out.append({
+		return {
 			"slot_id": String(spec.get("slot_id", "")),
 			"axle": String(spec.get("axle", "")),
 			"side": String(spec.get("side", "")),
-			"source": "geometry_metadata_0x00034013_runtime_tire_dummies",
+			"source": "original_locator_family_%s" % String(family.get("source", "unknown")),
 			"position_ps2": p,
 			"position_godot": MathUtils.ps2_to_godot_vec3(p),
 			"primary_locator_hash": int(primary_match.get("hash_08", 0)),
 			"primary_locator_index": int(primary_match.get("index", -1)),
 			"locator_variant_index": int(primary_match.get("locator_variant_index", -1)),
 			"locator_orientation_index": int(primary_match.get("locator_orientation_index", -1)),
-		})
-	return out
+			"locator_hashes": Array(matches.map(func(locator: Dictionary) -> int: return int(locator.get("hash_08", 0)))),
+			"locator_indices": Array(matches.map(func(locator: Dictionary) -> int: return int(locator.get("index", -1)))),
+			"match_count": matches.size(),
+		}
+	return {}
 
 
-func _runtime_dummy_matches(locators: Array[Dictionary], spec: Dictionary) -> Array[Dictionary]:
+func _slot_locator_matches(locators: Array[Dictionary], spec: Dictionary, hashes: Array) -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
-	var hashes: Array = spec.get("hashes", [])
 	var side := String(spec.get("side", ""))
 	for locator in locators:
 		var hash := int(locator.get("hash_08", 0))
 		if not hashes.has(hash):
 			continue
 		var p: Vector3 = locator.get("position_ps2", Vector3.ZERO)
-		if side == "left" and p.y <= 0.0:
+		if side == "left" and p.y <= 0.1:
 			continue
-		if side == "right" and p.y >= 0.0:
+		if side == "right" and p.y >= -0.1:
 			continue
 		if absf(p.x) > 20.0 or absf(p.y) > 20.0 or absf(p.z) > 5.0:
 			continue
@@ -220,66 +362,3 @@ func _average_locator_position(locators: Array[Dictionary]) -> Vector3:
 		var p: Vector3 = locator.get("position_ps2", Vector3.ZERO)
 		total += p
 	return total / maxf(1.0, float(locators.size()))
-
-
-func _infer_wheel_slots_from_locator_positions(locators: Array[Dictionary]) -> Array[Dictionary]:
-	var candidates: Array[Dictionary] = []
-	for locator in locators:
-		var p: Vector3 = locator.get("position_ps2", Vector3.ZERO)
-		if absf(p.y) < 0.45 or p.z > 0.45:
-			continue
-		if absf(p.x) > 20.0 or absf(p.y) > 20.0 or absf(p.z) > 5.0:
-			continue
-		candidates.append(locator)
-	if candidates.size() < 4:
-		return []
-
-	var min_x := INF
-	var max_x := -INF
-	for locator in candidates:
-		var p: Vector3 = locator.get("position_ps2", Vector3.ZERO)
-		min_x = minf(min_x, p.x)
-		max_x = maxf(max_x, p.x)
-	var mid_x := (min_x + max_x) * 0.5
-
-	var slots: Array[Dictionary] = []
-	for axle in ["front", "rear"]:
-		for side in ["left", "right"]:
-			var best: Dictionary = {}
-			var best_score := -INF
-			for locator in candidates:
-				var p: Vector3 = locator.get("position_ps2", Vector3.ZERO)
-				if axle == "front" and p.x < mid_x:
-					continue
-				if axle == "rear" and p.x >= mid_x:
-					continue
-				if side == "left" and p.y < 0.0:
-					continue
-				if side == "right" and p.y >= 0.0:
-					continue
-				var axle_target := max_x if axle == "front" else min_x
-				var score := absf(p.y) * 10.0 - absf(p.z) - absf(p.x - axle_target) * 0.25
-				if score > best_score:
-					best = locator
-					best_score = score
-			if not best.is_empty():
-				var p: Vector3 = best.get("position_ps2", Vector3.ZERO)
-				slots.append({
-					"slot_id": _slot_id_from_axle_side(axle, side),
-					"axle": axle,
-					"side": side,
-					"source": "geometry_locator_0x00034013",
-					"position_ps2": p,
-					"position_godot": MathUtils.ps2_to_godot_vec3(p),
-					"locator_index": best.get("index", -1),
-					"primary_locator_hash": int(best.get("hash_08", 0)),
-					"locator_variant_index": int(best.get("locator_variant_index", -1)),
-					"locator_orientation_index": int(best.get("locator_orientation_index", -1)),
-				})
-	return slots
-
-
-func _slot_id_from_axle_side(axle: String, side: String) -> String:
-	if axle == "front":
-		return "FR" if side == "right" else "FL"
-	return "RR" if side == "right" else "RL"
