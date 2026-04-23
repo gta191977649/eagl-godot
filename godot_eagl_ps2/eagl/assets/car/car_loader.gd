@@ -234,11 +234,11 @@ func _resolved_visual_pivot_position_ps2(physics_position_ps2: Vector3, locator_
 
 
 func _body_visual_offset_ps2(config) -> Vector3:
-	if config != null and config.body_center_ps2 is Vector3:
-		# The GLOBALB 0x0F0..0x0F8 triplet is not the full visual body-root translation.
-		# Applying its X/Y components shifts the shell sideways relative to wheel hardpoints.
-		# Keep only the vertical component here until the 0x34020 node/channel graph is wired up.
-		return Vector3(0.0, 0.0, config.body_center_ps2.z)
+	if config != null:
+		# GEOMETRY.BIN body solids and locator records already share the same authored local space.
+		# Until the 0x34020 body-root graph is decoded, applying GLOBALB body-center values here only
+		# introduces extra shell drift relative to the original geometry-local wheel references.
+		return Vector3.ZERO
 	return Vector3.ZERO
 
 

@@ -534,7 +534,7 @@ func _update_visuals(delta: float) -> void:
 		var steer_node := _wheel_visuals.get(slot_id, null) as Node3D
 		var roll_node := _wheel_roll_visuals.get(slot_id, null) as Node3D
 		if suspension_node != null and pivot_node != null:
-			suspension_node.position = Vector3(0.0, _current_visual_suspension_offset(slot_id, wheel), 0.0)
+			suspension_node.position = _current_visual_wheel_offset_vehicle(slot_id, wheel)
 		if steer_node != null:
 			var steer_rotation := steer_node.rotation
 			steer_rotation.y = _visual_steering_angle(wheel)
@@ -555,7 +555,11 @@ func _current_wheel_center_vehicle(wheel: VehicleWheel3D) -> Vector3:
 
 func _current_visual_wheel_center_vehicle(slot_id: String, wheel: VehicleWheel3D) -> Vector3:
 	var pivot := _current_wheel_pivot_vehicle(slot_id)
-	return pivot + Vector3.UP * _current_visual_suspension_offset(slot_id, wheel)
+	return pivot + _current_visual_wheel_offset_vehicle(slot_id, wheel)
+
+
+func _current_visual_wheel_offset_vehicle(slot_id: String, wheel: VehicleWheel3D) -> Vector3:
+	return _current_wheel_center_vehicle(wheel) - _current_wheel_pivot_vehicle(slot_id)
 
 
 func _current_visual_suspension_offset(slot_id: String, wheel: VehicleWheel3D) -> float:
@@ -670,19 +674,28 @@ func _rebuild_debug_mesh() -> void:
 		if wheel == null:
 			continue
 		var origin := _current_wheel_pivot_vehicle(slot_id)
-		var center := _current_visual_wheel_center_vehicle(slot_id, wheel)
+		var visual_center := _current_visual_wheel_center_vehicle(slot_id, wheel)
+		var physical_center := _current_wheel_center_vehicle(wheel)
 		var contact := to_local(wheel.get_contact_point())
 		_debug_mesh.surface_set_color(Color(0.15, 0.9, 0.95, 0.95))
 		_debug_mesh.surface_add_vertex(origin)
-		_debug_mesh.surface_add_vertex(center)
+		_debug_mesh.surface_add_vertex(visual_center)
+		_debug_mesh.surface_set_color(Color(1.0, 0.35, 0.95, 0.9))
+		_debug_mesh.surface_add_vertex(visual_center)
+		_debug_mesh.surface_add_vertex(physical_center)
 		_debug_mesh.surface_set_color(Color(1.0, 0.75, 0.2, 0.95))
-		_debug_mesh.surface_add_vertex(center + Vector3.LEFT * 0.08)
-		_debug_mesh.surface_add_vertex(center + Vector3.RIGHT * 0.08)
-		_debug_mesh.surface_add_vertex(center + Vector3.UP * 0.08)
-		_debug_mesh.surface_add_vertex(center + Vector3.DOWN * 0.08)
+		_debug_mesh.surface_add_vertex(visual_center + Vector3.LEFT * 0.08)
+		_debug_mesh.surface_add_vertex(visual_center + Vector3.RIGHT * 0.08)
+		_debug_mesh.surface_add_vertex(visual_center + Vector3.UP * 0.08)
+		_debug_mesh.surface_add_vertex(visual_center + Vector3.DOWN * 0.08)
+		_debug_mesh.surface_set_color(Color(0.9, 0.95, 1.0, 0.9))
+		_debug_mesh.surface_add_vertex(physical_center + Vector3.LEFT * 0.06)
+		_debug_mesh.surface_add_vertex(physical_center + Vector3.RIGHT * 0.06)
+		_debug_mesh.surface_add_vertex(physical_center + Vector3.UP * 0.06)
+		_debug_mesh.surface_add_vertex(physical_center + Vector3.DOWN * 0.06)
 		if wheel.is_in_contact():
 			_debug_mesh.surface_set_color(Color(0.25, 1.0, 0.3, 0.95))
-			_debug_mesh.surface_add_vertex(center)
+			_debug_mesh.surface_add_vertex(physical_center)
 			_debug_mesh.surface_add_vertex(contact)
 			_debug_mesh.surface_add_vertex(contact + Vector3.LEFT * 0.06)
 			_debug_mesh.surface_add_vertex(contact + Vector3.RIGHT * 0.06)

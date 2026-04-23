@@ -7,6 +7,7 @@ const MathUtils = preload("res://eagl/utils/math_utils.gd")
 const CHUNK_CAR_METADATA := 0x00034013
 const CHUNK_CAR_ASSEMBLY_ROOT := 0x80034020
 const CHUNK_CAR_ASSEMBLY_HEADER := 0x00034021
+const CHUNK_CAR_ASSEMBLY_ALIGN := 0x00034026
 const CHUNK_CAR_PART_BUNDLE := 0x00034030
 const HP2_TIRE_DUMMY_FRONT_LEFT := 0xACEC665C
 const HP2_TIRE_DUMMY_FRONT_RIGHT := 0x4AE7F96F
@@ -153,10 +154,14 @@ func _parse_assembly_summary(chunks: Array[Dictionary], bundle: PackedByteArray)
 
 func _parse_assembly_tables(chunks: Array[Dictionary], bundle: PackedByteArray) -> Dictionary:
 	var root := {}
+	var root_index := -1
+	var chunk_index := 0
 	for chunk in chunks:
 		if int(chunk.get("id", 0)) == CHUNK_CAR_ASSEMBLY_ROOT:
 			root = chunk
+			root_index = chunk_index
 			break
+		chunk_index += 1
 	if root.is_empty():
 		return {}
 
@@ -193,8 +198,23 @@ func _parse_assembly_tables(chunks: Array[Dictionary], bundle: PackedByteArray) 
 		var payload := _payload(bundle, graph_chunk)
 		out["graph_header_words"] = _parse_assembly_u32_words(payload, 0x40)
 		out["graph_payload_size"] = payload.size()
+		if payload.size() >= 0x70:
+			out["body_group_root_word_offsets"] = [
+				Binary.u32(payload, 0x34),
+				Binary.u32(payload, 0x4C),
+				Binary.u32(payload, 0x64),
+			]
+			out["body_group_root_byte_offsets"] = [
+				Binary.u32(payload, 0x34) * 4,
+				Binary.u32(payload, 0x4C) * 4,
+				Binary.u32(payload, 0x64) * 4,
+			]
 
-	var align_chunk := _child_with_id(root, 0x00034026)
+	var align_chunk := _child_with_id(root, CHUNK_CAR_ASSEMBLY_ALIGN)
+	if align_chunk.is_empty() and root_index >= 0 and root_index + 1 < chunks.size():
+		var sibling: Dictionary = chunks[root_index + 1]
+		if int(sibling.get("id", 0)) == CHUNK_CAR_ASSEMBLY_ALIGN:
+			align_chunk = sibling
 	if not align_chunk.is_empty():
 		out["align_payload"] = _parse_assembly_u32_words(_payload(bundle, align_chunk), 0x10)
 
