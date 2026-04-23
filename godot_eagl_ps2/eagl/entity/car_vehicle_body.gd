@@ -209,6 +209,8 @@ func _apply_wheel_setup() -> void:
 		wheel.engine_force = 0.0
 		wheel.brake = 0.0
 		wheel.steering = 0.0
+
+
 func _cache_visual_wheel_slots(car_visual: Node3D) -> void:
 	var wheel_slots: Array = car_visual.get_meta("eagl_wheel_slots", [])
 	for slot in wheel_slots:
@@ -216,9 +218,7 @@ func _cache_visual_wheel_slots(car_visual: Node3D) -> void:
 		var slot_id := String(slot_dict.get("slot_id", ""))
 		if slot_id == "":
 			continue
-		var position_ps2 = slot_dict.get("position_ps2", Vector3.ZERO)
-		if position_ps2 is Vector3:
-			_visual_wheel_slots[slot_id] = position_ps2
+		_visual_wheel_slots[slot_id] = slot_dict.duplicate(true)
 
 
 func _apply_visual_wheel_slot_overrides() -> void:
@@ -534,7 +534,11 @@ func _update_visuals(delta: float) -> void:
 		var steer_node := _wheel_visuals.get(slot_id, null) as Node3D
 		var roll_node := _wheel_roll_visuals.get(slot_id, null) as Node3D
 		if suspension_node != null and pivot_node != null:
-			suspension_node.position = _current_visual_wheel_offset_vehicle(slot_id, wheel)
+			# HP2 keeps the authored wheel attachment on the pivot itself and only feeds
+			# the live suspension travel back into the child node.
+			suspension_node.position = VehicleBodyConfigAdapter.visual_space_from_vehicle(
+				_current_visual_wheel_offset_vehicle(slot_id, wheel)
+			)
 		if steer_node != null:
 			var steer_rotation := steer_node.rotation
 			steer_rotation.y = _visual_steering_angle(wheel)
@@ -559,7 +563,16 @@ func _current_visual_wheel_center_vehicle(slot_id: String, wheel: VehicleWheel3D
 
 
 func _current_visual_wheel_offset_vehicle(slot_id: String, wheel: VehicleWheel3D) -> Vector3:
-	return _current_wheel_center_vehicle(wheel) - _current_wheel_pivot_vehicle(slot_id)
+	var runtime_offset := _current_wheel_center_vehicle(wheel) - _wheel_attachment_rest_vehicle(slot_id, wheel)
+	return Vector3(0.0, runtime_offset.y, 0.0)
+
+
+func _wheel_attachment_rest_vehicle(slot_id: String, wheel: VehicleWheel3D) -> Vector3:
+	var wheel_data: Dictionary = _vehicle_setup.get("wheels", {}).get(slot_id, {})
+	var wheel_center_rest: Variant = wheel_data.get("wheel_center_rest", null)
+	if wheel_center_rest is Vector3:
+		return wheel_center_rest
+	return wheel.position - Vector3.UP * wheel.wheel_rest_length
 
 
 func _current_visual_suspension_offset(slot_id: String, wheel: VehicleWheel3D) -> float:
