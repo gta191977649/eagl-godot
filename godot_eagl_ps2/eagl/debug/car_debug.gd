@@ -785,12 +785,23 @@ func _print_vehicle_debug_info(visual: Node3D) -> void:
 	var wheel_pivots: PackedStringArray = visual.get_meta("eagl_wheel_pivot_names", PackedStringArray())
 	var dummies: PackedStringArray = visual.get_meta("eagl_dummy_names", PackedStringArray())
 	var wheel_selection: Dictionary = visual.get_meta("eagl_wheel_visual_selection", {})
-	print("EAGL vehicle loaded: car=%s body_variant=%s source=%s body_meshes=%d" % [
+	print("EAGL vehicle loaded: car=%s body_variant=%s source=%s body_meshes=%d textures=%d textured_surfaces=%d fallback_surfaces=%d" % [
 		String(visual.get_meta("eagl_car_id", "")),
 		String(visual.get_meta("eagl_primary_body_variant", "")),
 		String(visual.get_meta("eagl_source_path", "")),
 		int(visual.get_meta("eagl_body_mesh_count", 0)),
+		int(visual.get_meta("eagl_texture_count", 0)),
+		int(visual.get_meta("eagl_textured_surface_count", 0)),
+		int(visual.get_meta("eagl_fallback_surface_count", 0)),
 	])
+	var texture_source := String(visual.get_meta("eagl_texture_source_path", ""))
+	if texture_source != "":
+		print("EAGL vehicle textures: source=%s skipped=%d uv_surfaces=%d missing_uv=%d" % [
+			texture_source,
+			int(visual.get_meta("eagl_skipped_texture_count", 0)),
+			int(visual.get_meta("eagl_uv_surface_count", 0)),
+			int(visual.get_meta("eagl_textured_missing_uv_surface_count", 0)),
+		])
 	print("EAGL vehicle assembly: body_groups=%s wheel_groups=%s brake_groups=%s variant=%s" % [
 		assembly_summary.get("body_group_count", "?"),
 		assembly_summary.get("wheel_group_count", "?"),

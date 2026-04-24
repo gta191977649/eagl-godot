@@ -5,6 +5,8 @@ const Binary := preload("res://eagl/platforms/ps2/ps2_binary_reader.gd")
 
 var textures: Dictionary = {}
 var texture_info: Dictionary = {}
+var texture_aliases: Dictionary = {}
+var texture_name_hashes: Dictionary = {}
 var decoded_count := 0
 var skipped_count := 0
 var errors: Array[String] = []
@@ -18,27 +20,56 @@ func load_for_track(files: Dictionary) -> void:
 			_read_ps2_tpk(path)
 
 
+func load_for_car(files: Dictionary, required_hashes: Array = [], required_names: Array = []) -> void:
+	clear()
+	var wanted_hashes := _wanted_hash_dictionary(required_hashes)
+	var wanted_names := _wanted_name_dictionary(required_names)
+	for key in ["texture_car", "texture", "textures"]:
+		var path: String = files.get(key, "")
+		if path != "" and FileAccess.file_exists(path):
+			_read_ps2_tpk(path, wanted_hashes, wanted_names)
+
+
 func clear() -> void:
 	textures.clear()
 	texture_info.clear()
+	texture_aliases.clear()
+	texture_name_hashes.clear()
 	decoded_count = 0
 	skipped_count = 0
 	errors.clear()
 
 
 func has_texture(texture_hash: int) -> bool:
-	return textures.has(texture_hash)
+	return textures.has(_resolved_texture_hash(texture_hash))
 
 
 func get_texture(texture_hash: int):
-	return textures.get(texture_hash)
+	return textures.get(_resolved_texture_hash(texture_hash))
 
 
 func get_info(texture_hash: int) -> Dictionary:
-	return texture_info.get(texture_hash, {})
+	return texture_info.get(_resolved_texture_hash(texture_hash), {})
 
 
-func _read_ps2_tpk(path: String) -> void:
+func get_hash_for_name(texture_name: String) -> int:
+	return int(texture_name_hashes.get(texture_name.strip_edges().to_upper(), 0))
+
+
+func set_texture_alias(source_hash: int, target_hash: int) -> void:
+	if source_hash == 0 or target_hash == 0 or source_hash == target_hash:
+		return
+	if not textures.has(target_hash):
+		return
+	texture_aliases[source_hash] = target_hash
+
+
+func _resolved_texture_hash(texture_hash: int) -> int:
+	var target_hash := int(texture_aliases.get(texture_hash, texture_hash))
+	return target_hash
+
+
+func _read_ps2_tpk(path: String, wanted_hashes: Dictionary = {}, wanted_names: Dictionary = {}) -> void:
 	var data := _read_file(path)
 	if data.is_empty():
 		_add_error("empty texture file %s" % path)
@@ -61,12 +92,16 @@ func _read_ps2_tpk(path: String) -> void:
 	var count := int(entries.size() / 0xA4)
 	for index in range(count):
 		var entry := entries.slice(index * 0xA4, index * 0xA4 + 0xA4)
-		_decode_entry(path, data, data_base, entry)
+		_decode_entry(path, data, data_base, entry, wanted_hashes, wanted_names)
 
 
-func _decode_entry(path: String, data: PackedByteArray, data_base: int, entry: PackedByteArray) -> void:
+func _decode_entry(path: String, data: PackedByteArray, data_base: int, entry: PackedByteArray, wanted_hashes: Dictionary = {}, wanted_names: Dictionary = {}) -> void:
 	var name := _entry_name(entry)
 	var texture_hash := Binary.u32(entry, 0x20)
+	var has_filter := not wanted_hashes.is_empty() or not wanted_names.is_empty()
+	if has_filter and not wanted_hashes.has(texture_hash) and not wanted_names.has(name.to_upper()):
+		return
+
 	var width := Binary.u16(entry, 0x24)
 	var height := Binary.u16(entry, 0x26)
 	var bit_depth := Binary.u8(entry, 0x28)
@@ -84,30 +119,37 @@ func _decode_entry(path: String, data: PackedByteArray, data_base: int, entry: P
 	var alpha_bits := Binary.u8(entry, 0x76)
 	var alpha_fix := Binary.u8(entry, 0x77)
 
-	if name == "" or texture_hash == 0 or width <= 0 or height <= 0 or data_size <= 0 or palette_size <= 0:
+	if name == "" or texture_hash == 0 or width <= 0 or height <= 0 or data_size <= 0:
 		skipped_count += 1
 		return
 
 	var image_start := data_base + data_offset
 	var palette_start := data_base + palette_offset
-	if image_start + data_size > data.size() or palette_start + palette_size > data.size():
+	if image_start + data_size > data.size() or (palette_size > 0 and palette_start + palette_size > data.size()):
 		skipped_count += 1
 		_add_error("texture %s points outside %s" % [name, path])
 		return
 
 	var indexed := data.slice(image_start, image_start + data_size)
-	var palette := data.slice(palette_start, palette_start + palette_size)
-	var rgba := _decode_indexed_texture(
-		width,
-		height,
-		indexed,
-		palette,
-		bit_depth,
-		shift_width,
-		shift_height,
-		pixel_storage_mode,
-		is_swizzled
-	)
+	var rgba := PackedByteArray()
+	if bit_depth == 32 and palette_size == 0:
+		rgba = _decode_rgba_texture(width, height, indexed)
+	else:
+		if palette_size <= 0:
+			skipped_count += 1
+			return
+		var palette := data.slice(palette_start, palette_start + palette_size)
+		rgba = _decode_indexed_texture(
+			width,
+			height,
+			indexed,
+			palette,
+			bit_depth,
+			shift_width,
+			shift_height,
+			pixel_storage_mode,
+			is_swizzled
+		)
 	if rgba.is_empty():
 		skipped_count += 1
 		_add_error("could not decode texture %s in %s" % [name, path])
@@ -138,7 +180,23 @@ func _decode_entry(path: String, data: PackedByteArray, data_base: int, entry: P
 		"alpha_fix": alpha_fix,
 		"is_any_semitransparency": semitransparency,
 	}
+	texture_name_hashes[name.to_upper()] = texture_hash
 	decoded_count += 1
+
+
+func _decode_rgba_texture(width: int, height: int, image: PackedByteArray) -> PackedByteArray:
+	if image.size() < width * height * 4:
+		return PackedByteArray()
+	var rgba := PackedByteArray()
+	for y in range(height - 1, -1, -1):
+		var row := y * width * 4
+		for x in range(width):
+			var offset := row + x * 4
+			rgba.append(image[offset])
+			rgba.append(image[offset + 1])
+			rgba.append(image[offset + 2])
+			rgba.append(_decode_ps2_alpha(image[offset + 3]))
+	return rgba
 
 
 func _decode_indexed_texture(
@@ -535,6 +593,24 @@ func _entry_name(entry: PackedByteArray) -> String:
 	while end < 0x20 and end < entry.size() and entry[end] != 0:
 		end += 1
 	return Binary.ascii(entry, 0x08, end).strip_edges()
+
+
+func _wanted_hash_dictionary(required_hashes: Array) -> Dictionary:
+	var wanted := {}
+	for value in required_hashes:
+		var texture_hash := int(value)
+		if texture_hash != 0:
+			wanted[texture_hash] = true
+	return wanted
+
+
+func _wanted_name_dictionary(required_names: Array) -> Dictionary:
+	var wanted := {}
+	for value in required_names:
+		var name := String(value).strip_edges().to_upper()
+		if name != "":
+			wanted[name] = true
+	return wanted
 
 
 func _read_file(path: String) -> PackedByteArray:

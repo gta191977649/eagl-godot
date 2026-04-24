@@ -144,7 +144,9 @@ func _uv_array(block: Dictionary, vertex_count: int) -> PackedVector2Array:
 		return out
 	for i in range(vertex_count):
 		var uv: Vector2 = texcoords[i]
-		out.append(Vector2(uv.x, 1.0 - uv.y))
+		var u := 1.0 - uv.x if bool(block.get("resolved_texture_mirror_u", false)) else uv.x
+		var v := uv.y if bool(block.get("resolved_texture_preserve_v", false)) else 1.0 - uv.y
+		out.append(Vector2(u, v))
 	return out
 
 
@@ -305,14 +307,19 @@ func _decode_vif_color_5551(value: int) -> Color:
 
 func _texture_hash_for_block(obj: Dictionary, block_index: int) -> int:
 	var hashes: Array = obj.get("texture_hashes", [])
-	if hashes.is_empty():
-		return 0
 	var blocks: Array = obj.get("blocks", [])
 	if block_index < blocks.size():
 		var block: Dictionary = blocks[block_index]
+		var resolved_texture_hash := int(block.get("resolved_texture_hash", 0))
+		if resolved_texture_hash != 0:
+			return resolved_texture_hash
+		if hashes.is_empty():
+			return 0
 		var texture_index := int(block.get("texture_index", -1))
 		if texture_index >= 0 and texture_index < hashes.size():
 			return int(hashes[texture_index])
+	if hashes.is_empty():
+		return 0
 	return int(hashes[mini(block_index, hashes.size() - 1)])
 
 

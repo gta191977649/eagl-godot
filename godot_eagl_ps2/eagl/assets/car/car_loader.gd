@@ -4,14 +4,24 @@ extends RefCounted
 const CarParserPS2Script = preload("res://eagl/assets/car/car_parser_ps2.gd")
 const MeshBuilderScript = preload("res://eagl/rendering/mesh_builder.gd")
 const MathUtils = preload("res://eagl/utils/math_utils.gd")
+const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_bank.gd")
 
 const SLOT_IDS := ["FL", "FR", "RL", "RR"]
 const TIRE_DETAIL_SUFFIXES := ["A", "B", "C"]
+const CAR_WINDOW_MATERIAL_HASHES := [
+	0x7b220ddf,
+	0xe7e4ef49,
+	0x1b0763a0,
+	0x60f8b13c,
+	0x4cdebfca,
+	0x0ab88f5d,
+]
 
 var parser = CarParserPS2Script.new()
 var mesh_builder = MeshBuilderScript.new()
 var root_path := ""
 var last_error := ""
+var _texture_bank_cache: Dictionary = {}
 
 
 func _init(_root_path: String = "") -> void:
@@ -33,10 +43,14 @@ func load_asset(car_id: String):
 			last_error = "Could not resolve car model for %s" % car_id
 		push_error(last_error)
 		return null
-	return parser.parse({
+	var files := {
 		"car_id": _normalized_car_id(car_id),
 		"model": model_path,
-	})
+		"texture_car": _resolve_car_texture_path(model_path),
+	}
+	var asset = parser.parse(files)
+	asset.texture_bank = _load_texture_bank_for_asset(asset)
+	return asset
 
 
 func read_binary_car_name(car_id: String) -> String:
@@ -50,7 +64,7 @@ func read_binary_car_name(car_id: String) -> String:
 
 
 func build_scene(asset, config = null) -> Node3D:
-	mesh_builder.texture_bank = null
+	mesh_builder.texture_bank = asset.texture_bank
 	mesh_builder.generate_lods = false
 	mesh_builder.reset()
 
@@ -59,8 +73,11 @@ func build_scene(asset, config = null) -> Node3D:
 	root.set_meta("eagl_car_id", asset.car_id)
 	root.set_meta("eagl_binary_car_name", String(asset.metadata.get("binary_car_name", asset.car_id)))
 	root.set_meta("eagl_source_path", asset.source_path)
+	root.set_meta("eagl_texture_source_path", String(asset.source_files.get("texture_car", "")))
 	root.set_meta("eagl_assembly_summary", asset.assembly_summary)
 	root.set_meta("eagl_wheel_slots", asset.wheel_slots.duplicate(true))
+	root.set_meta("eagl_texture_count", asset.texture_bank.decoded_count if asset.texture_bank != null else 0)
+	root.set_meta("eagl_skipped_texture_count", asset.texture_bank.skipped_count if asset.texture_bank != null else 0)
 	var primary_body_variant := _pick_primary_body_variant(asset)
 	root.set_meta("eagl_primary_body_variant", primary_body_variant)
 	if config != null:
@@ -114,6 +131,10 @@ func build_scene(asset, config = null) -> Node3D:
 	root.set_meta("eagl_body_mesh_count", body_root.get_child_count())
 	root.set_meta("eagl_wheel_pivot_names", _child_name_list(wheels_root))
 	root.set_meta("eagl_dummy_names", _child_name_list(dummies_root))
+	root.set_meta("eagl_textured_surface_count", mesh_builder.textured_surfaces)
+	root.set_meta("eagl_fallback_surface_count", mesh_builder.fallback_surfaces)
+	root.set_meta("eagl_uv_surface_count", mesh_builder.uv_surfaces)
+	root.set_meta("eagl_textured_missing_uv_surface_count", mesh_builder.textured_missing_uv_surfaces)
 	return root
 
 
@@ -169,7 +190,8 @@ func _build_runtime_pivots(root: Node3D, wheels_root: Node3D, dummies_root: Node
 		var brake_template: MeshInstance3D = _brake_template_for_slot(brake_meshes, slot_id)
 		if brake_template != null:
 			var brake_node := _duplicate_mesh_instance(brake_template, "Brake")
-			steer_root.add_child(brake_node)
+			brake_node.transform = _canonical_wheel_part_transform(brake_template)
+			roll_root.add_child(brake_node)
 
 		var dummy := Node3D.new()
 		dummy.name = "%s_PIVOT" % slot_id
@@ -529,6 +551,300 @@ func _pick_primary_body_variant(asset) -> String:
 	return ""
 
 
+func _load_texture_bank_for_asset(asset):
+	var texture_path := String(asset.source_files.get("texture_car", ""))
+	if texture_path == "" or not FileAccess.file_exists(texture_path):
+		if texture_path != "":
+			asset.add_warning("Car texture file not found: %s" % texture_path)
+		return null
+
+	var required_hashes := _collect_required_texture_hashes(asset)
+	var required_names := _collect_required_texture_names(asset)
+	var cache_key := "%s:%s:%s" % [
+		texture_path,
+		_texture_hash_cache_suffix(required_hashes),
+		",".join(PackedStringArray(required_names)),
+	]
+	if _texture_bank_cache.has(cache_key):
+		return _texture_bank_cache[cache_key]
+
+	var texture_bank = PS2TextureBankScript.new()
+	texture_bank.load_for_car(asset.source_files, required_hashes, required_names)
+	_install_car_texture_aliases(asset, texture_bank)
+	for message in texture_bank.errors:
+		asset.add_warning(message)
+	_texture_bank_cache[cache_key] = texture_bank
+	return texture_bank
+
+
+func _collect_required_texture_hashes(asset) -> Array[int]:
+	var seen := {}
+	var hashes: Array[int] = []
+	for obj in asset.objects:
+		var object_dict: Dictionary = obj
+		for value in object_dict.get("texture_hashes", []):
+			var texture_hash := int(value)
+			if texture_hash == 0 or seen.has(texture_hash):
+				continue
+			seen[texture_hash] = true
+			hashes.append(texture_hash)
+	return hashes
+
+
+func _collect_required_texture_names(asset) -> Array[String]:
+	var car_id := String(asset.car_id).to_upper()
+	var names: Array[String] = ["DASHWINDOW"]
+	names.append_array(_candidate_texture_names(car_id, "HEADLIGHT"))
+	names.append_array(_candidate_texture_names(car_id, "BRAKELIGHT"))
+	return _unique_strings(names)
+
+
+func _texture_hash_cache_suffix(texture_hashes: Array[int]) -> String:
+	var parts: Array[String] = []
+	for texture_hash in texture_hashes:
+		parts.append("%08x" % int(texture_hash))
+	parts.sort()
+	return ",".join(parts)
+
+
+func _install_car_texture_aliases(asset, texture_bank) -> void:
+	if texture_bank == null:
+		return
+	var car_id := String(asset.car_id).to_upper()
+	for obj in asset.objects:
+		var object_dict: Dictionary = obj
+		var object_name := String(object_dict.get("name", "")).to_upper()
+		if not _is_body_variant_name(object_name, car_id):
+			continue
+		var blocks: Array = object_dict.get("blocks", [])
+		var bounds := _object_bounds_ps2(object_dict)
+		if bounds.is_empty():
+			continue
+		for block_index in range(blocks.size()):
+			var block_dict: Dictionary = blocks[block_index]
+			var source_hash := _texture_hash_for_block_dict(object_dict, block_dict)
+			if source_hash == 0 or texture_bank.has_texture(source_hash):
+				continue
+			var alias_name := _alias_texture_name_for_block(car_id, object_dict, block_dict, bounds)
+			if alias_name == "":
+				continue
+			var block_bounds := _block_bounds_ps2(object_dict, block_dict)
+			var target_name := _resolved_alias_texture_name(texture_bank, car_id, alias_name, block_bounds)
+			if target_name == "":
+				continue
+			var target_hash := int(texture_bank.get_hash_for_name(target_name))
+			if target_hash != 0:
+				block_dict["resolved_texture_hash"] = target_hash
+				block_dict["resolved_texture_name"] = target_name
+				block_dict["resolved_texture_alias"] = alias_name
+				block_dict["source_texture_hash"] = source_hash
+				_apply_resolved_texture_uv_flags(block_dict, alias_name, target_name, block_bounds)
+				blocks[block_index] = block_dict
+		object_dict["blocks"] = blocks
+
+
+func _texture_hash_for_block_dict(obj: Dictionary, block: Dictionary) -> int:
+	var hashes: Array = obj.get("texture_hashes", [])
+	var texture_index := int(block.get("texture_index", -1))
+	if texture_index >= 0 and texture_index < hashes.size():
+		return int(hashes[texture_index])
+	return 0
+
+
+func _alias_texture_name_for_block(car_id: String, obj: Dictionary, block: Dictionary, object_bounds: Dictionary) -> String:
+	var source_hash := _texture_hash_for_block_dict(obj, block)
+	if CAR_WINDOW_MATERIAL_HASHES.has(source_hash):
+		return "DASHWINDOW"
+
+	var block_bounds := _block_bounds_ps2(obj, block)
+	if block_bounds.is_empty():
+		return ""
+
+	var object_min: Vector3 = object_bounds["min"]
+	var object_max: Vector3 = object_bounds["max"]
+	var block_min: Vector3 = block_bounds["min"]
+	var block_max: Vector3 = block_bounds["max"]
+	var object_size := (object_max - object_min).abs()
+	var block_size := (block_max - block_min).abs()
+	var front_limit := object_min.x + maxf(object_size.x * 0.12, 0.18)
+	var rear_limit := object_max.x - maxf(object_size.x * 0.12, 0.18)
+	var low_limit := object_min.z + maxf(object_size.z * 0.45, 0.28)
+	var front_light_height_limit := object_min.z + maxf(object_size.z * 0.72, 0.70)
+	var light_length_limit := maxf(object_size.x * 0.18, 0.32)
+	var light_width_limit := maxf(object_size.y * 0.55, 0.55)
+
+	if block_size.x <= light_length_limit and block_size.y <= light_width_limit and block_min.x <= front_limit and block_max.z <= front_light_height_limit:
+		return "HEADLIGHT"
+	if block_size.x <= light_length_limit and block_size.y <= light_width_limit and block_max.x >= rear_limit and block_max.z <= low_limit:
+		return "BRAKELIGHT"
+	return ""
+
+
+func _resolved_alias_texture_name(texture_bank, car_id: String, alias_name: String, block_bounds: Dictionary) -> String:
+	if alias_name == "DASHWINDOW":
+		return alias_name if int(texture_bank.get_hash_for_name(alias_name)) != 0 else ""
+	var candidates := _candidate_texture_names_for_block(car_id, alias_name, block_bounds)
+	for candidate in candidates:
+		if int(texture_bank.get_hash_for_name(candidate)) != 0:
+			return candidate
+	return ""
+
+
+func _candidate_texture_names_for_block(car_id: String, semantic: String, block_bounds: Dictionary) -> Array[String]:
+	var default_name := "%s_%s" % [car_id, semantic]
+	var side_prefixes := _side_texture_prefixes(block_bounds)
+	var candidates: Array[String] = [default_name]
+	for side_prefix in side_prefixes:
+		for suffix in _side_texture_suffixes(side_prefix):
+			candidates.append("%s_%s_%s" % [car_id, semantic, suffix])
+	candidates.append_array(_candidate_texture_names(car_id, semantic))
+	return _unique_strings(candidates)
+
+
+func _side_texture_prefixes(block_bounds: Dictionary) -> Array[String]:
+	if block_bounds.is_empty():
+		var fallback: Array[String] = ["LEFT", "RIGHT"]
+		return fallback
+	var block_min: Vector3 = block_bounds["min"]
+	var block_max: Vector3 = block_bounds["max"]
+	var center_y := (block_min.y + block_max.y) * 0.5
+	var side_prefixes: Array[String] = []
+	if center_y > 0.0:
+		side_prefixes.append("RIGHT")
+		side_prefixes.append("LEFT")
+	else:
+		side_prefixes.append("LEFT")
+		side_prefixes.append("RIGHT")
+	return side_prefixes
+
+
+func _side_texture_suffixes(side_prefix: String) -> Array[String]:
+	match side_prefix:
+		"LEFT":
+			var left_suffixes: Array[String] = ["LEFT", "LEF"]
+			return left_suffixes
+		"RIGHT":
+			var right_suffixes: Array[String] = ["RIGHT", "RIGH", "RIG"]
+			return right_suffixes
+	var empty: Array[String] = []
+	return empty
+
+
+func _apply_resolved_texture_uv_flags(block: Dictionary, alias_name: String, target_name: String, block_bounds: Dictionary) -> void:
+	if alias_name != "HEADLIGHT" and alias_name != "BRAKELIGHT":
+		return
+	if _light_texture_has_side_suffix(target_name):
+		return
+	if block_bounds.is_empty():
+		return
+	var block_min: Vector3 = block_bounds["min"]
+	var block_max: Vector3 = block_bounds["max"]
+	var center_y := (block_min.y + block_max.y) * 0.5
+	if absf(center_y) <= 0.0001:
+		return
+	block["resolved_texture_mirror_u"] = center_y > 0.0
+
+
+func _light_texture_has_side_suffix(texture_name: String) -> bool:
+	var name := texture_name.to_upper()
+	return name.ends_with("_LEFT") or name.ends_with("_LEF") or name.ends_with("_RIGHT") or name.ends_with("_RIGH") or name.ends_with("_RIG")
+
+
+func _candidate_texture_names(car_id: String, semantic: String) -> Array[String]:
+	if car_id == "":
+		var empty_car_names: Array[String] = []
+		return empty_car_names
+	match semantic:
+		"HEADLIGHT":
+			var headlight_names: Array[String] = [
+				"%s_HEADLIGHT" % car_id,
+				"%s_HEADLIGHT_LEFT" % car_id,
+				"%s_HEADLIGHT_LEF" % car_id,
+				"%s_HEADLIGHT_RIGH" % car_id,
+				"%s_HEADLIGHT_RIG" % car_id,
+			]
+			return headlight_names
+		"BRAKELIGHT":
+			var brakelight_names: Array[String] = [
+				"%s_BRAKELIGHT" % car_id,
+				"%s_BRAKELIGHT_LEFT" % car_id,
+				"%s_BRAKELIGHT_LEF" % car_id,
+				"%s_BRAKELIGHT_RIGH" % car_id,
+				"%s_BRAKELIGHT_RIG" % car_id,
+			]
+			return brakelight_names
+	var empty_semantic_names: Array[String] = []
+	return empty_semantic_names
+
+
+func _unique_strings(values: Array[String]) -> Array[String]:
+	var seen := {}
+	var out: Array[String] = []
+	for value in values:
+		var key := String(value).strip_edges().to_upper()
+		if key == "" or seen.has(key):
+			continue
+		seen[key] = true
+		out.append(key)
+	return out
+
+
+func _is_body_variant_name(object_name: String, car_id: String) -> bool:
+	if car_id == "":
+		return false
+	for suffix in ["_A", "_B", "_C", "_D"]:
+		if object_name == "%s%s" % [car_id, suffix]:
+			return true
+	return false
+
+
+func _object_bounds_ps2(obj: Dictionary) -> Dictionary:
+	var out := {}
+	var blocks: Array = obj.get("blocks", [])
+	for block in blocks:
+		var block_bounds := _block_bounds_ps2(obj, block)
+		if block_bounds.is_empty():
+			continue
+		out = _merge_bounds(out, block_bounds)
+	return out
+
+
+func _block_bounds_ps2(obj: Dictionary, block: Dictionary) -> Dictionary:
+	var run: Dictionary = block.get("run", {})
+	var vertices: Array = run.get("vertices", [])
+	if vertices.is_empty():
+		return {}
+	var transform_rows: Array = obj.get("transform", [])
+	var min_value := Vector3(INF, INF, INF)
+	var max_value := Vector3(-INF, -INF, -INF)
+	for vertex in vertices:
+		var p: Vector3 = MathUtils.transform_point_rows(vertex, transform_rows)
+		min_value = Vector3(
+			minf(min_value.x, p.x),
+			minf(min_value.y, p.y),
+			minf(min_value.z, p.z)
+		)
+		max_value = Vector3(
+			maxf(max_value.x, p.x),
+			maxf(max_value.y, p.y),
+			maxf(max_value.z, p.z)
+		)
+	return {"min": min_value, "max": max_value}
+
+
+func _merge_bounds(a: Dictionary, b: Dictionary) -> Dictionary:
+	if a.is_empty():
+		return b.duplicate()
+	var a_min: Vector3 = a["min"]
+	var a_max: Vector3 = a["max"]
+	var b_min: Vector3 = b["min"]
+	var b_max: Vector3 = b["max"]
+	return {
+		"min": Vector3(minf(a_min.x, b_min.x), minf(a_min.y, b_min.y), minf(a_min.z, b_min.z)),
+		"max": Vector3(maxf(a_max.x, b_max.x), maxf(a_max.y, b_max.y), maxf(a_max.z, b_max.z)),
+	}
+
+
 func _resolve_car_model_path(car_id: String) -> String:
 	var value := car_id.strip_edges()
 	if value.ends_with(".BIN") or value.ends_with(".LZC"):
@@ -557,6 +873,25 @@ func _resolve_car_model_path(car_id: String) -> String:
 				return candidate
 	last_error = "Could not find %s/GEOMETRY.BIN or GEOMETRY.LZC under %s" % [normalized, cars_dir]
 	return ""
+
+
+func _resolve_car_texture_path(model_path: String) -> String:
+	var candidates: Array[String] = []
+	var cars_dir := _resolve_cars_dir(root_path)
+	if cars_dir != "":
+		candidates.append(cars_dir.path_join("TEXTURES.BIN"))
+
+	var model_dir := model_path.get_base_dir()
+	if model_dir != "":
+		candidates.append(model_dir.path_join("TEXTURES.BIN"))
+		var parent_dir := model_dir.get_base_dir()
+		if parent_dir != "":
+			candidates.append(parent_dir.path_join("TEXTURES.BIN"))
+
+	for candidate in candidates:
+		if FileAccess.file_exists(candidate):
+			return candidate
+	return candidates[0] if not candidates.is_empty() else ""
 
 
 func _normalized_car_id(car_id: String) -> String:
