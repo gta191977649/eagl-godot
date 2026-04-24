@@ -44,6 +44,7 @@ var _spawn_transform := Transform3D.IDENTITY
 var _car_entries: Array[Dictionary] = []
 var _selected_car_index := -1
 var _syncing_ui := false
+var _car_display_name_cache := {}
 
 
 func _enter_tree() -> void:
@@ -356,11 +357,13 @@ func _append_car_binary_entries(seen: Dictionary) -> void:
 			if seen.has(entry_key):
 				continue
 			seen[entry_key] = true
+			var display_name := _binary_display_name_for_car(car_id)
 			_car_entries.append({
 				"key": entry_key,
 				"label": _format_car_entry_label(car_id, duplicate_index, drive_type, "Binary"),
 				"source": "car_binary",
 				"car_name": car_id,
+				"display_name": display_name,
 				"duplicate_index": duplicate_index,
 				"drive_type": drive_type,
 				"globalb_row_index": int(row.get("row_index", -1)),
@@ -392,11 +395,13 @@ func _append_car_binary_entries(seen: Dictionary) -> void:
 		if seen.has(entry_key):
 			continue
 		seen[entry_key] = true
+		var display_name := _binary_display_name_for_car(car_id)
 		_car_entries.append({
 			"key": entry_key,
 			"label": _format_car_entry_label(car_id, 1, drive_type, "Binary"),
 			"source": "car_binary",
 			"car_name": car_id,
+			"display_name": display_name,
 			"duplicate_index": 1,
 			"drive_type": drive_type,
 		})
@@ -423,6 +428,7 @@ func _append_config_entry(config, source_label: String, seen: Dictionary, extra:
 		"label": _format_car_entry_label(car_name, duplicate_index, drive_type, source_label),
 		"source": "config",
 		"car_name": car_name,
+		"display_name": _binary_display_name_for_car(car_name),
 		"duplicate_index": duplicate_index,
 		"drive_type": drive_type,
 		"config": config,
@@ -487,19 +493,35 @@ func _drive_type_for_car(car_name: String) -> String:
 	return "RWD"
 
 
-func _entry_key(car_name: String, duplicate_index: int, drive_type: String) -> String:
-	return "%s::%d::%s" % [car_name, duplicate_index, drive_type]
+func _entry_key(car_name: String, _duplicate_index: int, drive_type: String) -> String:
+	return "%s::%s" % [car_name.strip_edges().to_upper(), drive_type.strip_edges().to_upper()]
 
 
-func _format_car_entry_label(car_name: String, duplicate_index: int, drive_type: String, source_label: String) -> String:
-	var label := car_name
-	if duplicate_index > 1:
-		label += " #%d" % duplicate_index
+func _format_car_entry_label(car_name: String, _duplicate_index: int, drive_type: String, source_label: String) -> String:
+	var label := _binary_display_name_for_car(car_name)
+	if label == "":
+		label = car_name.strip_edges().to_upper()
 	if drive_type != "":
 		label += " [%s]" % drive_type
 	if source_label != "":
 		label += "  %s" % source_label
 	return label
+
+
+func _binary_display_name_for_car(car_name: String) -> String:
+	var normalized := car_name.strip_edges().to_upper()
+	if normalized == "":
+		return ""
+	if _car_display_name_cache.has(normalized):
+		return String(_car_display_name_cache[normalized])
+
+	var display_name := normalized
+	if _car_loader != null:
+		var binary_name := String(_car_loader.read_binary_car_name(normalized)).strip_edges().to_upper()
+		if binary_name != "":
+			display_name = binary_name
+	_car_display_name_cache[normalized] = display_name
+	return display_name
 
 
 func _load_entry_config(entry: Dictionary):

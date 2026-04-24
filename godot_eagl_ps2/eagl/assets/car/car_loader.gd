@@ -7,9 +7,6 @@ const MathUtils = preload("res://eagl/utils/math_utils.gd")
 
 const SLOT_IDS := ["FL", "FR", "RL", "RR"]
 const TIRE_DETAIL_SUFFIXES := ["A", "B", "C"]
-const VISUAL_PIVOT_MAX_LONGITUDINAL_DELTA_PS2 := 0.18
-const VISUAL_PIVOT_MAX_LATERAL_DELTA_PS2 := 0.18
-const VISUAL_PIVOT_MAX_VERTICAL_DELTA_PS2 := 0.14
 
 var parser = CarParserPS2Script.new()
 var mesh_builder = MeshBuilderScript.new()
@@ -42,6 +39,16 @@ func load_asset(car_id: String):
 	})
 
 
+func read_binary_car_name(car_id: String) -> String:
+	last_error = ""
+	var model_path := _resolve_car_model_path(car_id)
+	if model_path == "":
+		if last_error == "":
+			last_error = "Could not resolve car model for %s" % car_id
+		return _normalized_car_id(car_id)
+	return parser.read_binary_car_name(model_path, _normalized_car_id(car_id))
+
+
 func build_scene(asset, config = null) -> Node3D:
 	mesh_builder.texture_bank = null
 	mesh_builder.generate_lods = false
@@ -50,6 +57,7 @@ func build_scene(asset, config = null) -> Node3D:
 	var root := Node3D.new()
 	root.name = "CarVisual"
 	root.set_meta("eagl_car_id", asset.car_id)
+	root.set_meta("eagl_binary_car_name", String(asset.metadata.get("binary_car_name", asset.car_id)))
 	root.set_meta("eagl_source_path", asset.source_path)
 	root.set_meta("eagl_assembly_summary", asset.assembly_summary)
 	root.set_meta("eagl_wheel_slots", asset.wheel_slots.duplicate(true))
@@ -184,19 +192,22 @@ func _wheel_slot_metadata_by_id(wheel_slots: Array, config) -> Dictionary:
 		var merged := slot_dict.duplicate(true)
 		var slot_index := SLOT_IDS.find(slot_id)
 		var physics_position_ps2: Vector3 = config.wheel_local_positions_ps2[slot_index] if slot_index >= 0 and slot_index < config.wheel_local_positions_ps2.size() else Vector3.ZERO
-		var visual_position_ps2: Vector3 = merged.get("position_ps2", physics_position_ps2)
-		var resolved_visual_position_ps2 := _resolved_visual_pivot_position_ps2(physics_position_ps2, visual_position_ps2)
+		var raw_locator_position_ps2: Vector3 = merged.get("position_ps2", physics_position_ps2)
+		# HP2 builds the four wheel center vectors from GLOBALB; locator records stay
+		# as attachment/orientation metadata and are not a second visual center source.
 		merged["physics_position_ps2"] = physics_position_ps2
 		merged["physics_position_godot"] = MathUtils.ps2_to_godot_vec3(physics_position_ps2)
-		merged["visual_position_ps2"] = visual_position_ps2
-		merged["visual_position_godot"] = MathUtils.ps2_to_godot_vec3(visual_position_ps2)
-		merged["resolved_visual_position_ps2"] = resolved_visual_position_ps2
-		merged["resolved_visual_position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
-		merged["runtime_pivot_position_ps2"] = resolved_visual_position_ps2
-		merged["runtime_pivot_position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
-		merged["position_ps2"] = resolved_visual_position_ps2
-		merged["position_godot"] = MathUtils.ps2_to_godot_vec3(resolved_visual_position_ps2)
-		merged["visual_position_source_resolved"] = "locator" if resolved_visual_position_ps2.is_equal_approx(visual_position_ps2) else "physics_hardpoint"
+		merged["raw_locator_position_ps2"] = raw_locator_position_ps2
+		merged["raw_locator_position_godot"] = MathUtils.ps2_to_godot_vec3(raw_locator_position_ps2)
+		merged["visual_position_ps2"] = physics_position_ps2
+		merged["visual_position_godot"] = MathUtils.ps2_to_godot_vec3(physics_position_ps2)
+		merged["resolved_visual_position_ps2"] = physics_position_ps2
+		merged["resolved_visual_position_godot"] = MathUtils.ps2_to_godot_vec3(physics_position_ps2)
+		merged["runtime_pivot_position_ps2"] = physics_position_ps2
+		merged["runtime_pivot_position_godot"] = MathUtils.ps2_to_godot_vec3(physics_position_ps2)
+		merged["position_ps2"] = physics_position_ps2
+		merged["position_godot"] = MathUtils.ps2_to_godot_vec3(physics_position_ps2)
+		merged["visual_position_source_resolved"] = "globalb_wheel_hardpoint"
 		by_id[slot_id] = merged
 	for index in range(SLOT_IDS.size()):
 		var slot_id: String = SLOT_IDS[index]
@@ -224,17 +235,6 @@ func _wheel_slot_metadata_by_id(wheel_slots: Array, config) -> Dictionary:
 			"locator_orientation_index": 0 if axle == "front" else 1,
 		}
 	return by_id
-
-
-func _resolved_visual_pivot_position_ps2(physics_position_ps2: Vector3, locator_position_ps2: Vector3) -> Vector3:
-	var delta := locator_position_ps2 - physics_position_ps2
-	if absf(delta.x) > VISUAL_PIVOT_MAX_LONGITUDINAL_DELTA_PS2:
-		return physics_position_ps2
-	if absf(delta.y) > VISUAL_PIVOT_MAX_LATERAL_DELTA_PS2:
-		return physics_position_ps2
-	if absf(delta.z) > VISUAL_PIVOT_MAX_VERTICAL_DELTA_PS2:
-		return physics_position_ps2
-	return locator_position_ps2
 
 
 func _body_visual_offset_ps2(config) -> Vector3:

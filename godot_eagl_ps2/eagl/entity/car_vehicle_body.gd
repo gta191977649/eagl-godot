@@ -7,6 +7,7 @@ const VehicleBodyConfigAdapter = preload("res://eagl/handling/vehicle_body_confi
 const SLOT_IDS := ["FL", "FR", "RL", "RR"]
 const VEHICLE_FORWARD := Vector3(0.0, 0.0, 1.0)
 const DEBUG_AXIS_LENGTH := 0.45
+const DEBUG_WHEEL_PHYSICS_SEGMENTS := 20
 
 @export var config = null
 @export var draw_debug := true
@@ -87,7 +88,7 @@ func apply_config(new_config) -> void:
 	mass = float(_vehicle_setup.get("mass", config.mass_kg))
 	center_of_mass = _vehicle_setup.get("center_of_mass", Vector3.ZERO)
 	_fit_chassis_collision_shape()
-	_apply_wheel_setup()
+	_rebuild_wheel_nodes_for_setup()
 	refresh_visual_bindings()
 	_reset_runtime_values()
 	_update_debug_snapshot()
@@ -193,22 +194,52 @@ func _apply_wheel_setup() -> void:
 		var data: Dictionary = _vehicle_setup.get("wheels", {}).get(slot_id, {})
 		if data.is_empty():
 			continue
-		wheel.position = data.get("position", wheel.position)
-		wheel.use_as_steering = bool(data.get("use_as_steering", false))
-		wheel.use_as_traction = bool(data.get("use_as_traction", false))
-		wheel.wheel_radius = float(data.get("wheel_radius", wheel.wheel_radius))
-		wheel.wheel_rest_length = float(data.get("wheel_rest_length", wheel.wheel_rest_length))
-		wheel.suspension_travel = float(data.get("suspension_travel", wheel.suspension_travel))
-		wheel.suspension_stiffness = float(data.get("suspension_stiffness", wheel.suspension_stiffness))
-		wheel.suspension_max_force = float(data.get("suspension_max_force", wheel.suspension_max_force))
-		wheel.damping_compression = float(data.get("damping_compression", wheel.damping_compression))
-		wheel.damping_relaxation = float(data.get("damping_relaxation", wheel.damping_relaxation))
-		wheel.wheel_friction_slip = float(data.get("wheel_friction_slip", wheel.wheel_friction_slip))
-		_wheel_base_slip[slot_id] = wheel.wheel_friction_slip
-		wheel.wheel_roll_influence = float(data.get("wheel_roll_influence", wheel.wheel_roll_influence))
-		wheel.engine_force = 0.0
-		wheel.brake = 0.0
-		wheel.steering = 0.0
+		_configure_wheel_node(slot_id, wheel, data)
+
+
+func _rebuild_wheel_nodes_for_setup() -> void:
+	if not is_inside_tree():
+		_apply_wheel_setup()
+		return
+	# VehicleWheel3D caches its chassis connection when it enters VehicleBody3D.
+	# Rebuild the nodes so the configured HP2 hardpoint is the runtime ray anchor.
+	var setup_wheels: Dictionary = _vehicle_setup.get("wheels", {})
+	for slot_id in SLOT_IDS:
+		var data: Dictionary = setup_wheels.get(slot_id, {})
+		if data.is_empty():
+			continue
+		var existing := get_node_or_null(slot_id) as VehicleWheel3D
+		var wheel := VehicleWheel3D.new()
+		wheel.name = slot_id
+		_configure_wheel_node(slot_id, wheel, data)
+		if existing == null:
+			add_child(wheel)
+			continue
+		var child_index := existing.get_index()
+		remove_child(existing)
+		existing.queue_free()
+		add_child(wheel)
+		move_child(wheel, child_index)
+	_cache_wheel_nodes()
+
+
+func _configure_wheel_node(slot_id: String, wheel: VehicleWheel3D, data: Dictionary) -> void:
+	wheel.position = data.get("position", wheel.position)
+	wheel.use_as_steering = bool(data.get("use_as_steering", false))
+	wheel.use_as_traction = bool(data.get("use_as_traction", false))
+	wheel.wheel_radius = float(data.get("wheel_radius", wheel.wheel_radius))
+	wheel.wheel_rest_length = float(data.get("wheel_rest_length", wheel.wheel_rest_length))
+	wheel.suspension_travel = float(data.get("suspension_travel", wheel.suspension_travel))
+	wheel.suspension_stiffness = float(data.get("suspension_stiffness", wheel.suspension_stiffness))
+	wheel.suspension_max_force = float(data.get("suspension_max_force", wheel.suspension_max_force))
+	wheel.damping_compression = float(data.get("damping_compression", wheel.damping_compression))
+	wheel.damping_relaxation = float(data.get("damping_relaxation", wheel.damping_relaxation))
+	wheel.wheel_friction_slip = float(data.get("wheel_friction_slip", wheel.wheel_friction_slip))
+	_wheel_base_slip[slot_id] = wheel.wheel_friction_slip
+	wheel.wheel_roll_influence = float(data.get("wheel_roll_influence", wheel.wheel_roll_influence))
+	wheel.engine_force = 0.0
+	wheel.brake = 0.0
+	wheel.steering = 0.0
 
 
 func _cache_visual_wheel_slots(car_visual: Node3D) -> void:
@@ -551,10 +582,10 @@ func _update_visuals(delta: float) -> void:
 			roll_node.rotation = roll_rotation
 
 
-func _current_wheel_center_vehicle(wheel: VehicleWheel3D) -> Vector3:
-	var wheel_origin_local := to_local(wheel.global_position)
-	var suspension_length := _current_wheel_suspension_length("", wheel)
-	return wheel_origin_local - Vector3.UP * suspension_length
+func _current_wheel_center_vehicle(wheel: VehicleWheel3D, slot_id: String = "") -> Vector3:
+	var wheel_center_rest := _wheel_attachment_rest_vehicle(slot_id, wheel)
+	var suspension_length := _current_wheel_suspension_length(slot_id, wheel)
+	return wheel_center_rest + Vector3.UP * (wheel.wheel_rest_length - suspension_length)
 
 
 func _current_visual_wheel_center_vehicle(slot_id: String, wheel: VehicleWheel3D) -> Vector3:
@@ -563,7 +594,7 @@ func _current_visual_wheel_center_vehicle(slot_id: String, wheel: VehicleWheel3D
 
 
 func _current_visual_wheel_offset_vehicle(slot_id: String, wheel: VehicleWheel3D) -> Vector3:
-	var runtime_offset := _current_wheel_center_vehicle(wheel) - _wheel_attachment_rest_vehicle(slot_id, wheel)
+	var runtime_offset := _current_wheel_center_vehicle(wheel, slot_id) - _wheel_attachment_rest_vehicle(slot_id, wheel)
 	return Vector3(0.0, runtime_offset.y, 0.0)
 
 
@@ -573,6 +604,14 @@ func _wheel_attachment_rest_vehicle(slot_id: String, wheel: VehicleWheel3D) -> V
 	if wheel_center_rest is Vector3:
 		return wheel_center_rest
 	return wheel.position - Vector3.UP * wheel.wheel_rest_length
+
+
+func _wheel_attachment_origin_vehicle(slot_id: String, wheel: VehicleWheel3D) -> Vector3:
+	var wheel_data: Dictionary = _vehicle_setup.get("wheels", {}).get(slot_id, {})
+	var attachment_origin: Variant = wheel_data.get("position", null)
+	if attachment_origin is Vector3:
+		return attachment_origin
+	return wheel.position
 
 
 func _current_visual_suspension_offset(slot_id: String, wheel: VehicleWheel3D) -> float:
@@ -591,7 +630,7 @@ func _current_visual_suspension_offset(slot_id: String, wheel: VehicleWheel3D) -
 
 func _current_wheel_suspension_length(slot_id: String, wheel: VehicleWheel3D) -> float:
 	if wheel.is_in_contact():
-		var suspension_length := maxf(wheel.global_position.distance_to(wheel.get_contact_point()) - wheel.wheel_radius, 0.0)
+		var suspension_length := _projected_wheel_suspension_length(wheel, slot_id)
 		if slot_id != "":
 			_wheel_last_grounded_lengths[slot_id] = suspension_length
 		return suspension_length
@@ -610,7 +649,7 @@ func _update_debug_snapshot() -> void:
 		if wheel == null:
 			continue
 		var contact_point := wheel.get_contact_point()
-		var suspension_length := maxf(wheel.global_position.distance_to(contact_point) - wheel.wheel_radius, 0.0)
+		var suspension_length := _projected_wheel_suspension_length(wheel, slot_id)
 		wheel_rows.append({
 			"slot": slot_id,
 			"grounded": wheel.is_in_contact(),
@@ -688,8 +727,9 @@ func _rebuild_debug_mesh() -> void:
 			continue
 		var origin := _current_wheel_pivot_vehicle(slot_id)
 		var visual_center := _current_visual_wheel_center_vehicle(slot_id, wheel)
-		var physical_center := _current_wheel_center_vehicle(wheel)
+		var physical_center := _current_wheel_center_vehicle(wheel, slot_id)
 		var contact := to_local(wheel.get_contact_point())
+		var projected_contact := Vector3(physical_center.x, contact.y, physical_center.z)
 		_debug_mesh.surface_set_color(Color(0.15, 0.9, 0.95, 0.95))
 		_debug_mesh.surface_add_vertex(origin)
 		_debug_mesh.surface_add_vertex(visual_center)
@@ -706,14 +746,23 @@ func _rebuild_debug_mesh() -> void:
 		_debug_mesh.surface_add_vertex(physical_center + Vector3.RIGHT * 0.06)
 		_debug_mesh.surface_add_vertex(physical_center + Vector3.UP * 0.06)
 		_debug_mesh.surface_add_vertex(physical_center + Vector3.DOWN * 0.06)
+		_add_physics_wheel_outline(physical_center, wheel, Color(0.15, 0.65, 1.0, 0.9))
 		if wheel.is_in_contact():
 			_debug_mesh.surface_set_color(Color(0.25, 1.0, 0.3, 0.95))
 			_debug_mesh.surface_add_vertex(physical_center)
-			_debug_mesh.surface_add_vertex(contact)
-			_debug_mesh.surface_add_vertex(contact + Vector3.LEFT * 0.06)
-			_debug_mesh.surface_add_vertex(contact + Vector3.RIGHT * 0.06)
-			_debug_mesh.surface_add_vertex(contact + Vector3.FORWARD * 0.06)
-			_debug_mesh.surface_add_vertex(contact + Vector3.BACK * 0.06)
+			_debug_mesh.surface_add_vertex(projected_contact)
+			_debug_mesh.surface_add_vertex(projected_contact + Vector3.LEFT * 0.06)
+			_debug_mesh.surface_add_vertex(projected_contact + Vector3.RIGHT * 0.06)
+			_debug_mesh.surface_add_vertex(projected_contact + Vector3.FORWARD * 0.06)
+			_debug_mesh.surface_add_vertex(projected_contact + Vector3.BACK * 0.06)
+			if projected_contact.distance_to(contact) > 0.01:
+				_debug_mesh.surface_set_color(Color(1.0, 0.65, 0.2, 0.9))
+				_debug_mesh.surface_add_vertex(projected_contact)
+				_debug_mesh.surface_add_vertex(contact)
+				_debug_mesh.surface_add_vertex(contact + Vector3.LEFT * 0.035)
+				_debug_mesh.surface_add_vertex(contact + Vector3.RIGHT * 0.035)
+				_debug_mesh.surface_add_vertex(contact + Vector3.FORWARD * 0.035)
+				_debug_mesh.surface_add_vertex(contact + Vector3.BACK * 0.035)
 	_debug_mesh.surface_set_color(Color(1.0, 0.15, 0.15, 1.0))
 	_debug_mesh.surface_add_vertex(Vector3.ZERO)
 	_debug_mesh.surface_add_vertex(VEHICLE_FORWARD * 1.5)
@@ -728,6 +777,31 @@ func _rebuild_debug_mesh() -> void:
 	_debug_mesh.surface_end()
 
 
+func _add_physics_wheel_outline(center: Vector3, wheel: VehicleWheel3D, color: Color) -> void:
+	var radius := maxf(wheel.wheel_radius, 0.01)
+	var wheel_basis := _debug_wheel_basis_vehicle(wheel)
+	var radial_up := (wheel_basis * Vector3.UP).normalized()
+	var radial_forward := (wheel_basis * VEHICLE_FORWARD).normalized()
+	_debug_mesh.surface_set_color(color)
+	for index in range(DEBUG_WHEEL_PHYSICS_SEGMENTS):
+		var angle_0 := TAU * float(index) / float(DEBUG_WHEEL_PHYSICS_SEGMENTS)
+		var angle_1 := TAU * float(index + 1) / float(DEBUG_WHEEL_PHYSICS_SEGMENTS)
+		var point_0 := center + (radial_up * cos(angle_0) + radial_forward * sin(angle_0)) * radius
+		var point_1 := center + (radial_up * cos(angle_1) + radial_forward * sin(angle_1)) * radius
+		_debug_mesh.surface_add_vertex(point_0)
+		_debug_mesh.surface_add_vertex(point_1)
+	_debug_mesh.surface_add_vertex(center - radial_up * radius)
+	_debug_mesh.surface_add_vertex(center + radial_up * radius)
+	_debug_mesh.surface_add_vertex(center - radial_forward * radius)
+	_debug_mesh.surface_add_vertex(center + radial_forward * radius)
+
+
+func _debug_wheel_basis_vehicle(wheel: VehicleWheel3D) -> Basis:
+	if not wheel.use_as_steering:
+		return Basis.IDENTITY
+	return Basis(Vector3.UP, wheel.steering)
+
+
 func _current_wheel_pivot_vehicle(slot_id: String) -> Vector3:
 	var pivot_node := _wheel_pivots.get(slot_id, null) as Node3D
 	if pivot_node != null:
@@ -736,6 +810,12 @@ func _current_wheel_pivot_vehicle(slot_id: String) -> Vector3:
 	if wheel != null:
 		return to_local(wheel.global_position)
 	return Vector3.ZERO
+
+
+func _projected_wheel_suspension_length(wheel: VehicleWheel3D, slot_id: String = "") -> float:
+	var wheel_origin_local := _wheel_attachment_origin_vehicle(slot_id, wheel)
+	var contact_local := to_local(wheel.get_contact_point())
+	return maxf(wheel_origin_local.y - contact_local.y - wheel.wheel_radius, 0.0)
 
 
 func _resolved_visual_wheel_radius(slot_id: String, wheel: VehicleWheel3D) -> float:

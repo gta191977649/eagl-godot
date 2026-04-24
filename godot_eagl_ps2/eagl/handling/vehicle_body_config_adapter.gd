@@ -95,14 +95,10 @@ static func build_vehicle_setup(config) -> Dictionary:
 			"side": "left" if slot_id.ends_with("L") else "right",
 		}
 
-	var center_source: Vector3 = config.center_of_mass_ps2
-	if center_source.length_squared() <= 0.000001:
-		center_source = config.physics_origin_offset_ps2
-
 	return {
 		"mass": resolved_mass,
 		"mass_is_estimate": bool(config.mass_kg_is_estimate),
-		"center_of_mass": vehicle_space_from_ps2(center_source),
+		"center_of_mass": vehicle_space_from_ps2(config.center_of_mass_ps2),
 		"body_size": body_size_vehicle(config),
 		"body_transform_diagonal": config.body_transform_diagonal,
 		"collision_center": Vector3(0.0, body_size_vehicle(config).y * 0.5, 0.0),

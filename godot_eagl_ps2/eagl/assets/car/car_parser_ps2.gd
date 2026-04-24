@@ -20,9 +20,11 @@ const HP2_FRONT_WHEEL_LOCATOR_RIGHT := 0xC52BF01B
 const HP2_REAR_WHEEL_LOCATOR_LEFT := 0xD947F346
 const HP2_REAR_WHEEL_LOCATOR_RIGHT := 0x02B52399
 
-# Derived from HP2_AttachedPartLocatorScan_FUN_00120360:
-# the game recognizes fixed locator hash families, then attaches runtime wheel parts to those records.
-# We follow the same model instead of using generic position-based fallback.
+# Derived from the fixed HP2 locator hash families:
+# FUN_0011dc80 records the four wheel-locator hashes, while
+# HP2_AttachedPartLocatorScan_FUN_00120360 records the tire-dummy hashes for
+# attached parts. These locators identify slots and orientation; the rendered
+# wheel center comes from GLOBALB wheel hardpoints in the loader.
 const ORIGINAL_WHEEL_SLOT_SPECS := [
 	{
 		"slot_id": "FL",
@@ -78,6 +80,10 @@ func parse(files: Dictionary):
 		return asset
 
 	var chunks = _parse_chunks(bundle)
+	var binary_car_name := _binary_car_name_from_chunks(chunks, bundle, asset.car_id)
+	if binary_car_name != "":
+		asset.car_id = binary_car_name
+		asset.metadata["binary_car_name"] = binary_car_name
 	asset.part_bundles = _parse_part_bundles(chunks, bundle)
 	asset.assembly_summary = _parse_assembly_summary(chunks, bundle)
 	asset.assembly_tables = _parse_assembly_tables(chunks, bundle)
@@ -91,6 +97,104 @@ func parse(files: Dictionary):
 	asset.metadata["wheel_slots"] = asset.wheel_slots.duplicate(true)
 	asset.metadata["assembly_tables"] = asset.assembly_tables.duplicate(true)
 	return asset
+
+
+func read_binary_car_name(model_path: String, fallback: String = "") -> String:
+	if model_path == "":
+		return _normalized_binary_car_name(fallback)
+	var bundle = Binary.load_bundle_bytes(model_path)
+	if bundle.is_empty():
+		return _normalized_binary_car_name(fallback)
+	var chunks = _parse_chunks(bundle)
+	return _binary_car_name_from_chunks(chunks, bundle, fallback)
+
+
+func _binary_car_name_from_chunks(chunks: Array[Dictionary], bundle: PackedByteArray, fallback: String = "") -> String:
+	var summary := _parse_assembly_summary(chunks, bundle)
+	var from_variant := _normalized_binary_car_name(String(summary.get("variant_name", "")))
+	if from_variant != "":
+		return from_variant
+
+	for chunk in _walk_chunks(chunks):
+		if int(chunk.get("id", 0)) != 0x80034002:
+			continue
+		var header_chunk := _child_with_id(chunk, 0x00034003)
+		if header_chunk.is_empty():
+			continue
+		var name_info := _find_ascii_name(_payload(bundle, header_chunk))
+		var from_object := _normalized_binary_car_name_from_object(String(name_info.get("name", "")))
+		if from_object != "":
+			return from_object
+
+	return _normalized_binary_car_name(fallback)
+
+
+func _normalized_binary_car_name_from_object(value: String) -> String:
+	var normalized := value.strip_edges().replace("\\", "/").to_upper()
+	if normalized.find("/CARS/") >= 0:
+		return _normalized_binary_car_name(normalized)
+	for suffix: String in ["_CV", "_A", "_B", "_C", "_D", "_SCUFFS"]:
+		if normalized.ends_with(suffix):
+			return _normalized_binary_car_name(normalized)
+	return ""
+
+
+func _normalized_binary_car_name(value: String) -> String:
+	var normalized := value.strip_edges().replace("\\", "/").to_upper()
+	if normalized == "":
+		return ""
+
+	var cars_marker := "/CARS/"
+	var cars_index := normalized.find(cars_marker)
+	if cars_index >= 0:
+		var after_cars := normalized.substr(cars_index + cars_marker.length())
+		var slash_index := after_cars.find("/")
+		if slash_index > 0:
+			normalized = after_cars.substr(0, slash_index)
+		else:
+			normalized = after_cars
+	else:
+		normalized = normalized.get_file()
+		if normalized.begins_with("GEOMETRY."):
+			normalized = ""
+
+	if normalized.ends_with(".BIN") or normalized.ends_with(".LZC"):
+		normalized = normalized.get_basename()
+
+	var suffixes := [
+		"_TIRE_FRONT_A",
+		"_TIRE_FRONT_B",
+		"_TIRE_FRONT_C",
+		"_TIRE_REAR_A",
+		"_TIRE_REAR_B",
+		"_TIRE_REAR_C",
+		"_BRAKE_FRONT",
+		"_BRAKE_REAR",
+		"_SCUFFS",
+		"_CV",
+		"_A",
+		"_B",
+		"_C",
+		"_D",
+	]
+	for suffix: String in suffixes:
+		if normalized.ends_with(suffix) and normalized.length() > suffix.length():
+			normalized = normalized.substr(0, normalized.length() - suffix.length())
+			break
+
+	return normalized if _is_plausible_binary_car_name(normalized) else ""
+
+
+func _is_plausible_binary_car_name(value: String) -> bool:
+	if value.length() < 2:
+		return false
+	for index in range(value.length()):
+		var code := value.unicode_at(index)
+		var is_digit := code >= 0x30 and code <= 0x39
+		var is_upper := code >= 0x41 and code <= 0x5A
+		if not is_digit and not is_upper and code != 0x5F:
+			return false
+	return true
 
 
 func _parse_objects_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray) -> void:
