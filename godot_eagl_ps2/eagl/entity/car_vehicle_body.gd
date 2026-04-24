@@ -585,9 +585,9 @@ func _update_visuals(delta: float) -> void:
 
 func _current_wheel_center_vehicle(wheel: VehicleWheel3D, slot_id: String = "") -> Vector3:
 	var wheel_center_rest := _wheel_attachment_rest_vehicle(slot_id, wheel)
+	if freeze:
+		return wheel_center_rest
 	if _wheel_node_position_matches_setup(wheel, wheel_center_rest):
-		if wheel.is_in_contact() and not _wheel_contact_projection_is_valid(wheel, slot_id):
-			return wheel_center_rest
 		return wheel.position
 	var suspension_length := _current_wheel_suspension_length(slot_id, wheel)
 	return wheel_center_rest + Vector3.UP * (wheel.wheel_rest_length - suspension_length)
@@ -634,10 +634,10 @@ func _current_visual_suspension_offset(slot_id: String, wheel: VehicleWheel3D) -
 
 
 func _current_wheel_suspension_length(slot_id: String, wheel: VehicleWheel3D) -> float:
+	if freeze:
+		return wheel.wheel_rest_length
 	var wheel_center_rest := _wheel_attachment_rest_vehicle(slot_id, wheel)
 	if _wheel_node_position_matches_setup(wheel, wheel_center_rest):
-		if wheel.is_in_contact() and not _wheel_contact_projection_is_valid(wheel, slot_id):
-			return wheel.wheel_rest_length
 		return maxf(_wheel_attachment_origin_vehicle(slot_id, wheel).y - wheel.position.y, 0.0)
 	if wheel.is_in_contact():
 		var suspension_length := _projected_wheel_suspension_length(wheel, slot_id)
@@ -834,12 +834,6 @@ func _wheel_node_position_matches_setup(wheel: VehicleWheel3D, wheel_center_rest
 		wheel.position.z - wheel_center_rest.z
 	).length()
 	return horizontal_delta <= WHEEL_NODE_ANCHOR_EPSILON
-
-
-func _wheel_contact_projection_is_valid(wheel: VehicleWheel3D, slot_id: String) -> bool:
-	var projected_length := _projected_wheel_suspension_length(wheel, slot_id)
-	var max_expected_length := wheel.wheel_rest_length + wheel.suspension_travel + wheel.wheel_radius * 0.25
-	return projected_length <= max_expected_length
 
 
 func _resolved_visual_wheel_radius(slot_id: String, wheel: VehicleWheel3D) -> float:
