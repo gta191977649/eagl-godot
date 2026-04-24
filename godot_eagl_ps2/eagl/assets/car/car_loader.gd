@@ -16,6 +16,8 @@ const CAR_WINDOW_MATERIAL_HASHES := [
 	0x4cdebfca,
 	0x0ab88f5d,
 ]
+const TIRE_RIM_MATERIAL_HASH := 0x001d38b3
+const TIRE_CAP_MATERIAL_HASH := 0xc8c5a8a4
 
 var parser = CarParserPS2Script.new()
 var mesh_builder = MeshBuilderScript.new()
@@ -571,6 +573,7 @@ func _load_texture_bank_for_asset(asset):
 	var texture_bank = PS2TextureBankScript.new()
 	texture_bank.load_for_car(asset.source_files, required_hashes, required_names)
 	_install_car_texture_aliases(asset, texture_bank)
+	_install_tire_texture_aliases(asset, texture_bank)
 	for message in texture_bank.errors:
 		asset.add_warning(message)
 	_texture_bank_cache[cache_key] = texture_bank
@@ -641,6 +644,69 @@ func _install_car_texture_aliases(asset, texture_bank) -> void:
 				_apply_resolved_texture_uv_flags(block_dict, alias_name, target_name, block_bounds)
 				blocks[block_index] = block_dict
 		object_dict["blocks"] = blocks
+
+
+func _install_tire_texture_aliases(asset, texture_bank) -> void:
+	if texture_bank == null:
+		return
+	for obj in asset.objects:
+		var object_dict: Dictionary = obj
+		var object_name := String(object_dict.get("name", "")).to_upper()
+		if not object_name.contains("_TIRE_"):
+			continue
+		var target_hash := _tire_alias_target_hash(object_dict, texture_bank)
+		if target_hash == 0:
+			continue
+		var target_info: Dictionary = texture_bank.get_info(target_hash)
+		var target_name := String(target_info.get("name", ""))
+		var blocks: Array = object_dict.get("blocks", [])
+		for block_index in range(blocks.size()):
+			var block_dict: Dictionary = blocks[block_index]
+			var source_hash := _texture_hash_for_block_dict(object_dict, block_dict)
+			if source_hash == 0 or texture_bank.has_texture(source_hash):
+				continue
+			if not _should_alias_tire_material(source_hash, target_name):
+				continue
+			block_dict["resolved_texture_hash"] = target_hash
+			block_dict["resolved_texture_name"] = target_name
+			block_dict["resolved_texture_alias"] = "TIRE"
+			block_dict["source_texture_hash"] = source_hash
+			blocks[block_index] = block_dict
+		object_dict["blocks"] = blocks
+
+
+func _tire_alias_target_hash(obj: Dictionary, texture_bank) -> int:
+	var dedicated_tire_hash := _first_named_object_texture_hash(obj, texture_bank, "_TIRE")
+	if dedicated_tire_hash != 0:
+		return dedicated_tire_hash
+	return _first_available_object_texture_hash(obj, texture_bank)
+
+
+func _first_named_object_texture_hash(obj: Dictionary, texture_bank, suffix: String) -> int:
+	for value in obj.get("texture_hashes", []):
+		var texture_hash := int(value)
+		if texture_hash == 0 or not texture_bank.has_texture(texture_hash):
+			continue
+		var info: Dictionary = texture_bank.get_info(texture_hash)
+		var texture_name := String(info.get("name", "")).to_upper()
+		if texture_name.ends_with(suffix):
+			return texture_hash
+	return 0
+
+
+func _first_available_object_texture_hash(obj: Dictionary, texture_bank) -> int:
+	for value in obj.get("texture_hashes", []):
+		var texture_hash := int(value)
+		if texture_hash != 0 and texture_bank.has_texture(texture_hash):
+			return texture_hash
+	return 0
+
+
+func _should_alias_tire_material(source_hash: int, target_name: String) -> bool:
+	var target_upper := target_name.to_upper()
+	if source_hash == TIRE_RIM_MATERIAL_HASH or source_hash == TIRE_CAP_MATERIAL_HASH:
+		return not target_upper.ends_with("_TIRE")
+	return true
 
 
 func _texture_hash_for_block_dict(obj: Dictionary, block: Dictionary) -> int:
