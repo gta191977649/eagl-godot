@@ -100,6 +100,15 @@ text = "Debug Overlay"
 layout_mode = 2
 text = "Reset Car"
 
+[node name="DebugOptionsRow" type="HBoxContainer" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="AirborneToggle" type="CheckBox" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout/DebugOptionsRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Airborne Debug"
+
 [node name="CarListTitle" type="Label" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout" unique_id=1962240029]
 layout_mode = 2
 text = "Cars"

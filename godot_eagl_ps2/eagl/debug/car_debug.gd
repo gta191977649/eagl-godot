@@ -16,6 +16,7 @@ const CAMERA_MIN_PITCH = deg_to_rad(-18.0)
 const CAMERA_MAX_PITCH = deg_to_rad(45.0)
 const CAMERA_FILL_LIGHT_ENERGY = 2.2
 const CAMERA_FILL_LIGHT_RANGE = 28.0
+const AIRBORNE_DEBUG_HEIGHT = 1.65
 
 @export var platform := DEFAULT_PLATFORM
 @export_global_dir var game_root = ""
@@ -27,6 +28,7 @@ const CAMERA_FILL_LIGHT_RANGE = 28.0
 @onready var telemetry: Label = $HUD/TelemetryPanel/Telemetry
 @onready var car_list: ItemList = $HUD/ControlsPanel/MarginContainer/ControlsLayout/CarList
 @onready var overlay_toggle: CheckBox = $HUD/ControlsPanel/MarginContainer/ControlsLayout/ControlsRow/OverlayToggle
+@onready var airborne_toggle: CheckBox = $HUD/ControlsPanel/MarginContainer/ControlsLayout/DebugOptionsRow/AirborneToggle
 @onready var reset_button: Button = $HUD/ControlsPanel/MarginContainer/ControlsLayout/ControlsRow/ResetButton
 @onready var current_car_label: Label = $HUD/ControlsPanel/MarginContainer/ControlsLayout/CurrentCarLabel
 @onready var world_environment: WorldEnvironment = $WorldEnvironment
@@ -45,6 +47,7 @@ var _car_entries: Array[Dictionary] = []
 var _selected_car_index := -1
 var _syncing_ui := false
 var _car_display_name_cache := {}
+var _airborne_debug_enabled := false
 
 
 func _enter_tree() -> void:
@@ -89,6 +92,7 @@ func _ready() -> void:
 	_car_loader = CarLoaderScript.new(resolved_root)
 	_load_car_visual()
 	car.reset_runtime_state(_spawn_transform)
+	_apply_airborne_debug_state()
 	car.sync_wheel_slots_from_visual()
 	_rebuild_car_entries()
 	_sync_ui_from_car()
@@ -150,6 +154,7 @@ func _update_telemetry() -> void:
 	])
 	lines.append("EngT:  %6.1f" % float(snapshot.get("engine_force_total", 0.0)))
 	lines.append("Mouse: %s" % ("orbit" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED else "click to capture"))
+	lines.append("Air:   %s" % ("frozen" if _airborne_debug_enabled else "normal"))
 	lines.append("")
 	for wheel in snapshot.get("wheels", []):
 		lines.append(
@@ -318,6 +323,8 @@ func _bind_ui() -> void:
 		overlay_toggle.toggled.connect(_on_overlay_toggled)
 	if reset_button != null and not reset_button.pressed.is_connected(_on_reset_pressed):
 		reset_button.pressed.connect(_on_reset_pressed)
+	if airborne_toggle != null and not airborne_toggle.toggled.is_connected(_on_airborne_toggled):
+		airborne_toggle.toggled.connect(_on_airborne_toggled)
 	if car_list != null and not car_list.item_selected.is_connected(_on_car_selected):
 		car_list.item_selected.connect(_on_car_selected)
 
@@ -457,6 +464,10 @@ func _sync_ui_from_car() -> void:
 		_syncing_ui = true
 		overlay_toggle.button_pressed = car.draw_debug
 		_syncing_ui = false
+	if airborne_toggle != null:
+		_syncing_ui = true
+		airborne_toggle.button_pressed = _airborne_debug_enabled
+		_syncing_ui = false
 	if car_list != null and not _car_entries.is_empty():
 		var target_index := _index_for_current_car()
 		if target_index >= 0:
@@ -549,6 +560,7 @@ func _switch_to_car_index(index: int) -> void:
 	_spawn_transform = _spawn_transform_for_config(new_config)
 	_load_car_visual()
 	car.reset_runtime_state(_spawn_transform)
+	_apply_airborne_debug_state()
 	car.sync_wheel_slots_from_visual()
 	_seed_camera_from_car()
 	_rebuild_car_entries()
@@ -566,6 +578,7 @@ func _on_car_selected(index: int) -> void:
 func _on_reset_pressed() -> void:
 	_spawn_transform = _spawn_transform_for_config(car.config)
 	car.reset_runtime_state(_spawn_transform)
+	_apply_airborne_debug_state()
 	_seed_camera_from_car()
 	_set_status("Reset %s" % _current_car_display_name())
 
@@ -575,6 +588,30 @@ func _on_overlay_toggled(enabled: bool) -> void:
 		return
 	car.set_debug_overlay_enabled(enabled)
 	_set_status("Debug overlay %s" % ("enabled" if enabled else "hidden"))
+
+
+func _on_airborne_toggled(enabled: bool) -> void:
+	if _syncing_ui:
+		return
+	_airborne_debug_enabled = enabled
+	_apply_airborne_debug_state()
+	_seed_camera_from_car()
+	_set_status("Airborne debug %s" % ("enabled" if enabled else "disabled"))
+
+
+func _apply_airborne_debug_state() -> void:
+	if car == null:
+		return
+	car.freeze = _airborne_debug_enabled
+	car.linear_velocity = Vector3.ZERO
+	car.angular_velocity = Vector3.ZERO
+	car.sleeping = false
+	if _airborne_debug_enabled:
+		var airborne_transform: Transform3D = car.transform
+		airborne_transform.origin.y = AIRBORNE_DEBUG_HEIGHT
+		car.reset_runtime_state(airborne_transform)
+	else:
+		car.reset_runtime_state(_spawn_transform)
 
 
 func _build_runtime_config_for_car(car_name: String, duplicate_index: int = 1, drive_type: String = ""):
