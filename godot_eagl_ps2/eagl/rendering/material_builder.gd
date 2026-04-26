@@ -13,6 +13,7 @@ var texture_bank = null
 var _texture_shaders: Dictionary = {}
 var _procedural_shaders: Dictionary = {}
 var texture_filter_mode := "linear_mipmap"
+var use_scene_lighting := true
 
 
 func material_for_block(object_name: String, block: Dictionary, block_index: int, uses_vertex_colors: bool, texture_hash: int = 0) -> Material:
@@ -167,6 +168,8 @@ func _should_force_opaque_road_edge(object_name: String, texture_info: Dictionar
 
 
 func _should_use_lit_material(object_name: String) -> bool:
+	if not use_scene_lighting:
+		return false
 	var name := object_name.to_upper()
 	return not (name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER")
 

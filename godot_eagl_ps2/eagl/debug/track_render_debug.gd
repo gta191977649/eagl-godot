@@ -12,7 +12,16 @@ const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_ban
 @export var use_vsync := true
 @export var shadow_texture_visibility_distance := 300.0
 @export var shadow_texture_visibility_margin := 80.0
-@export var cast_shadow := false
+@export var track_use_scene_lighting := false
+@export var build_collision := true
+@export var collision_debug_visible := false
+@export var collision_debug_surface_offset := 0.08
+@export var collision_layer := 1
+@export var collision_mask := 1
+@export var build_route := true
+@export var route_debug_visible := false
+@export var route_debug_height_offset := 1.0
+@export var route_loop := true
 @export_enum(
 	"linear_mipmap",
 	"linear",
@@ -32,7 +41,8 @@ var _fps_update_elapsed := 0.0
 @onready var _track_selector: OptionButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow/TrackSelector
 @onready var _reload_button: Button = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow/ReloadTrack
 @onready var _track_status_label: Label = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/TrackSelectPanel/TrackSelectFlow/TrackStatus
-@onready var _cast_shadow_toggle: CheckButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow/CastShadowToggle
+@onready var _collision_toggle: CheckButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow/CollisionToggle
+@onready var _route_toggle: CheckButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow/RouteToggle
 @onready var _camera_position_label: Label = $DebugUI/DebugUILayout/CameraPositionPanel/CameraPositionLabel
 @onready var _fps_label: Label = $DebugUI/DebugUILayout/FpsPanel/FpsLabel
 
@@ -42,8 +52,10 @@ func _ready() -> void:
 	_loading_panel.visible = false
 	_track_selector.item_selected.connect(_on_track_selected)
 	_reload_button.pressed.connect(reload_track)
-	_cast_shadow_toggle.button_pressed = cast_shadow
-	_cast_shadow_toggle.toggled.connect(_on_cast_shadow_toggled)
+	_collision_toggle.button_pressed = collision_debug_visible
+	_collision_toggle.toggled.connect(_on_collision_debug_toggled)
+	_route_toggle.button_pressed = route_debug_visible
+	_route_toggle.toggled.connect(_on_route_debug_toggled)
 	_populate_track_selector()
 	if load_on_ready:
 		call_deferred("_load_debug_track")
@@ -77,6 +89,16 @@ func _load_debug_track() -> void:
 		"shadow_texture_visibility_distance": shadow_texture_visibility_distance,
 		"shadow_texture_visibility_margin": shadow_texture_visibility_margin,
 		"texture_filter_mode": texture_filter_mode,
+		"track_use_scene_lighting": track_use_scene_lighting,
+		"build_collision": build_collision,
+		"collision_layer": collision_layer,
+		"collision_mask": collision_mask,
+		"collision_debug_visible": collision_debug_visible,
+		"collision_debug_surface_offset": collision_debug_surface_offset,
+		"build_route": build_route,
+		"route_debug_visible": route_debug_visible,
+		"route_debug_height_offset": route_debug_height_offset,
+		"route_loop": route_loop,
 	})
 	if not ok:
 		_is_loading = false
@@ -129,12 +151,20 @@ func _load_debug_track() -> void:
 	stats["textured_missing_uv_surface_count"] = next_track_node.get_meta("eagl_textured_missing_uv_surface_count", 0)
 	stats["lod_surface_count"] = next_track_node.get_meta("eagl_lod_surface_count", 0)
 	stats["shadow_texture_visibility_count"] = next_track_node.get_meta("eagl_shadow_texture_visibility_count", 0)
+	stats["collision_stats"] = next_track_node.get_meta("eagl_collision_stats", {})
+	stats["collision_body_count"] = next_track_node.get_meta("eagl_collision_body_count", 0)
+	stats["collision_shape_count"] = next_track_node.get_meta("eagl_collision_shape_count", 0)
+	stats["collision_surface_count"] = next_track_node.get_meta("eagl_collision_surface_count", 0)
+	stats["collision_triangle_count"] = next_track_node.get_meta("eagl_collision_triangle_count", 0)
+	stats["route_stats"] = next_track_node.get_meta("eagl_route_stats", {})
+	stats["route_point_count"] = next_track_node.get_meta("eagl_route_point_count", 0)
 	loader.stats = stats
 
 	await _set_loading_status("Finalizing view", 0.95, true)
 	_replace_track_node(next_track_node)
 	_ensure_debug_lighting()
-	_apply_cast_shadow()
+	_apply_collision_debug_visible()
+	_apply_route_debug_visible()
 	_frame_camera(track_node)
 	await _set_loading_status("Loaded TRACK%s" % files.get("track_id", track_id), 1.0, true)
 	_hide_loading_ui_deferred()
@@ -155,6 +185,19 @@ func _load_debug_track() -> void:
 		track_node.get_meta("eagl_lod_surface_count", 0),
 		track_node.get_meta("eagl_shadow_texture_visibility_count", 0),
 		track_node.get_meta("eagl_skipped", {}),
+	])
+	print("EAGL debug collision: enabled=%s bodies=%s shapes=%s surfaces=%s triangles=%s stats=%s" % [
+		track_node.get_meta("eagl_collision_enabled", false),
+		track_node.get_meta("eagl_collision_body_count", 0),
+		track_node.get_meta("eagl_collision_shape_count", 0),
+		track_node.get_meta("eagl_collision_surface_count", 0),
+		track_node.get_meta("eagl_collision_triangle_count", 0),
+		track_node.get_meta("eagl_collision_stats", {}),
+	])
+	print("EAGL debug route: enabled=%s points=%s stats=%s" % [
+		track_node.get_meta("eagl_route_enabled", false),
+		track_node.get_meta("eagl_route_point_count", 0),
+		track_node.get_meta("eagl_route_stats", {}),
 	])
 
 
@@ -281,28 +324,37 @@ func _on_track_selected(index: int) -> void:
 	_load_debug_track()
 
 
-func _on_cast_shadow_toggled(enabled: bool) -> void:
-	cast_shadow = enabled
-	_apply_cast_shadow()
+func _on_collision_debug_toggled(enabled: bool) -> void:
+	collision_debug_visible = enabled
+	_apply_collision_debug_visible()
 
 
-func _apply_cast_shadow() -> void:
+func _on_route_debug_toggled(enabled: bool) -> void:
+	route_debug_visible = enabled
+	_apply_route_debug_visible()
+
+
+func _apply_collision_debug_visible() -> void:
 	if track_node == null:
 		return
-	for node in track_node.find_children("EAGL_Sun", "DirectionalLight3D", true, false):
-		var light := node as DirectionalLight3D
-		if light == null:
-			continue
-		if not light.has_meta("eagl_enabled_light_energy"):
-			light.set_meta("eagl_enabled_light_energy", light.light_energy)
-		light.shadow_enabled = cast_shadow
-		light.light_energy = float(light.get_meta("eagl_enabled_light_energy", light.light_energy)) if cast_shadow else 0.0
-		light.visible = cast_shadow
+	for node in track_node.find_children("*", "MeshInstance3D", true, false):
+		if bool(node.get_meta("eagl_collision_debug_overlay", false)):
+			node.visible = collision_debug_visible
+
+
+func _apply_route_debug_visible() -> void:
+	if track_node == null:
+		return
+	for node in track_node.find_children("*", "GeometryInstance3D", true, false):
+		if bool(node.get_meta("eagl_route_debug_overlay", false)):
+			node.visible = route_debug_visible
 
 
 func _set_track_controls_enabled(enabled: bool) -> void:
 	if _track_selector != null:
 		_track_selector.disabled = not enabled
+	if _reload_button != null:
+		_reload_button.disabled = not enabled
 
 
 func _replace_track_node(next_track_node: Node3D) -> void:

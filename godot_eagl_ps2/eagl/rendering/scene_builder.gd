@@ -3,6 +3,8 @@ extends RefCounted
 
 const MeshBuilderScript := preload("res://eagl/rendering/mesh_builder.gd")
 const EnvironmentBuilderScript := preload("res://eagl/rendering/environment_builder.gd")
+const TrackCollisionBuilderScript := preload("res://eagl/rendering/track_collision_builder.gd")
+const TrackRouteBuilderScript := preload("res://eagl/rendering/track_route_builder.gd")
 const MathUtils := preload("res://eagl/utils/math_utils.gd")
 
 const SUN_LIGHT_CULL_MASK := 1 << 1
@@ -11,6 +13,8 @@ const DEFAULT_SHADOW_TEXTURE_VISIBILITY_MARGIN := 80.0
 
 var mesh_builder := MeshBuilderScript.new()
 var environment_builder := EnvironmentBuilderScript.new()
+var collision_builder := TrackCollisionBuilderScript.new()
+var route_builder := TrackRouteBuilderScript.new()
 var skipped: Dictionary = {}
 var warnings: Array[String] = []
 var scenery_multimesh_count := 0
@@ -24,6 +28,7 @@ var shadow_texture_visibility_count := 0
 func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	mesh_builder.texture_bank = asset.texture_bank
 	mesh_builder.texture_filter_mode = String(options.get("texture_filter_mode", "linear_mipmap"))
+	mesh_builder.use_scene_lighting = bool(options.get("track_use_scene_lighting", false))
 	mesh_builder.generate_lods = bool(options.get("generate_lods", true))
 	shadow_texture_visibility_distance = float(options.get("shadow_texture_visibility_distance", DEFAULT_SHADOW_TEXTURE_VISIBILITY_DISTANCE))
 	shadow_texture_visibility_margin = float(options.get("shadow_texture_visibility_margin", DEFAULT_SHADOW_TEXTURE_VISIBILITY_MARGIN))
@@ -98,6 +103,8 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	var bounds := _node_bounds(root)
 	asset.bounds = bounds
 	asset.has_bounds = bounds.size != Vector3.ZERO
+	var collision_stats := collision_builder.add_track_collision(root, asset, options)
+	var route_stats := route_builder.add_track_route(root, asset, options)
 	root.set_meta("eagl_object_count", asset.objects.size())
 	root.set_meta("eagl_solid_pack_count", asset.solid_packs.size())
 	root.set_meta("eagl_scenery_section_count", asset.scenery_sections.size())
@@ -122,6 +129,13 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_lod_surface_count", mesh_builder.lod_surface_count)
 	root.set_meta("eagl_shadow_texture_visibility_distance", shadow_texture_visibility_distance)
 	root.set_meta("eagl_shadow_texture_visibility_count", shadow_texture_visibility_count)
+	root.set_meta("eagl_collision_stats", collision_stats.duplicate(true))
+	root.set_meta("eagl_collision_body_count", int(collision_stats.get("body_count", 0)))
+	root.set_meta("eagl_collision_shape_count", int(collision_stats.get("shape_count", 0)))
+	root.set_meta("eagl_collision_surface_count", int(collision_stats.get("surface_count", 0)))
+	root.set_meta("eagl_collision_triangle_count", int(collision_stats.get("triangle_count", 0)))
+	root.set_meta("eagl_route_stats", route_stats.duplicate(true))
+	root.set_meta("eagl_route_point_count", int(route_stats.get("point_count", 0)))
 	return root
 
 
@@ -214,7 +228,7 @@ func _add_static_object(static_roots: Dictionary, environment_root: Node3D, mark
 	node.set_meta("eagl_source_role", _source_role_for_object(obj))
 	node.set_meta("eagl_placement_kind", "DIRECT_SOLID")
 	node.set_meta("bun_category", category)
-	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_apply_shadow_texture_visibility(node, category)
 	parent.add_child(node)
 	_count_semantic_node(category)
@@ -271,7 +285,7 @@ func _add_baked_scenery_instances(static_roots: Dictionary, scenery_roots: Dicti
 		node.set_meta("eagl_placement_kind", "SCENERY_INSTANCE")
 		node.set_meta("bun_category", category)
 		node.set_meta("eagl_scenery_bucket", scenery_bucket)
-		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_apply_shadow_texture_visibility(node, category)
 		parent.add_child(node)
 		placed += 1
@@ -306,7 +320,7 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 			node.set_meta("eagl_source_role", _source_role_for_object(obj))
 			node.set_meta("eagl_placement_kind", "SCENERY_INSTANCE")
 			node.set_meta("bun_category", category)
-			node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+			node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			_apply_shadow_texture_visibility(node, category)
 			parent.add_child(node)
 			placed += 1
@@ -346,7 +360,7 @@ func _add_multimesh_scenery(static_roots: Dictionary, scenery_roots: Dictionary,
 		var node := MultiMeshInstance3D.new()
 		node.name = _safe_node_name(obj.get("name", "Scenery_%s" % key))
 		node.multimesh = multimesh
-		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		node.set_meta("eagl_object_name", obj.get("name", ""))
 		node.set_meta("eagl_object_hash", group.get("mesh_hash", 0))
 		node.set_meta("eagl_instance_count", transforms.size())

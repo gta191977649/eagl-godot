@@ -41,6 +41,13 @@ func load(track_id: String) -> Node3D:
 	stats["textured_missing_uv_surface_count"] = node.get_meta("eagl_textured_missing_uv_surface_count", 0)
 	stats["lod_surface_count"] = node.get_meta("eagl_lod_surface_count", 0)
 	stats["shadow_texture_visibility_count"] = node.get_meta("eagl_shadow_texture_visibility_count", 0)
+	stats["collision_stats"] = node.get_meta("eagl_collision_stats", {})
+	stats["collision_body_count"] = node.get_meta("eagl_collision_body_count", 0)
+	stats["collision_shape_count"] = node.get_meta("eagl_collision_shape_count", 0)
+	stats["collision_surface_count"] = node.get_meta("eagl_collision_surface_count", 0)
+	stats["collision_triangle_count"] = node.get_meta("eagl_collision_triangle_count", 0)
+	stats["route_stats"] = node.get_meta("eagl_route_stats", {})
+	stats["route_point_count"] = node.get_meta("eagl_route_point_count", 0)
 	return node
 
 

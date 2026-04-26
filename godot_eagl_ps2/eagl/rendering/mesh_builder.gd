@@ -17,6 +17,10 @@ var texture_filter_mode := "linear_mipmap":
 	set(value):
 		texture_filter_mode = value
 		material_builder.texture_filter_mode = value
+var use_scene_lighting := true:
+	set(value):
+		use_scene_lighting = value
+		material_builder.use_scene_lighting = value
 var generate_lods := true
 var skipped: Dictionary = {}
 var warnings: Array[String] = []
@@ -31,6 +35,7 @@ func reset() -> void:
 	material_builder.clear()
 	material_builder.texture_bank = texture_bank
 	material_builder.texture_filter_mode = texture_filter_mode
+	material_builder.use_scene_lighting = use_scene_lighting
 	skipped.clear()
 	warnings.clear()
 	textured_surfaces = 0

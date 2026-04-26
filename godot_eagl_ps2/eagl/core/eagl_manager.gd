@@ -44,6 +44,12 @@ func get_game_root() -> String:
 	return String(config.game_root)
 
 
+func get_options() -> Dictionary:
+	if config == null:
+		return {}
+	return config.options.duplicate(true)
+
+
 func load_track(track_id: String) -> Node3D:
 	if platform == null:
 		return _error_node("EAGLManager is not initialized")

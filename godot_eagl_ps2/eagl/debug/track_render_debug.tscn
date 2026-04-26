@@ -111,10 +111,13 @@ size_flags_horizontal = 3
 theme_override_constants/h_separation = 8
 theme_override_constants/v_separation = 6
 
-[node name="CastShadowToggle" type="CheckButton" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow" unique_id=1563687374]
+[node name="CollisionToggle" type="CheckButton" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow" unique_id=1563687375]
 layout_mode = 2
-button_pressed = true
-text = "Cast shadow"
+text = "Collision"
+
+[node name="RouteToggle" type="CheckButton" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow" unique_id=1563687376]
+layout_mode = 2
+text = "Route"
 
 [node name="ViewportSpacer" type="Control" parent="DebugUI/DebugUILayout/SafeMargin/VerticalBands" unique_id=1137142160]
 layout_mode = 2

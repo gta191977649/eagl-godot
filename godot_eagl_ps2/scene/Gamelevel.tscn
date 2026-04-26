@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://qm1toibrlx5n"]
+
+[ext_resource type="Script" uid="uid://dy84qu6sq5k27" path="res://scene/gamelevel.gd" id="1"]
+[ext_resource type="PackedScene" path="res://eagl/entity/Track.tscn" id="2"]
+[ext_resource type="PackedScene" uid="uid://bx30y3w6dic5l" path="res://eagl/entity/Car.tscn" id="3"]
+
+[node name="Gamelevel" type="Node3D" unique_id=147918230]
+script = ExtResource("1")
+track_id = "11"
+
+[node name="Track" parent="." unique_id=1712616310 instance=ExtResource("2")]
+load_on_ready = false
+
+[node name="Car" parent="." unique_id=599529017 instance=ExtResource("3")]
+draw_debug = false
+
+[node name="FollowCamera" type="Camera3D" parent="." unique_id=1736592922]
+transform = Transform3D(1, 0, 0, 0, 0.894427, 0.447214, 0, -0.447214, 0.894427, -8, 4, 0)
+current = true
+fov = 70.0
+near = 0.1
+far = 30000.0

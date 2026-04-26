@@ -3,6 +3,7 @@ extends RefCounted
 
 const Binary := preload("res://eagl/platforms/ps2/ps2_binary_reader.gd")
 const TrackAssetScript := preload("res://eagl/assets/track/track_asset.gd")
+const TrackMathUtils := preload("res://eagl/utils/math_utils.gd")
 
 const POSITION_S16_SCALE := 1.0 / 4096.0
 const POSITION_S8_SCALE := 1.0 / 128.0
@@ -10,6 +11,8 @@ const POSITION_S8_SCALE := 1.0 / 128.0
 const CHUNK_TRACK_METADATA := 0x00034200
 const CHUNK_SUN_FLARE_CONFIG := 0x00034202
 const CHUNK_FOG_CONFIG := 0x00034250
+const CHUNK_ROUTE_ROOT := 0x80034500
+const CHUNK_ROUTE_RADAR := 0x00034510
 
 const SUN_FLARE_TEXTURE_HASHES := [
 	0x47beb4b6, # SUNCENTER
@@ -117,6 +120,8 @@ func _parse_scene_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray
 		asset.scenery_instances.append_array(section.get("instances", []))
 	asset.environment_config = _parse_environment_config(chunks, bundle)
 	asset.unknown_chunks = _collect_unknown_chunks(chunks)
+	_build_collision_surfaces(asset, chunks, bundle)
+	_parse_route_into(asset, chunks, bundle)
 
 
 func _parse_mesh_object(object_chunk: Dictionary, bundle: PackedByteArray) -> Dictionary:
@@ -584,6 +589,381 @@ func _parse_scenery_sections(chunks: Array[Dictionary], bundle: PackedByteArray,
 	return sections
 
 
+func _build_collision_surfaces(asset, chunks: Array[Dictionary], bundle: PackedByteArray) -> void:
+	var surfaces: Array[Dictionary] = []
+	var skipped := {}
+	var direct_surface_keys := {}
+	for obj in asset.objects:
+		if bool(obj.get("is_scenery_template", false)):
+			continue
+		var category := _collision_category_for_object(obj)
+		if category == "":
+			_count_collision_skip(skipped, "excluded_object")
+			continue
+		var surface := _collision_surface_for_object(obj, category, obj.get("transform", []), "DIRECT_SOLID", {})
+		if surface.is_empty():
+			_count_collision_skip(skipped, "empty_source_polygons")
+			continue
+		surfaces.append(surface)
+		direct_surface_keys[int(obj.get("chunk_offset", -1))] = true
+
+	for instance in asset.scenery_instances:
+		var object_index := int(instance.get("object_index", -1))
+		if object_index < 0 or object_index >= asset.objects.size():
+			_count_collision_skip(skipped, "unresolved_scenery_instance")
+			continue
+		var obj: Dictionary = asset.objects[object_index]
+		var category := _collision_category_for_object(obj, true)
+		if category == "":
+			continue
+		var surface := _collision_surface_for_object(obj, category, instance.get("transform", []), "SCENERY_INSTANCE", instance)
+		if surface.is_empty():
+			_count_collision_skip(skipped, "empty_scenery_polygons")
+			continue
+		surfaces.append(surface)
+
+	var cs_candidates := _collect_collision_chunk_candidates(chunks, bundle)
+	var resolved_cs := 0
+	for surface in surfaces:
+		if String(surface.get("object_name", "")).to_upper().begins_with("CS_"):
+			resolved_cs += 1
+
+	asset.collision_surfaces = surfaces
+	asset.collision_stats = _collision_stats_for_surfaces(surfaces, skipped, cs_candidates, resolved_cs, direct_surface_keys.size())
+
+
+func _collision_surface_for_object(obj: Dictionary, category: String, transform_rows: Array, placement_kind: String, placement: Dictionary) -> Dictionary:
+	var faces := PackedVector3Array()
+	var block_count := 0
+	for block in obj.get("blocks", []):
+		var run: Dictionary = block.get("run", {})
+		var vertices: Array = run.get("vertices", [])
+		if vertices.size() < 3:
+			continue
+		var transformed := PackedVector3Array()
+		for vertex in vertices:
+			var ps2_vertex := TrackMathUtils.transform_point_rows(vertex, transform_rows)
+			transformed.append(TrackMathUtils.ps2_to_godot_vec3(ps2_vertex))
+		var indices := _collision_indices_for_block(block, transformed.size())
+		for index in range(0, indices.size() - 2, 3):
+			var a := int(indices[index])
+			var b := int(indices[index + 1])
+			var c := int(indices[index + 2])
+			if a < 0 or b < 0 or c < 0 or a >= transformed.size() or b >= transformed.size() or c >= transformed.size():
+				continue
+			var va := transformed[a]
+			var vb := transformed[b]
+			var vc := transformed[c]
+			if (vb - va).cross(vc - va).length_squared() <= 0.000001:
+				continue
+			faces.append(va)
+			faces.append(vb)
+			faces.append(vc)
+		block_count += 1
+	if faces.is_empty():
+		return {}
+
+	var material_kind := _collision_material_kind(category, obj.get("name", ""))
+	var source_chunk_offset := int(obj.get("chunk_offset", -1))
+	return {
+		"category": category,
+		"material_kind": material_kind,
+		"object_name": obj.get("name", ""),
+		"chunk_offset": source_chunk_offset,
+		"source_chunk_offset": source_chunk_offset,
+		"solid_pack_index": obj.get("solid_pack_index", -1),
+		"solid_pack_offset": obj.get("solid_pack_offset", -1),
+		"placement_kind": placement_kind,
+		"section_number": placement.get("section_number", -1),
+		"record_index": placement.get("record_index", -1),
+		"triangle_count": int(faces.size() / 3),
+		"block_count": block_count,
+		"faces": faces,
+	}
+
+
+func _collision_category_for_object(obj: Dictionary, allow_scenery_collision: bool = false) -> String:
+	var name := String(obj.get("name", "")).to_upper()
+	if _is_collision_excluded_object_name(name):
+		return ""
+	if name.begins_with("RD_") or name.begins_with("DIRTRD_") or name.begins_with("LI_RD_") or name.contains("ROAD"):
+		return "Road"
+	if name.begins_with("TRN_") or name.contains("TERRAIN") or name.contains("CLIFF") or name.contains("ROCK") or name.contains("GULLEY"):
+		return "Terrain"
+	if name.contains("WALL") or name.contains("BARRIER") or name.contains("GUARD") or name.contains("RAIL") or name.contains("FENCE") or name.contains("SEA_WALL") or name.contains("SEAWALL") or name.contains("RAMP"):
+		return "WallBarrier"
+	if name.begins_with("XW_"):
+		return "WallBarrier"
+	if name.contains("BRIDGE"):
+		return "Road"
+	if allow_scenery_collision and (name.begins_with("CS_") or name.begins_with("XS_") or name.begins_with("XB_") or name.begins_with("XH_") or name.begins_with("XF_")):
+		return "SceneryCollision"
+	if name.begins_with("CS_"):
+		return "SceneryCollision"
+	return ""
+
+
+func _is_collision_excluded_object_name(name: String) -> bool:
+	if name == "" or name.begins_with("SKYDOME") or name == "WATER" or name.contains("ENVMAP"):
+		return true
+	if name.begins_with("SHD_") or name.begins_with("SH_") or name.contains("SHAD"):
+		return true
+	if name.begins_with("TRACK") and name.contains("STARTLINE"):
+		return true
+	if name.contains("LENS") or name.contains("FLARE") or name.contains("SUN") or name.contains("CAM"):
+		return true
+	if name.contains("ROUTE") or name.contains("EFFECT") or name.contains("SMOKE"):
+		return true
+	return false
+
+
+func _collision_material_kind(category: String, object_name: String) -> String:
+	var name := object_name.to_upper()
+	if category == "Road":
+		if name.contains("DIRT") or name.contains("SAND") or name.contains("GRAVEL"):
+			return "loose_road"
+		return "road"
+	if category == "Terrain":
+		return "terrain"
+	if category == "WallBarrier":
+		if name.contains("RAMP"):
+			return "ramp_barrier"
+		return "wall_barrier"
+	return "scenery_collision"
+
+
+func _collision_indices_for_block(block: Dictionary, vertex_count: int) -> PackedInt32Array:
+	var mode: String = block.get("primitive_mode", "strip")
+	if mode == "triangles":
+		return _collision_triangle_list_indices(vertex_count)
+	if mode == "fan":
+		return _collision_fan_indices(vertex_count)
+	return _collision_strip_control_indices(block, vertex_count)
+
+
+func _collision_strip_control_indices(block: Dictionary, vertex_count: int) -> PackedInt32Array:
+	var disabled: Array = _collision_adc_disabled_from_vif_control(block.get("run", {}).get("header", []), block.get("run", {}).get("tri_cull", []), vertex_count)
+	if disabled.is_empty():
+		disabled.resize(vertex_count)
+		for i in range(vertex_count):
+			disabled[i] = false
+
+	var out := PackedInt32Array()
+	var face := 1
+	for index in range(vertex_count):
+		if bool(disabled[index]):
+			face = 1
+			continue
+		var a := index - 1 - face
+		var b := index - 1
+		var c := index - 1 + face
+		if a >= 0 and b >= 0 and c >= 0 and a < vertex_count and b < vertex_count and c < vertex_count:
+			_collision_append_tri(out, a, b, c)
+		face = -face
+	return out
+
+
+func _collision_adc_disabled_from_vif_control(header: Array, tri_cull: Array, vertex_count: int) -> Array:
+	if header.size() < 2 or tri_cull.size() < 4 or vertex_count <= 0:
+		return []
+	var num_vertices := int(header[0])
+	var mode := int(header[1])
+	if num_vertices <= 0 or num_vertices > vertex_count or num_vertices > 32 or mode > 7:
+		return []
+	var mask := _collision_vif_control_mask(num_vertices, mode, tri_cull)
+	var out: Array[bool] = []
+	for index in range(vertex_count):
+		out.append(((mask >> (31 - index)) & 1) != 0)
+	return out
+
+
+func _collision_vif_control_mask(num_vertices: int, mode: int, tri_cull: Array) -> int:
+	var use_upper := mode & 0x04
+	var downer_side := (-(((mode & 0x03) + 1) >> 2) << (use_upper >> 2)) & 0x03
+	var upper_side := ~(-use_upper)
+
+	var downer := int(tri_cull[downer_side]) if downer_side >= 0 and downer_side < tri_cull.size() else 0
+	var upper := int(tri_cull[upper_side]) if upper_side >= 0 and upper_side < tri_cull.size() else 0
+
+	var hi_downer := downer >> 18
+	var lo_downer := downer & 0x7FFF
+	var hi_downer_swap := hi_downer ^ (lo_downer & 0x1E)
+	var hi_upper_swap := ((upper >> 2) | ((mode + 1) >> 1)) & 0x04
+
+	var new_downer := (lo_downer << 4) | (hi_downer_swap >> 1)
+	var new_upper := (upper >> 2) ^ (((hi_downer_swap >> 1) & 0x07) << 13) ^ (hi_upper_swap << 18)
+
+	var mask := _collision_shift_left(new_downer, ((mode - 3) << 2) - 3)
+	if use_upper != 0:
+		mask = (mask & ((0xFFFFFFFF << 13) & 0xFFFFFFFF)) | (new_upper & 0x3FFF)
+	mask = _collision_shift_left(mask, (7 - mode) << 2)
+	mask = mask & ((0xFFFFFFFF << (32 - num_vertices)) & 0xFFFFFFFF)
+	return mask & 0xFFFFFFFF
+
+
+func _collision_shift_left(value: int, shift: int) -> int:
+	if shift >= 0:
+		return value << shift
+	return value >> -shift
+
+
+func _collision_triangle_list_indices(count: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for i in range(0, count - (count % 3), 3):
+		_collision_append_tri(out, i, i + 1, i + 2)
+	return out
+
+
+func _collision_fan_indices(count: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for i in range(1, count - 1):
+		_collision_append_tri(out, 0, i, i + 1)
+	return out
+
+
+func _collision_append_tri(out: PackedInt32Array, a: int, b: int, c: int) -> void:
+	if a != b and a != c and b != c:
+		out.append(a)
+		out.append(b)
+		out.append(c)
+
+
+func _collect_collision_chunk_candidates(chunks: Array[Dictionary], bundle: PackedByteArray) -> Array[Dictionary]:
+	var candidates: Array[Dictionary] = []
+	for chunk in _walk_chunks(chunks):
+		var chunk_id := int(chunk.get("id", 0))
+		if chunk_id != 0x80034020 and chunk_id != 0x00034026:
+			continue
+		var payload := _payload(bundle, chunk)
+		var name_info := _find_ascii_name(payload)
+		var name := String(name_info.get("name", ""))
+		if name == "":
+			name = _find_collision_candidate_name(payload)
+		candidates.append({
+			"id": chunk_id,
+			"offset": int(chunk.get("offset", -1)),
+			"size": int(chunk.get("size", 0)),
+			"name": name,
+			"is_collision_named": name.to_upper().begins_with("CS_"),
+		})
+	return candidates
+
+
+func _find_collision_candidate_name(payload: PackedByteArray) -> String:
+	var limit := payload.size()
+	for start in range(limit):
+		var end := start
+		while end < limit:
+			var byte: int = payload[end]
+			if byte == 0:
+				break
+			if byte < 0x20 or byte > 0x7E:
+				break
+			end += 1
+		if end - start >= 4 and end < limit and payload[end] == 0:
+			var value := Binary.ascii(payload, start, end)
+			if value.to_upper().begins_with("CS_"):
+				return value
+	return ""
+
+
+func _collision_stats_for_surfaces(surfaces: Array[Dictionary], skipped: Dictionary, cs_candidates: Array[Dictionary], resolved_cs: int, direct_object_count: int) -> Dictionary:
+	var by_category := {}
+	var total_triangles := 0
+	for surface in surfaces:
+		var category := String(surface.get("category", "Unknown"))
+		if not by_category.has(category):
+			by_category[category] = {
+				"surfaces": 0,
+				"triangles": 0,
+				"objects": {},
+			}
+		by_category[category]["surfaces"] = int(by_category[category]["surfaces"]) + 1
+		by_category[category]["triangles"] = int(by_category[category]["triangles"]) + int(surface.get("triangle_count", 0))
+		by_category[category]["objects"][String(surface.get("object_name", ""))] = true
+		total_triangles += int(surface.get("triangle_count", 0))
+
+	var compact_by_category := {}
+	for category in by_category.keys():
+		var object_map: Dictionary = by_category[category]["objects"]
+		compact_by_category[category] = {
+			"surfaces": int(by_category[category]["surfaces"]),
+			"triangles": int(by_category[category]["triangles"]),
+			"object_count": object_map.size(),
+		}
+
+	var named_cs_candidates := 0
+	for candidate in cs_candidates:
+		if bool(candidate.get("is_collision_named", false)):
+			named_cs_candidates += 1
+
+	return {
+		"surface_count": surfaces.size(),
+		"triangle_count": total_triangles,
+		"direct_object_count": direct_object_count,
+		"by_category": compact_by_category,
+		"skipped": skipped.duplicate(true),
+		"cs_chunk_candidate_count": cs_candidates.size(),
+		"cs_named_candidate_count": named_cs_candidates,
+		"cs_resolved_surface_count": resolved_cs,
+		"cs_unresolved_candidate_count": max(named_cs_candidates - resolved_cs, 0),
+	}
+
+
+func _count_collision_skip(skipped: Dictionary, reason: String) -> void:
+	skipped[reason] = int(skipped.get(reason, 0)) + 1
+
+
+func _parse_route_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray) -> void:
+	var points: Array[Dictionary] = []
+	var source_chunk_offset := -1
+	var declared_count := 0
+	for chunk in _walk_chunks(chunks):
+		if int(chunk.get("id", 0)) != CHUNK_ROUTE_RADAR:
+			continue
+		source_chunk_offset = int(chunk.get("offset", -1))
+		var payload := _payload(bundle, chunk)
+		if payload.size() < 4:
+			continue
+		declared_count = Binary.u32(payload, 0)
+		var max_records := int((payload.size() - 4) / 32)
+		var count := mini(declared_count, max_records)
+		for index in range(count):
+			var record_offset := 4 + index * 32
+			var name := _ascii_fixed(payload, record_offset, 16)
+			var point_ps2_2d := Vector2(
+				Binary.f32(payload, record_offset + 16),
+				Binary.f32(payload, record_offset + 20)
+			)
+			var aux := Binary.f32(payload, record_offset + 24)
+			points.append({
+				"index": index,
+				"name": name,
+				"position_ps2_2d": point_ps2_2d,
+				"position_godot_flat": Vector3(point_ps2_2d.x, 0.0, -point_ps2_2d.y),
+				"aux": aux,
+				"source_chunk_offset": source_chunk_offset,
+				"source_record_offset": record_offset,
+			})
+		break
+
+	asset.route_points = points
+	asset.route_stats = {
+		"point_count": points.size(),
+		"declared_count": declared_count,
+		"source_chunk_offset": source_chunk_offset,
+		"source_chunk_id": CHUNK_ROUTE_RADAR if source_chunk_offset >= 0 else 0,
+	}
+
+
+func _ascii_fixed(payload: PackedByteArray, offset: int, length: int) -> String:
+	var end := offset
+	var limit := mini(offset + length, payload.size())
+	while end < limit and payload[end] != 0:
+		end += 1
+	return Binary.ascii(payload, offset, end)
+
+
 func _object_indices_by_chunk_offset(objects: Array[Dictionary]) -> Dictionary:
 	var indices := {}
 	for index in range(objects.size()):
@@ -821,6 +1201,10 @@ func _is_known_track_chunk(chunk_id: int) -> bool:
 		0x00034102,
 		0x00034103,
 		0x00034104,
+		CHUNK_ROUTE_ROOT,
+		CHUNK_ROUTE_RADAR,
+		0x00034520,
+		0x00034530,
 		CHUNK_TRACK_METADATA,
 		0x00034201,
 		CHUNK_SUN_FLARE_CONFIG,
