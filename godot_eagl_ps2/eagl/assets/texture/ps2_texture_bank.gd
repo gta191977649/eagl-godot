@@ -28,6 +28,11 @@ func load_for_car(files: Dictionary, required_hashes: Array = [], required_names
 		var path: String = files.get(key, "")
 		if path != "" and FileAccess.file_exists(path):
 			_read_ps2_tpk(path, wanted_hashes, wanted_names)
+	var global_path: String = files.get("texture_global", "")
+	if global_path != "" and FileAccess.file_exists(global_path):
+		var missing_hashes := _missing_wanted_hashes(wanted_hashes)
+		if not missing_hashes.is_empty():
+			_read_ps2_tpk(global_path, missing_hashes, {})
 
 
 func clear() -> void:
@@ -67,6 +72,14 @@ func set_texture_alias(source_hash: int, target_hash: int) -> void:
 func _resolved_texture_hash(texture_hash: int) -> int:
 	var target_hash := int(texture_aliases.get(texture_hash, texture_hash))
 	return target_hash
+
+
+func _missing_wanted_hashes(wanted_hashes: Dictionary) -> Dictionary:
+	var missing := {}
+	for texture_hash in wanted_hashes.keys():
+		if not has_texture(int(texture_hash)):
+			missing[int(texture_hash)] = true
+	return missing
 
 
 func _read_ps2_tpk(path: String, wanted_hashes: Dictionary = {}, wanted_names: Dictionary = {}) -> void:

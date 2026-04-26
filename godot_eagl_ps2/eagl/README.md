@@ -66,7 +66,7 @@ TrackRoot
 └── UnknownChunks
 ```
 
-Texture materials are selected through the solid object's `0x00034006` texture hash table and each block's strip-entry texture index. Surfaces with unresolved hashes fall back to deterministic debug colors.
+Texture materials are selected through the solid object's `0x00034006` texture hash table and each block's strip-entry texture index. Car loads decode `CARS/TEXTURES.BIN` first, then fill unresolved required hashes from `GLOBAL/GLOBALB.BUN`; this resolves shared wheel textures such as `TIRE` (`0x001d38b3`) and `TIREBACK` (`0xc8c5a8a4`). Car body and wheel surfaces keep their authored PS2 UV orientation; only explicit resolved aliases can request a UV transform. Surfaces with unresolved hashes fall back to deterministic debug colors.
 
 ## Debug Scene
 

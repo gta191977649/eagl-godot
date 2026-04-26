@@ -49,6 +49,7 @@ func load_asset(car_id: String):
 		"car_id": _normalized_car_id(car_id),
 		"model": model_path,
 		"texture_car": _resolve_car_texture_path(model_path),
+		"texture_global": _resolve_global_texture_path(model_path),
 	}
 	var asset = parser.parse(files)
 	asset.texture_bank = _load_texture_bank_for_asset(asset)
@@ -76,6 +77,7 @@ func build_scene(asset, config = null) -> Node3D:
 	root.set_meta("eagl_binary_car_name", String(asset.metadata.get("binary_car_name", asset.car_id)))
 	root.set_meta("eagl_source_path", asset.source_path)
 	root.set_meta("eagl_texture_source_path", String(asset.source_files.get("texture_car", "")))
+	root.set_meta("eagl_global_texture_source_path", String(asset.source_files.get("texture_global", "")))
 	root.set_meta("eagl_assembly_summary", asset.assembly_summary)
 	root.set_meta("eagl_wheel_slots", asset.wheel_slots.duplicate(true))
 	root.set_meta("eagl_texture_count", asset.texture_bank.decoded_count if asset.texture_bank != null else 0)
@@ -559,11 +561,15 @@ func _load_texture_bank_for_asset(asset):
 		if texture_path != "":
 			asset.add_warning("Car texture file not found: %s" % texture_path)
 		return null
+	var global_texture_path := String(asset.source_files.get("texture_global", ""))
+	if global_texture_path != "" and not FileAccess.file_exists(global_texture_path):
+		asset.add_warning("Global texture file not found: %s" % global_texture_path)
 
 	var required_hashes := _collect_required_texture_hashes(asset)
 	var required_names := _collect_required_texture_names(asset)
-	var cache_key := "%s:%s:%s" % [
+	var cache_key := "%s:%s:%s:%s" % [
 		texture_path,
+		global_texture_path,
 		_texture_hash_cache_suffix(required_hashes),
 		",".join(PackedStringArray(required_names)),
 	]
@@ -903,6 +909,19 @@ func _unique_strings(values: Array[String]) -> Array[String]:
 	return out
 
 
+func _unique_paths(values: Array[String]) -> Array[String]:
+	var seen := {}
+	var out: Array[String] = []
+	for value in values:
+		var path := String(value).strip_edges()
+		var key := path.to_upper()
+		if key == "" or seen.has(key):
+			continue
+		seen[key] = true
+		out.append(path)
+	return out
+
+
 func _is_body_variant_name(object_name: String, car_id: String) -> bool:
 	if car_id == "":
 		return false
@@ -1003,6 +1022,34 @@ func _resolve_car_texture_path(model_path: String) -> String:
 			candidates.append(parent_dir.path_join("TEXTURES.BIN"))
 
 	for candidate in candidates:
+		if FileAccess.file_exists(candidate):
+			return candidate
+	return candidates[0] if not candidates.is_empty() else ""
+
+
+func _resolve_global_texture_path(model_path: String) -> String:
+	var candidates: Array[String] = []
+	var normalized_root := root_path.trim_suffix("/")
+	if normalized_root != "":
+		candidates.append(normalized_root.path_join("ZZDATA").path_join("GLOBAL").path_join("GLOBALB.BUN"))
+		candidates.append(normalized_root.path_join("GLOBAL").path_join("GLOBALB.BUN"))
+		candidates.append(normalized_root.path_join("GLOBALB.BUN"))
+
+	var cars_dir := _resolve_cars_dir(root_path)
+	if cars_dir != "":
+		var zzdata_dir := cars_dir.get_base_dir()
+		candidates.append(zzdata_dir.path_join("GLOBAL").path_join("GLOBALB.BUN"))
+
+	var model_dir := model_path.get_base_dir()
+	if model_dir != "":
+		var parent_dir := model_dir.get_base_dir()
+		if parent_dir != "":
+			candidates.append(parent_dir.path_join("GLOBAL").path_join("GLOBALB.BUN"))
+			var game_file_dir := parent_dir.get_base_dir()
+			if game_file_dir != "":
+				candidates.append(game_file_dir.path_join("ZZDATA").path_join("GLOBAL").path_join("GLOBALB.BUN"))
+
+	for candidate in _unique_paths(candidates):
 		if FileAccess.file_exists(candidate):
 			return candidate
 	return candidates[0] if not candidates.is_empty() else ""
