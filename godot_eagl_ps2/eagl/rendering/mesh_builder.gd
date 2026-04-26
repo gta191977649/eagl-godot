@@ -146,6 +146,11 @@ func _uv_array(block: Dictionary, vertex_count: int) -> PackedVector2Array:
 		var uv: Vector2 = texcoords[i]
 		var u := 1.0 - uv.x if bool(block.get("resolved_texture_mirror_u", false)) else uv.x
 		var v := uv.y if bool(block.get("resolved_texture_preserve_v", false)) else 1.0 - uv.y
+		if block.has("resolved_texture_uv_offset") and block.has("resolved_texture_uv_scale"):
+			var uv_offset: Vector2 = block["resolved_texture_uv_offset"]
+			var uv_scale: Vector2 = block["resolved_texture_uv_scale"]
+			u = uv_offset.x + u * uv_scale.x
+			v = uv_offset.y + v * uv_scale.y
 		out.append(Vector2(u, v))
 	return out
 

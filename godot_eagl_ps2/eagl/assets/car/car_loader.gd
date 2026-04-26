@@ -568,7 +568,10 @@ func _load_texture_bank_for_asset(asset):
 		",".join(PackedStringArray(required_names)),
 	]
 	if _texture_bank_cache.has(cache_key):
-		return _texture_bank_cache[cache_key]
+		var cached_texture_bank = _texture_bank_cache[cache_key]
+		_install_car_texture_aliases(asset, cached_texture_bank)
+		_install_tire_texture_aliases(asset, cached_texture_bank)
+		return cached_texture_bank
 
 	var texture_bank = PS2TextureBankScript.new()
 	texture_bank.load_for_car(asset.source_files, required_hashes, required_names)
@@ -620,7 +623,7 @@ func _install_car_texture_aliases(asset, texture_bank) -> void:
 		if not _is_body_variant_name(object_name, car_id):
 			continue
 		var blocks: Array = object_dict.get("blocks", [])
-		var bounds := _object_bounds_ps2(object_dict)
+		var bounds := _object_bounds_ps2(object_dict, false)
 		if bounds.is_empty():
 			continue
 		for block_index in range(blocks.size()):
@@ -631,8 +634,8 @@ func _install_car_texture_aliases(asset, texture_bank) -> void:
 			var alias_name := _alias_texture_name_for_block(car_id, object_dict, block_dict, bounds)
 			if alias_name == "":
 				continue
-			var block_bounds := _block_bounds_ps2(object_dict, block_dict)
-			var target_name := _resolved_alias_texture_name(texture_bank, car_id, alias_name, block_bounds)
+			var block_bounds := _block_bounds_ps2(object_dict, block_dict, false)
+			var target_name := _resolved_alias_texture_name(texture_bank, car_id, alias_name, block_bounds, bounds)
 			if target_name == "":
 				continue
 			var target_hash := int(texture_bank.get_hash_for_name(target_name))
@@ -641,7 +644,7 @@ func _install_car_texture_aliases(asset, texture_bank) -> void:
 				block_dict["resolved_texture_name"] = target_name
 				block_dict["resolved_texture_alias"] = alias_name
 				block_dict["source_texture_hash"] = source_hash
-				_apply_resolved_texture_uv_flags(block_dict, alias_name, target_name, block_bounds)
+				_apply_resolved_texture_uv_flags(block_dict, alias_name, target_name, block_bounds, bounds)
 				blocks[block_index] = block_dict
 		object_dict["blocks"] = blocks
 
@@ -663,6 +666,10 @@ func _install_tire_texture_aliases(asset, texture_bank) -> void:
 		for block_index in range(blocks.size()):
 			var block_dict: Dictionary = blocks[block_index]
 			var source_hash := _texture_hash_for_block_dict(object_dict, block_dict)
+			if _is_named_tire_texture_hash(texture_bank, source_hash):
+				_apply_tire_game_uv_flags(block_dict, source_hash)
+				blocks[block_index] = block_dict
+				continue
 			if source_hash == 0 or texture_bank.has_texture(source_hash):
 				continue
 			if not _should_alias_tire_material(source_hash, target_name):
@@ -671,6 +678,8 @@ func _install_tire_texture_aliases(asset, texture_bank) -> void:
 			block_dict["resolved_texture_name"] = target_name
 			block_dict["resolved_texture_alias"] = "TIRE"
 			block_dict["source_texture_hash"] = source_hash
+			if _is_tire_texture_name(target_name):
+				_apply_tire_game_uv_flags(block_dict, source_hash)
 			blocks[block_index] = block_dict
 		object_dict["blocks"] = blocks
 
@@ -709,6 +718,24 @@ func _should_alias_tire_material(source_hash: int, target_name: String) -> bool:
 	return true
 
 
+func _apply_tire_game_uv_flags(block: Dictionary, source_hash: int) -> void:
+	block["resolved_texture_preserve_v"] = false
+	block["resolved_texture_mirror_u"] = false
+	block.erase("resolved_texture_uv_offset")
+	block.erase("resolved_texture_uv_scale")
+
+
+func _is_named_tire_texture_hash(texture_bank, texture_hash: int) -> bool:
+	if texture_hash == 0 or texture_bank == null or not texture_bank.has_texture(texture_hash):
+		return false
+	var info: Dictionary = texture_bank.get_info(texture_hash)
+	return _is_tire_texture_name(String(info.get("name", "")))
+
+
+func _is_tire_texture_name(texture_name: String) -> bool:
+	return texture_name.to_upper().ends_with("_TIRE")
+
+
 func _texture_hash_for_block_dict(obj: Dictionary, block: Dictionary) -> int:
 	var hashes: Array = obj.get("texture_hashes", [])
 	var texture_index := int(block.get("texture_index", -1))
@@ -722,7 +749,7 @@ func _alias_texture_name_for_block(car_id: String, obj: Dictionary, block: Dicti
 	if CAR_WINDOW_MATERIAL_HASHES.has(source_hash):
 		return "DASHWINDOW"
 
-	var block_bounds := _block_bounds_ps2(obj, block)
+	var block_bounds := _block_bounds_ps2(obj, block, false)
 	if block_bounds.is_empty():
 		return ""
 
@@ -730,52 +757,67 @@ func _alias_texture_name_for_block(car_id: String, obj: Dictionary, block: Dicti
 	var object_max: Vector3 = object_bounds["max"]
 	var block_min: Vector3 = block_bounds["min"]
 	var block_max: Vector3 = block_bounds["max"]
+	var transformed_object_bounds := _object_bounds_ps2(obj, true)
+	var transformed_block_bounds := _block_bounds_ps2(obj, block, true)
+	if transformed_object_bounds.is_empty() or transformed_block_bounds.is_empty():
+		return ""
+	var transformed_object_min: Vector3 = transformed_object_bounds["min"]
+	var transformed_object_max: Vector3 = transformed_object_bounds["max"]
+	var transformed_block_min: Vector3 = transformed_block_bounds["min"]
+	var transformed_block_max: Vector3 = transformed_block_bounds["max"]
 	var object_size := (object_max - object_min).abs()
 	var block_size := (block_max - block_min).abs()
-	var front_limit := object_min.x + maxf(object_size.x * 0.12, 0.18)
-	var rear_limit := object_max.x - maxf(object_size.x * 0.12, 0.18)
-	var low_limit := object_min.z + maxf(object_size.z * 0.45, 0.28)
+	var transformed_object_size := (transformed_object_max - transformed_object_min).abs()
+	var transformed_block_size := (transformed_block_max - transformed_block_min).abs()
+	var transformed_block_center_x := (transformed_block_min.x + transformed_block_max.x) * 0.5
+	var front_limit := transformed_object_min.x + maxf(transformed_object_size.x * 0.12, 0.18)
+	var rear_limit := transformed_object_max.x - maxf(transformed_object_size.x * 0.12, 0.18)
 	var front_light_height_limit := object_min.z + maxf(object_size.z * 0.72, 0.70)
-	var light_length_limit := maxf(object_size.x * 0.18, 0.32)
+	var rear_light_height_limit := object_min.z + maxf(object_size.z * 0.72, 0.70)
+	var light_length_limit := maxf(transformed_object_size.x * 0.18, 0.32)
 	var light_width_limit := maxf(object_size.y * 0.55, 0.55)
 
-	if block_size.x <= light_length_limit and block_size.y <= light_width_limit and block_min.x <= front_limit and block_max.z <= front_light_height_limit:
+	if transformed_block_size.x <= light_length_limit and block_size.y <= light_width_limit and transformed_block_center_x <= front_limit and block_max.z <= front_light_height_limit:
 		return "HEADLIGHT"
-	if block_size.x <= light_length_limit and block_size.y <= light_width_limit and block_max.x >= rear_limit and block_max.z <= low_limit:
+	if transformed_block_size.x <= light_length_limit and block_size.y <= light_width_limit and transformed_block_center_x >= rear_limit and block_max.z <= rear_light_height_limit:
 		return "BRAKELIGHT"
 	return ""
 
 
-func _resolved_alias_texture_name(texture_bank, car_id: String, alias_name: String, block_bounds: Dictionary) -> String:
+func _resolved_alias_texture_name(texture_bank, car_id: String, alias_name: String, block_bounds: Dictionary, object_bounds: Dictionary) -> String:
 	if alias_name == "DASHWINDOW":
 		return alias_name if int(texture_bank.get_hash_for_name(alias_name)) != 0 else ""
-	var candidates := _candidate_texture_names_for_block(car_id, alias_name, block_bounds)
+	var candidates := _candidate_texture_names_for_block(car_id, alias_name, block_bounds, object_bounds)
 	for candidate in candidates:
 		if int(texture_bank.get_hash_for_name(candidate)) != 0:
 			return candidate
 	return ""
 
 
-func _candidate_texture_names_for_block(car_id: String, semantic: String, block_bounds: Dictionary) -> Array[String]:
+func _candidate_texture_names_for_block(car_id: String, semantic: String, block_bounds: Dictionary, object_bounds: Dictionary) -> Array[String]:
 	var default_name := "%s_%s" % [car_id, semantic]
-	var side_prefixes := _side_texture_prefixes(block_bounds)
-	var candidates: Array[String] = [default_name]
+	var side_prefixes := _side_texture_prefixes(block_bounds, object_bounds)
+	var candidates: Array[String] = []
 	for side_prefix in side_prefixes:
 		for suffix in _side_texture_suffixes(side_prefix):
 			candidates.append("%s_%s_%s" % [car_id, semantic, suffix])
+	candidates.append(default_name)
 	candidates.append_array(_candidate_texture_names(car_id, semantic))
 	return _unique_strings(candidates)
 
 
-func _side_texture_prefixes(block_bounds: Dictionary) -> Array[String]:
-	if block_bounds.is_empty():
+func _side_texture_prefixes(block_bounds: Dictionary, object_bounds: Dictionary = {}) -> Array[String]:
+	if block_bounds.is_empty() or object_bounds.is_empty():
 		var fallback: Array[String] = ["LEFT", "RIGHT"]
 		return fallback
 	var block_min: Vector3 = block_bounds["min"]
 	var block_max: Vector3 = block_bounds["max"]
+	var object_min: Vector3 = object_bounds["min"]
+	var object_max: Vector3 = object_bounds["max"]
 	var center_y := (block_min.y + block_max.y) * 0.5
+	var object_center_y := (object_min.y + object_max.y) * 0.5
 	var side_prefixes: Array[String] = []
-	if center_y > 0.0:
+	if center_y > object_center_y:
 		side_prefixes.append("RIGHT")
 		side_prefixes.append("LEFT")
 	else:
@@ -796,19 +838,23 @@ func _side_texture_suffixes(side_prefix: String) -> Array[String]:
 	return empty
 
 
-func _apply_resolved_texture_uv_flags(block: Dictionary, alias_name: String, target_name: String, block_bounds: Dictionary) -> void:
+func _apply_resolved_texture_uv_flags(block: Dictionary, alias_name: String, target_name: String, block_bounds: Dictionary, object_bounds: Dictionary) -> void:
 	if alias_name != "HEADLIGHT" and alias_name != "BRAKELIGHT":
 		return
 	if _light_texture_has_side_suffix(target_name):
 		return
-	if block_bounds.is_empty():
+	if block_bounds.is_empty() or object_bounds.is_empty():
 		return
 	var block_min: Vector3 = block_bounds["min"]
 	var block_max: Vector3 = block_bounds["max"]
+	var object_min: Vector3 = object_bounds["min"]
+	var object_max: Vector3 = object_bounds["max"]
 	var center_y := (block_min.y + block_max.y) * 0.5
-	if absf(center_y) <= 0.0001:
+	var object_center_y := (object_min.y + object_max.y) * 0.5
+	var relative_center_y := center_y - object_center_y
+	if absf(relative_center_y) <= 0.0001:
 		return
-	block["resolved_texture_mirror_u"] = center_y > 0.0
+	block["resolved_texture_mirror_u"] = relative_center_y > 0.0
 
 
 func _light_texture_has_side_suffix(texture_name: String) -> bool:
@@ -826,6 +872,7 @@ func _candidate_texture_names(car_id: String, semantic: String) -> Array[String]
 				"%s_HEADLIGHT" % car_id,
 				"%s_HEADLIGHT_LEFT" % car_id,
 				"%s_HEADLIGHT_LEF" % car_id,
+				"%s_HEADLIGHT_RIGHT" % car_id,
 				"%s_HEADLIGHT_RIGH" % car_id,
 				"%s_HEADLIGHT_RIG" % car_id,
 			]
@@ -835,6 +882,7 @@ func _candidate_texture_names(car_id: String, semantic: String) -> Array[String]
 				"%s_BRAKELIGHT" % car_id,
 				"%s_BRAKELIGHT_LEFT" % car_id,
 				"%s_BRAKELIGHT_LEF" % car_id,
+				"%s_BRAKELIGHT_RIGHT" % car_id,
 				"%s_BRAKELIGHT_RIGH" % car_id,
 				"%s_BRAKELIGHT_RIG" % car_id,
 			]
@@ -864,18 +912,18 @@ func _is_body_variant_name(object_name: String, car_id: String) -> bool:
 	return false
 
 
-func _object_bounds_ps2(obj: Dictionary) -> Dictionary:
+func _object_bounds_ps2(obj: Dictionary, apply_object_transform: bool = true) -> Dictionary:
 	var out := {}
 	var blocks: Array = obj.get("blocks", [])
 	for block in blocks:
-		var block_bounds := _block_bounds_ps2(obj, block)
+		var block_bounds := _block_bounds_ps2(obj, block, apply_object_transform)
 		if block_bounds.is_empty():
 			continue
 		out = _merge_bounds(out, block_bounds)
 	return out
 
 
-func _block_bounds_ps2(obj: Dictionary, block: Dictionary) -> Dictionary:
+func _block_bounds_ps2(obj: Dictionary, block: Dictionary, apply_object_transform: bool = true) -> Dictionary:
 	var run: Dictionary = block.get("run", {})
 	var vertices: Array = run.get("vertices", [])
 	if vertices.is_empty():
@@ -884,7 +932,7 @@ func _block_bounds_ps2(obj: Dictionary, block: Dictionary) -> Dictionary:
 	var min_value := Vector3(INF, INF, INF)
 	var max_value := Vector3(-INF, -INF, -INF)
 	for vertex in vertices:
-		var p: Vector3 = MathUtils.transform_point_rows(vertex, transform_rows)
+		var p: Vector3 = MathUtils.transform_point_rows(vertex, transform_rows) if apply_object_transform else vertex
 		min_value = Vector3(
 			minf(min_value.x, p.x),
 			minf(min_value.y, p.y),

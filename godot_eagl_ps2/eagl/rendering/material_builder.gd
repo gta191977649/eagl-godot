@@ -18,19 +18,22 @@ var texture_filter_mode := "linear_mipmap"
 func material_for_block(object_name: String, block: Dictionary, block_index: int, uses_vertex_colors: bool, texture_hash: int = 0) -> Material:
 	var use_lighting := _should_use_lit_material(object_name)
 	var fallback_kind := _fallback_material_kind(object_name, texture_hash)
+	var texture_info: Dictionary = texture_bank.get_info(texture_hash) if texture_bank != null and texture_hash != 0 and texture_bank.has_texture(texture_hash) else {}
+	var texture_uses_vertex_color := uses_vertex_colors and not _should_ignore_texture_vertex_color(object_name, texture_info)
+	var texture_repeat_enabled := not _should_clamp_texture_uv(object_name, texture_info)
 	var key := "%s:%s:%s:%s:%s" % [
 		object_name,
 		texture_hash,
 		block.get("render_flag", 0),
 		texture_filter_mode,
-		("%s_%s_%s" % ["lit" if use_lighting else "unlit", "vc" if uses_vertex_colors else "flat", fallback_kind]),
+		("%s_%s_%s_%s" % ["lit" if use_lighting else "unlit", "vc" if texture_uses_vertex_color else "flat", "repeat" if texture_repeat_enabled else "clamp", fallback_kind]),
 	]
 	if _materials.has(key):
 		return _materials[key]
 
 	if texture_bank != null and texture_hash != 0 and texture_bank.has_texture(texture_hash):
 		var texture = texture_bank.get_texture(texture_hash)
-		var info: Dictionary = texture_bank.get_info(texture_hash)
+		var info: Dictionary = texture_info
 		var alpha_mode: String = info.get("alpha_mode", "")
 		var source_alpha_mode := alpha_mode
 		var alpha_cutoff: float = float(info.get("alpha_cutoff", 0.5))
@@ -39,11 +42,11 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 			alpha_mode = ""
 		var double_sided := _should_double_side_alpha(object_name, info, int(block.get("render_flag", 0)))
 		var shader_material := ShaderMaterial.new()
-		shader_material.shader = _get_texture_shader(alpha_mode, double_sided, use_lighting)
+		shader_material.shader = _get_texture_shader(alpha_mode, double_sided, use_lighting, false, texture_repeat_enabled)
 		shader_material.resource_name = "EAGL_%s" % info.get("name", "texture")
 		shader_material.set_shader_parameter("albedo_texture", texture)
 		shader_material.set_shader_parameter("albedo_tint", Color.WHITE)
-		shader_material.set_shader_parameter("use_vertex_color", uses_vertex_colors)
+		shader_material.set_shader_parameter("use_vertex_color", texture_uses_vertex_color)
 		shader_material.set_shader_parameter("vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
 		shader_material.set_shader_parameter("alpha_cutoff", alpha_cutoff)
 		shader_material.set_meta("eagl_texture_name", info.get("name", ""))
@@ -52,9 +55,11 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 		shader_material.set_meta("eagl_alpha_cutoff", alpha_cutoff)
 		shader_material.set_meta("eagl_double_sided", double_sided)
 		shader_material.set_meta("eagl_texture_filter_mode", texture_filter_mode)
+		shader_material.set_meta("eagl_texture_repeat_enabled", texture_repeat_enabled)
 		shader_material.set_meta("eagl_use_lighting", use_lighting)
 		shader_material.set_meta("eagl_force_opaque_road_edge", force_opaque_road_edge)
 		shader_material.set_meta("eagl_vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
+		shader_material.set_meta("eagl_use_vertex_color", texture_uses_vertex_color)
 		shader_material.set_meta("eagl_is_any_semitransparency", info.get("is_any_semitransparency", 0))
 		shader_material.set_meta("eagl_alpha_bits", info.get("alpha_bits", 0))
 		shader_material.set_meta("eagl_alpha_fix", info.get("alpha_fix", 0))
@@ -166,6 +171,18 @@ func _should_use_lit_material(object_name: String) -> bool:
 	return not (name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER")
 
 
+func _should_ignore_texture_vertex_color(object_name: String, texture_info: Dictionary) -> bool:
+	var object_upper := object_name.to_upper()
+	var texture_name := String(texture_info.get("name", "")).to_upper()
+	return object_upper.contains("_TIRE_") and texture_name.ends_with("_TIRE")
+
+
+func _should_clamp_texture_uv(object_name: String, texture_info: Dictionary) -> bool:
+	var object_upper := object_name.to_upper()
+	var texture_name := String(texture_info.get("name", "")).to_upper()
+	return object_upper.contains("_TIRE_") and texture_name.ends_with("_TIRE")
+
+
 func _should_use_brake_material(object_name: String) -> bool:
 	return object_name.to_upper().contains("_BRAKE_")
 
@@ -224,14 +241,15 @@ func _fallback_material_roughness(fallback_kind: String) -> float:
 	return 1.0
 
 
-func _get_texture_shader(alpha_mode: String, double_sided: bool, use_lighting: bool, distance_fade: bool = false) -> Shader:
+func _get_texture_shader(alpha_mode: String, double_sided: bool, use_lighting: bool, distance_fade: bool = false, repeat_enabled: bool = true) -> Shader:
 	var sampler_filter := _sampler_filter_hint()
-	var key := "%s:%s:%s:%s:%s" % [alpha_mode, "double" if double_sided else "single", "lit" if use_lighting else "unlit", sampler_filter, "distance_fade" if distance_fade else "static"]
+	var key := "%s:%s:%s:%s:%s:%s" % [alpha_mode, "double" if double_sided else "single", "lit" if use_lighting else "unlit", sampler_filter, "repeat" if repeat_enabled else "clamp", "distance_fade" if distance_fade else "static"]
 	if _texture_shaders.has(key):
 		return _texture_shaders[key]
 	var shader := Shader.new()
 	var cull_mode := "cull_disabled"
 	var lighting_mode := "" if use_lighting else "unshaded, "
+	var repeat_mode := "repeat_enable" if repeat_enabled else "repeat_disable"
 	var render_mode := "%s%s, depth_draw_opaque" % [lighting_mode, cull_mode]
 	if alpha_mode == "BLEND" or distance_fade:
 		render_mode = "%s%s, blend_mix, depth_prepass_alpha" % [lighting_mode, cull_mode]
@@ -244,7 +262,7 @@ func _get_texture_shader(alpha_mode: String, double_sided: bool, use_lighting: b
 shader_type spatial;
 render_mode %s;
 
-uniform sampler2D albedo_texture : source_color, repeat_enable, %s;
+uniform sampler2D albedo_texture : source_color, %s, %s;
 uniform vec4 albedo_tint : source_color = vec4(1.0);
 uniform bool use_vertex_color = true;
 uniform float vertex_color_modulate_scale = 1.9921875;
@@ -278,6 +296,7 @@ void fragment() {
 }
 """ % [
 	render_mode,
+	repeat_mode,
 	sampler_filter,
 	alpha_lines,
 ]
