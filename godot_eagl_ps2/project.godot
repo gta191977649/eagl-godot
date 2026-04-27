@@ -23,6 +23,10 @@ EAGLManager="*res://eagl/core/eagl_manager.gd"
 
 game_root="/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA"
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/M.A.V.S/plugin.cfg", "res://addons/font_auto_size_labels/plugin.cfg")
+
 [physics]
 
 3d/physics_engine="Jolt Physics"
@@ -30,5 +34,3 @@ game_root="/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA"
 [rendering]
 
 rendering_device/driver.windows="d3d12"
-renderer/rendering_method="gl_compatibility"
-renderer/rendering_method.mobile="gl_compatibility"

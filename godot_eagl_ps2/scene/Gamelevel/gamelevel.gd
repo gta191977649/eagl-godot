@@ -23,7 +23,7 @@ const CAMERA_MAX_PITCH := deg_to_rad(45.0)
 @export var expand_scenery_instances := false
 @export var generate_lods := true
 @export var shadow_texture_visibility_distance := 300.0
-@export var shadow_texture_visibility_margin := 80.0
+@export var shadow_texzture_visibility_margin := 80.0
 @export var track_use_scene_lighting := false
 @export var ambient_light_energy := 1.65
 @export var build_collision := true
@@ -34,7 +34,7 @@ const CAMERA_MAX_PITCH := deg_to_rad(45.0)
 @export var build_route := true
 @export var route_loop := true
 @export var enable_route_respawn := true
-@export var fall_respawn_drop := 25.0
+@export var fall_respawn_drop := 100.0
 @export var respawn_height_offset := 0.25
 @export var respawn_cooldown := 1.0
 @export_enum(

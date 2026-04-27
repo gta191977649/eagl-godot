@@ -1,0 +1,99 @@
+[gd_scene format=3 uid="uid://dm1ajn5egucid"]
+
+[ext_resource type="Theme" uid="uid://cifdhwluyikjx" path="res://demo/demo_label_theme.tres" id="1_5kqak"]
+[ext_resource type="Script" uid="uid://bttgnk3bb2a8i" path="res://addons/font_auto_size_labels/auto_size_label.gd" id="2_gbljs"]
+[ext_resource type="Script" uid="uid://co0lo02vnu10n" path="res://addons/font_auto_size_labels/auto_size_rich_text_label.gd" id="3_h5141"]
+
+[node name="InEditorDemo" type="Control" unique_id=286596428]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+metadata/_edit_lock_ = true
+
+[node name="BKG" type="ColorRect" parent="." unique_id=1120189087]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.0605303, 0.0605304, 0.0605303, 1)
+metadata/_edit_lock_ = true
+
+[node name="LabelWithScript" type="Label" parent="." unique_id=1561196119]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -547.0
+offset_top = 80.0
+offset_right = -74.0
+offset_bottom = 284.0
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_5kqak")
+theme_override_constants/outline_size = 16
+theme_override_font_sizes/font_size = 40
+text = "Label with autosize. Try resizing this!"
+horizontal_alignment = 1
+vertical_alignment = 1
+autowrap_mode = 3
+clip_text = true
+script = ExtResource("2_gbljs")
+_max_size = 40
+_min_size = 20
+_outline_ratio = 0.4
+_current_font_size = 40
+_editor_defaults_set = true
+
+[node name="LabelNoScript" type="Label" parent="." unique_id=1681961274]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = 51.0
+offset_top = 80.0
+offset_right = 540.0
+offset_bottom = 284.0
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_5kqak")
+theme_override_font_sizes/font_size = 40
+text = "Label with no script. You can try and resize this as well :)"
+horizontal_alignment = 1
+vertical_alignment = 1
+autowrap_mode = 3
+clip_text = true
+
+[node name="RichTextLabel" type="RichTextLabel" parent="." unique_id=1376741413]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -540.0
+offset_top = -267.0
+offset_right = 539.0
+offset_bottom = 24.0
+grow_horizontal = 2
+grow_vertical = 2
+pivot_offset = Vector2(540, 165)
+theme = ExtResource("1_5kqak")
+theme_override_font_sizes/normal_font_size = 45
+text = "This is a RichTextLabel, the line count methods work are wonky, but calculating the height of the text content against the height of the rect helps us achieve the same result! Try resizing and/or editing the text!"
+scroll_active = false
+shortcut_keys_enabled = false
+script = ExtResource("3_h5141")
+_max_size = 45
+_min_size = 20
+_outline_ratio = null
+_current_font_size = 45
+_editor_defaults_set = true

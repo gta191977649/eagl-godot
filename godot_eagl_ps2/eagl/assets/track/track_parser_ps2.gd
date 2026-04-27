@@ -915,7 +915,7 @@ func _count_collision_skip(skipped: Dictionary, reason: String) -> void:
 
 
 func _parse_route_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray) -> void:
-	var points: Array[Dictionary] = []
+	var raw_points: Array[Dictionary] = []
 	var source_chunk_offset := -1
 	var declared_count := 0
 	for chunk in _walk_chunks(chunks):
@@ -936,7 +936,7 @@ func _parse_route_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray
 				Binary.f32(payload, record_offset + 20)
 			)
 			var aux := Binary.f32(payload, record_offset + 24)
-			points.append({
+			raw_points.append({
 				"index": index,
 				"name": name,
 				"position_ps2_2d": point_ps2_2d,
@@ -947,13 +947,69 @@ func _parse_route_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray
 			})
 		break
 
+	var normalized_route := _normalized_route_points(raw_points)
+	var points: Array[Dictionary] = normalized_route["points"]
 	asset.route_points = points
 	asset.route_stats = {
 		"point_count": points.size(),
+		"raw_point_count": raw_points.size(),
 		"declared_count": declared_count,
 		"source_chunk_offset": source_chunk_offset,
 		"source_chunk_id": CHUNK_ROUTE_RADAR if source_chunk_offset >= 0 else 0,
+		"filtered_non_route_point_count": int(normalized_route["filtered_non_route_point_count"]),
+		"sorted_by_radar_name": bool(normalized_route["sorted_by_radar_name"]),
 	}
+
+
+func _normalized_route_points(raw_points: Array[Dictionary]) -> Dictionary:
+	var route_points: Array[Dictionary] = []
+	var route_groups := {}
+	for point in raw_points:
+		var name := String(point.get("name", ""))
+		var sequence := _route_point_sequence(name)
+		if sequence < 0:
+			continue
+		var route_point := point.duplicate(true)
+		route_point["route_sequence"] = sequence
+		route_point["route_group"] = _route_point_group(name)
+		route_points.append(route_point)
+		route_groups[route_point["route_group"]] = true
+
+	var sorted_by_name := false
+	if route_groups.size() == 1:
+		route_points.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			var a_sequence := int(a.get("route_sequence", 0))
+			var b_sequence := int(b.get("route_sequence", 0))
+			if a_sequence == b_sequence:
+				return int(a.get("index", 0)) < int(b.get("index", 0))
+			return a_sequence < b_sequence
+		)
+		sorted_by_name = true
+
+	return {
+		"points": route_points,
+		"filtered_non_route_point_count": raw_points.size() - route_points.size(),
+		"sorted_by_radar_name": sorted_by_name,
+	}
+
+
+func _route_point_group(name: String) -> String:
+	var separator := name.rfind("_")
+	if separator <= 0:
+		return ""
+	return name.substr(0, separator)
+
+
+func _route_point_sequence(name: String) -> int:
+	var separator := name.rfind("_")
+	if separator < 0 or separator >= name.length() - 1:
+		return -1
+	var suffix := name.substr(separator + 1)
+	for index in range(suffix.length()):
+		var ch := suffix.substr(index, 1)
+		if ch < "0" or ch > "9":
+			return -1
+	return suffix.to_int()
 
 
 func _ascii_fixed(payload: PackedByteArray, offset: int, length: int) -> String:

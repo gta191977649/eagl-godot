@@ -3,6 +3,7 @@ extends RefCounted
 
 const DEFAULT_DEBUG_HEIGHT_OFFSET := 1.0
 const SURFACE_EPSILON := 0.001
+const ROUTE_PROJECTION_SEARCH_RADIUS := 180.0
 
 
 func add_track_route(track_root: Node3D, asset, options: Dictionary = {}) -> Dictionary:
@@ -18,6 +19,8 @@ func add_track_route(track_root: Node3D, asset, options: Dictionary = {}) -> Dic
 	stats["enabled"] = true
 	stats["point_count"] = route_points.size()
 	stats["projected_point_count"] = _projected_point_count(route_points)
+	stats["projection_sources"] = _projection_source_counts(route_points)
+	stats["max_projection_horizontal_distance"] = _max_projection_horizontal_distance(route_points)
 	stats["loop"] = bool(options.get("route_loop", true))
 
 	if not route_points.is_empty():
@@ -92,24 +95,52 @@ static func nearest_route_point(route_points: Array, position: Vector3, loop: bo
 
 func _project_route_points(source_points: Array[Dictionary], collision_surfaces: Array[Dictionary]) -> Array[Dictionary]:
 	var road_faces := PackedVector3Array()
+	var terrain_faces := PackedVector3Array()
 	for surface in collision_surfaces:
 		var category := String(surface.get("category", ""))
-		if category != "Road" and category != "Terrain":
-			continue
-		road_faces.append_array(surface.get("faces", PackedVector3Array()))
+		if category == "Road":
+			road_faces.append_array(surface.get("faces", PackedVector3Array()))
+		elif category == "Terrain":
+			terrain_faces.append_array(surface.get("faces", PackedVector3Array()))
 
 	var out: Array[Dictionary] = []
 	for point in source_points:
 		var flat: Vector3 = point.get("position_godot_flat", Vector3.ZERO)
-		var projected := _project_to_surface(flat, road_faces)
+		var projected := _project_to_surface(flat, road_faces, terrain_faces)
 		var route_point := point.duplicate(true)
 		route_point["position"] = projected.get("position", flat)
 		route_point["projected"] = bool(projected.get("projected", false))
+		route_point["projection_source"] = String(projected.get("source", "none"))
+		route_point["projection_horizontal_distance"] = float(projected.get("horizontal_distance", 0.0))
 		out.append(route_point)
 	return out
 
 
-func _project_to_surface(flat_point: Vector3, faces: PackedVector3Array) -> Dictionary:
+func _project_to_surface(flat_point: Vector3, road_faces: PackedVector3Array, terrain_faces: PackedVector3Array) -> Dictionary:
+	var road_exact := _project_to_faces_exact(flat_point, road_faces)
+	if bool(road_exact.get("projected", false)):
+		road_exact["source"] = "Road"
+		return road_exact
+
+	var road_nearest := _project_to_faces_nearest(flat_point, road_faces, ROUTE_PROJECTION_SEARCH_RADIUS)
+	if bool(road_nearest.get("projected", false)):
+		road_nearest["source"] = "RoadNearest"
+		return road_nearest
+
+	var terrain_exact := _project_to_faces_exact(flat_point, terrain_faces)
+	if bool(terrain_exact.get("projected", false)):
+		terrain_exact["source"] = "Terrain"
+		return terrain_exact
+
+	var terrain_nearest := _project_to_faces_nearest(flat_point, terrain_faces, ROUTE_PROJECTION_SEARCH_RADIUS)
+	if bool(terrain_nearest.get("projected", false)):
+		terrain_nearest["source"] = "TerrainNearest"
+		return terrain_nearest
+
+	return {"projected": false, "position": flat_point, "source": "none", "horizontal_distance": 0.0}
+
+
+func _project_to_faces_exact(flat_point: Vector3, faces: PackedVector3Array) -> Dictionary:
 	var best_y := -INF
 	var best_found := false
 	for index in range(0, faces.size() - 2, 3):
@@ -125,8 +156,33 @@ func _project_to_surface(flat_point: Vector3, faces: PackedVector3Array) -> Dict
 		best_y = y
 		best_found = true
 	if best_found:
-		return {"projected": true, "position": Vector3(flat_point.x, best_y, flat_point.z)}
-	return {"projected": false, "position": flat_point}
+		return {"projected": true, "position": Vector3(flat_point.x, best_y, flat_point.z), "horizontal_distance": 0.0}
+	return {"projected": false, "position": flat_point, "horizontal_distance": 0.0}
+
+
+func _project_to_faces_nearest(flat_point: Vector3, faces: PackedVector3Array, max_horizontal_distance: float) -> Dictionary:
+	var point_2d := Vector2(flat_point.x, flat_point.z)
+	var best_position := flat_point
+	var best_distance_sq := max_horizontal_distance * max_horizontal_distance
+	var best_found := false
+	for index in range(0, faces.size() - 2, 3):
+		var a := faces[index]
+		var b := faces[index + 1]
+		var c := faces[index + 2]
+		var closest_2d := _closest_point_on_triangle_xz(point_2d, a, b, c)
+		var distance_sq := point_2d.distance_squared_to(closest_2d)
+		if distance_sq > best_distance_sq:
+			continue
+		var bary := _barycentric_xz(Vector3(closest_2d.x, 0.0, closest_2d.y), a, b, c)
+		if bary.is_empty():
+			continue
+		var y := float(bary["u"]) * a.y + float(bary["v"]) * b.y + float(bary["w"]) * c.y
+		best_position = Vector3(closest_2d.x, y, closest_2d.y)
+		best_distance_sq = distance_sq
+		best_found = true
+	if best_found:
+		return {"projected": true, "position": best_position, "horizontal_distance": sqrt(best_distance_sq)}
+	return {"projected": false, "position": flat_point, "horizontal_distance": 0.0}
 
 
 func _barycentric_xz(point: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Dictionary:
@@ -142,6 +198,53 @@ func _barycentric_xz(point: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Dict
 	if u < -SURFACE_EPSILON or v < -SURFACE_EPSILON or w < -SURFACE_EPSILON:
 		return {}
 	return {"u": u, "v": v, "w": w}
+
+
+func _closest_point_on_triangle_xz(point: Vector2, a: Vector3, b: Vector3, c: Vector3) -> Vector2:
+	var a2 := Vector2(a.x, a.z)
+	var b2 := Vector2(b.x, b.z)
+	var c2 := Vector2(c.x, c.z)
+	var ab := b2 - a2
+	var ac := c2 - a2
+	var ap := point - a2
+	var d1 := ab.dot(ap)
+	var d2 := ac.dot(ap)
+	if d1 <= 0.0 and d2 <= 0.0:
+		return a2
+
+	var bp := point - b2
+	var d3 := ab.dot(bp)
+	var d4 := ac.dot(bp)
+	if d3 >= 0.0 and d4 <= d3:
+		return b2
+
+	var vc := d1 * d4 - d3 * d2
+	if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+		var edge_ab_t := d1 / (d1 - d3)
+		return a2 + ab * edge_ab_t
+
+	var cp := point - c2
+	var d5 := ab.dot(cp)
+	var d6 := ac.dot(cp)
+	if d6 >= 0.0 and d5 <= d6:
+		return c2
+
+	var vb := d5 * d2 - d1 * d6
+	if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+		var edge_ac_t := d2 / (d2 - d6)
+		return a2 + ac * edge_ac_t
+
+	var va := d3 * d6 - d5 * d4
+	if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+		var edge_bc_t := (d4 - d3) / ((d4 - d3) + (d5 - d6))
+		return b2 + (c2 - b2) * edge_bc_t
+
+	var denom := va + vb + vc
+	if absf(denom) <= SURFACE_EPSILON:
+		return a2
+	var face_v := vb / denom
+	var face_w := vc / denom
+	return a2 + ab * face_v + ac * face_w
 
 
 func _add_route_overlay(route_root: Node3D, route_points: Array[Dictionary], visible: bool, height_offset: float, loop: bool) -> void:
@@ -205,6 +308,21 @@ func _projected_point_count(route_points: Array[Dictionary]) -> int:
 		if bool(point.get("projected", false)):
 			count += 1
 	return count
+
+
+func _projection_source_counts(route_points: Array[Dictionary]) -> Dictionary:
+	var counts := {}
+	for point in route_points:
+		var source := String(point.get("projection_source", "none"))
+		counts[source] = int(counts.get(source, 0)) + 1
+	return counts
+
+
+func _max_projection_horizontal_distance(route_points: Array[Dictionary]) -> float:
+	var max_distance := 0.0
+	for point in route_points:
+		max_distance = maxf(max_distance, float(point.get("projection_horizontal_distance", 0.0)))
+	return max_distance
 
 
 func _apply_root_metadata(track_root: Node3D, stats: Dictionary, route_points: Array) -> void:

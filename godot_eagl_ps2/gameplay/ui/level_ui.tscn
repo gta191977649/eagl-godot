@@ -1,0 +1,95 @@
+[gd_scene format=3 uid="uid://d1767pd6qqkrd"]
+
+[ext_resource type="Texture2D" uid="uid://80pa1082k4tl" path="res://gameplay/ui/ui_reference.png" id="1_8op21"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_8op21"]
+bg_color = Color(0, 0, 0, 0.49803922)
+corner_detail = 1
+
+[node name="LevelUi" type="Node2D" unique_id=1906406008]
+
+[node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=242030697]
+
+[node name="LevelHud" type="Control" parent="CanvasLayer" unique_id=772703447]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="TextureRect" type="TextureRect" parent="CanvasLayer/LevelHud" unique_id=1955900059]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+rotation = -0.00013073272
+texture = ExtResource("1_8op21")
+expand_mode = 1
+
+[node name="TopLeftStack" type="VBoxContainer" parent="CanvasLayer/LevelHud" unique_id=1196330241]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.147569
+anchor_top = 0.04784
+anchor_right = 0.317708
+anchor_bottom = 0.95
+theme_override_constants/separation = 10
+metadata/_edit_use_anchors_ = true
+
+[node name="TopLeftRank" type="PanelContainer" parent="CanvasLayer/LevelHud/TopLeftStack" unique_id=291996404]
+custom_minimum_size = Vector2(0, 80)
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
+
+[node name="TopLeftStandings" type="PanelContainer" parent="CanvasLayer/LevelHud/TopLeftStack" unique_id=1129955624]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
+
+[node name="TopLeftMap" type="PanelContainer" parent="CanvasLayer/LevelHud/TopLeftStack" unique_id=1036088399]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
+
+[node name="TopCenterWatchdog" type="PanelContainer" parent="CanvasLayer/LevelHud" unique_id=902193421]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.38
+anchor_top = 0.2
+anchor_right = 0.62
+anchor_bottom = 0.24
+theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
+metadata/_edit_use_anchors_ = true
+
+[node name="TopCenterMirror" type="PanelContainer" parent="CanvasLayer/LevelHud" unique_id=1382584589]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.36
+anchor_top = 0.04784
+anchor_right = 0.64
+anchor_bottom = 0.21
+theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
+metadata/_edit_use_anchors_ = true
+
+[node name="TopRightLaps" type="PanelContainer" parent="CanvasLayer/LevelHud" unique_id=1307104559]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.645
+anchor_top = 0.04784
+anchor_right = 0.852431
+anchor_bottom = 0.21
+theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
+metadata/_edit_use_anchors_ = true
+
+[node name="BottomRightSpeedo" type="PanelContainer" parent="CanvasLayer/LevelHud" unique_id=1969397881]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.7
+anchor_top = 0.65
+anchor_right = 0.89
+anchor_bottom = 0.95
+theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
+metadata/_edit_use_anchors_ = true
