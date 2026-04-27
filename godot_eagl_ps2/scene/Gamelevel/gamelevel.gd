@@ -108,7 +108,7 @@ func _configure_track() -> void:
 	track.expand_scenery_instances = expand_scenery_instances
 	track.generate_lods = generate_lods
 	track.shadow_texture_visibility_distance = shadow_texture_visibility_distance
-	track.shadow_texture_visibility_margin = shadow_texture_visibility_margin
+	#track.shadow_texture_visibility_margin = shadow_texture_visibility_margin
 	track.texture_filter_mode = texture_filter_mode
 	track.track_use_scene_lighting = track_use_scene_lighting
 	track.build_collision = build_collision

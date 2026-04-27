@@ -18,7 +18,8 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 
-[node name="TextureRect" type="TextureRect" parent="CanvasLayer/LevelHud" unique_id=1955900059]
+[node name="reference" type="TextureRect" parent="CanvasLayer/LevelHud" unique_id=1955900059]
+visible = false
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
@@ -79,7 +80,7 @@ layout_mode = 1
 anchors_preset = -1
 anchor_left = 0.645
 anchor_top = 0.04784
-anchor_right = 0.852431
+anchor_right = 0.89
 anchor_bottom = 0.21
 theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
 metadata/_edit_use_anchors_ = true
@@ -87,9 +88,9 @@ metadata/_edit_use_anchors_ = true
 [node name="BottomRightSpeedo" type="PanelContainer" parent="CanvasLayer/LevelHud" unique_id=1969397881]
 layout_mode = 1
 anchors_preset = -1
-anchor_left = 0.7
-anchor_top = 0.65
-anchor_right = 0.89
-anchor_bottom = 0.95
+anchor_left = 0.6996528
+anchor_top = 0.64969134
+anchor_right = 0.8896529
+anchor_bottom = 0.9496914
 theme_override_styles/panel = SubResource("StyleBoxFlat_8op21")
 metadata/_edit_use_anchors_ = true

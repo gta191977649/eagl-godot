@@ -3,9 +3,12 @@
 [ext_resource type="Script" uid="uid://dy84qu6sq5k27" path="res://scene/Gamelevel/gamelevel.gd" id="1"]
 [ext_resource type="PackedScene" path="res://eagl/entity/Track.tscn" id="2"]
 [ext_resource type="PackedScene" uid="uid://bx30y3w6dic5l" path="res://eagl/entity/Car.tscn" id="3"]
+[ext_resource type="PackedScene" uid="uid://d1767pd6qqkrd" path="res://gameplay/ui/level_ui.tscn" id="4_g6qnq"]
+[ext_resource type="AudioStream" uid="uid://1ubhf6rian52" path="res://scene/Gamelevel/test.mp3" id="5_om873"]
 
 [node name="Gamelevel" type="Node3D" unique_id=147918230]
 script = ExtResource("1")
+track_use_scene_lighting = true
 
 [node name="Track" parent="." unique_id=1712616310 instance=ExtResource("2")]
 load_on_ready = false
@@ -19,3 +22,9 @@ current = true
 fov = 70.0
 near = 0.1
 far = 30000.0
+
+[node name="LevelUi" parent="." unique_id=1906406008 instance=ExtResource("4_g6qnq")]
+
+[node name="AudioStreamPlayer" type="AudioStreamPlayer" parent="." unique_id=943783468]
+stream = ExtResource("5_om873")
+autoplay = true
