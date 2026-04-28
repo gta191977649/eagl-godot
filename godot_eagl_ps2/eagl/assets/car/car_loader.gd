@@ -69,6 +69,7 @@ func read_binary_car_name(car_id: String) -> String:
 func build_scene(asset, config = null) -> Node3D:
 	mesh_builder.texture_bank = asset.texture_bank
 	mesh_builder.generate_lods = false
+	mesh_builder.material_builder.is_vehicle = true
 	mesh_builder.reset()
 
 	var root := Node3D.new()

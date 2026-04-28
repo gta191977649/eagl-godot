@@ -171,6 +171,7 @@ func _decode_entry(path: String, data: PackedByteArray, data_base: int, entry: P
 	var image := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, rgba)
 	image.generate_mipmaps()
 	var texture := ImageTexture.create_from_image(image)
+	
 	var alpha_props := _material_alpha_properties_for_rgba(rgba, semitransparency)
 	textures[texture_hash] = texture
 	texture_info[texture_hash] = {
@@ -195,7 +196,7 @@ func _decode_entry(path: String, data: PackedByteArray, data_base: int, entry: P
 	}
 	texture_name_hashes[name.to_upper()] = texture_hash
 	decoded_count += 1
-
+	
 
 func _decode_rgba_texture(width: int, height: int, image: PackedByteArray) -> PackedByteArray:
 	if image.size() < width * height * 4:

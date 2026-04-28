@@ -1,6 +1,6 @@
-[gd_scene format=3]
+[gd_scene format=3 uid="uid://de5vwlin5j5k8"]
 
-[ext_resource type="Script" path="res://eagl/entity/track.gd" id="1"]
+[ext_resource type="Script" uid="uid://hwqinyrii3tr" path="res://eagl/entity/track.gd" id="1"]
 
 [node name="Track" type="Node3D" unique_id=920411087]
 script = ExtResource("1")

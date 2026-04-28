@@ -14,6 +14,11 @@ var _texture_shaders: Dictionary = {}
 var _procedural_shaders: Dictionary = {}
 var texture_filter_mode := "linear_mipmap"
 var use_scene_lighting := true
+var is_vehicle := false
+
+const BODY_SHADER := preload("res://shader/body.gdshader")
+const WINDOW_SHADER := preload("res://shader/window.gdshader")
+const WHEEL_SHADER := preload("res://shader/wheel.gdshader")
 
 
 func material_for_block(object_name: String, block: Dictionary, block_index: int, uses_vertex_colors: bool, texture_hash: int = 0) -> Material:
@@ -43,7 +48,38 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 			alpha_mode = ""
 		var double_sided := _should_double_side_alpha(object_name, info, int(block.get("render_flag", 0)))
 		var shader_material := ShaderMaterial.new()
-		shader_material.shader = _get_texture_shader(alpha_mode, double_sided, use_lighting, false, texture_repeat_enabled)
+		
+		var custom_shader_assigned := false
+		if is_vehicle:
+			var tex_name = String(info.get("name", "")).to_upper()
+			var obj_upper = object_name.to_upper()
+			
+			#if obj_upper.contains("TIRE") or fallback_kind.begins_with("wheel") or fallback_kind.begins_with("tire"):
+			if tex_name.contains("TIRE"):
+				shader_material.shader = WHEEL_SHADER
+				custom_shader_assigned = true
+				
+				shader_material.set_shader_parameter("metallic", 0.0)
+				shader_material.set_shader_parameter("roughness", 0.0)
+				shader_material.set_shader_parameter("specular", 0.0)
+				# else:
+				# 	shader_material.set_shader_parameter("metallic", 0.7)
+				# 	shader_material.set_shader_parameter("roughness", 0.25)
+				# 	shader_material.set_shader_parameter("specular", 0.5)
+			elif tex_name == "DASHWINDOW" or obj_upper.contains("WINDOW") or alpha_mode != "":
+				shader_material.shader = WINDOW_SHADER
+				custom_shader_assigned = true
+			elif tex_name.contains("BRAKE"):
+				shader_material.shader = BODY_SHADER
+				shader_material.set_shader_parameter("discard_black", true)
+				custom_shader_assigned = true
+			else:
+				shader_material.shader = BODY_SHADER
+				custom_shader_assigned = true
+		
+		if not custom_shader_assigned:
+			shader_material.shader = _get_texture_shader(alpha_mode, double_sided, use_lighting, false, texture_repeat_enabled)
+			
 		shader_material.resource_name = "EAGL_%s" % info.get("name", "texture")
 		shader_material.set_shader_parameter("albedo_texture", texture)
 		shader_material.set_shader_parameter("albedo_tint", Color.WHITE)
