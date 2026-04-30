@@ -22,21 +22,6 @@ func effective_ratio() -> float:
 	return gear_ratios[gear_index] * final_drive
 
 
-func update_auto_shift(delta: float) -> void:
-	if engine == null:
-		return
-	auto_shift_timer += delta
-	if auto_shift_timer < min_shift_interval:
-		return
-	if engine.rpm > upshift_rpm and current_gear < gear_ratios.size() - 1:
-		current_gear += 1
-		engine.trigger_shift_cut()
-		auto_shift_timer = 0.0
-	elif engine.rpm < downshift_rpm and current_gear > 1:
-		current_gear -= 1
-		auto_shift_timer = 0.0
-
-
 func calculate_rear_wheel_torques(throttle: float, load_rl: float, load_rr: float) -> Dictionary:
 	var torque := 0.0
 	if engine != null:

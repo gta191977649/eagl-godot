@@ -35,19 +35,21 @@ const MIN_SIDESLIP_SPEED_MS := 5.0 / 3.6
 @export_group("Tire And Surface")
 @export var base_mu := 1.0
 @export_enum("asphalt", "dirt", "grass", "gravel", "ice") var surface_type := "asphalt"
-@export var front_wheel_grip_scale := 1.0
-@export var rear_wheel_grip_scale := 1.0
+@export var front_wheel_grip_scale := 1.0      # longitudinal
+@export var rear_wheel_grip_scale := 1.0       # longitudinal
+@export var front_wheel_lat_grip_scale := 1.0  # lateral (independent from long)
+@export var rear_wheel_lat_grip_scale := 1.0   # lateral
 @export var longitudinal_stiffness := 6000.0
 @export var lateral_stiffness := 6500.0
 @export var brake_torque_total := 4200.0
 @export_range(0.0, 1.0) var brake_bias_front := 0.65
 @export var rolling_resistance := 0.035
 @export var aero_drag := 0.42
+@export var aero_downforce_ratio := 0.12  # downforce / drag ratio (typical sedan)
 
 @export_group("HP2 Validation Controls")
 @export var weight_transfer_coeff := 0.64
 @export var substeps := 4
-@export var yaw_damping := 95.0
 @export var auto_simulate := true
 @export var visual_spin_scale := 1.0
 
@@ -157,20 +159,44 @@ func _apply_handling_profile_params(source_config) -> void:
 		drivetrain.gear_ratios = PackedFloat32Array(ratios)
 	drivetrain.upshift_rpm = minf(float(source_config.shift_up_rpm), float(source_config.engine_peak_rpm) * 0.98)
 	drivetrain.downshift_rpm = float(source_config.shift_down_rpm)
+	# HP2-style speed-dependent steering: response_rate × lerp(low_scale, high_scale, (v/v_max)²)
 	steering_system.steering_response_rate = maxf(float(source_config.steering_response), 0.1)
 	steering_system.max_steer_degrees = float(source_config.steering_max_degrees) * float(source_config.steering_lock_scale)
+	steering_system.low_speed_steer_scale = maxf(float(source_config.low_speed_steer_scale), 0.1)
+	steering_system.high_speed_steer_scale = maxf(float(source_config.high_speed_steer_scale), 0.05)
+	steering_system.high_speed_steer_kph = maxf(float(source_config.high_speed_steer_kph), 50.0)
+	# Grip: separate longitudinal and lateral per axle (front/rear differ in HP2)
+	front_wheel_grip_scale = maxf(float(source_config.front_longitudinal_grip), 0.1)
+	rear_wheel_grip_scale = maxf(float(source_config.rear_longitudinal_grip), 0.1)
+	front_wheel_lat_grip_scale = maxf(float(source_config.front_lateral_grip), 0.1)
+	rear_wheel_lat_grip_scale = maxf(float(source_config.rear_lateral_grip), 0.1)
+	var all_grips := [front_wheel_grip_scale, rear_wheel_grip_scale, front_wheel_lat_grip_scale, rear_wheel_lat_grip_scale]
+	base_mu = maxf((front_wheel_grip_scale + rear_wheel_grip_scale + front_wheel_lat_grip_scale + rear_wheel_lat_grip_scale) / float(all_grips.size()), 0.1)
 	var average_long_grip := (float(source_config.front_longitudinal_grip) + float(source_config.rear_longitudinal_grip)) * 0.5
 	var average_lat_grip := (float(source_config.front_lateral_grip) + float(source_config.rear_lateral_grip)) * 0.5
-	base_mu = maxf((average_long_grip + average_lat_grip) * 0.5, 0.1)
 	longitudinal_stiffness = 6000.0 * maxf(average_long_grip, 0.1)
 	lateral_stiffness = 6500.0 * maxf(average_lat_grip, 0.1)
 	brake_torque_total = maxf(float(source_config.brake_force) * wheel_radius, 1.0)
-	front_wheel_grip_scale = maxf((float(source_config.front_longitudinal_grip) + float(source_config.front_lateral_grip)) * 0.5, 0.1)
-	rear_wheel_grip_scale = maxf((float(source_config.rear_longitudinal_grip) + float(source_config.rear_lateral_grip)) * 0.5, 0.1)
 	rolling_resistance = maxf(float(source_config.rolling_resistance), 0.0)
 	aero_drag = maxf(float(source_config.aero_drag) * vehicle_mass_kg, 0.0)
-	yaw_damping = maxf(float(source_config.yaw_damping) * 55.0, 1.0)
 	assist.sideslip_threshold_deg = float(source_config.stabilization_slip_deg)
+	# Push suspension params into wheels so the spring filter uses per-car stiffness
+	_apply_suspension_params_to_wheels(source_config)
+
+
+func _apply_suspension_params_to_wheels(source_config) -> void:
+	for slot_id in SLOT_IDS:
+		var wheel = wheels.get(slot_id, null)
+		if wheel == null:
+			continue
+		if slot_id in ["FL", "FR"]:
+			wheel.spring_coefficient = maxf(float(source_config.front_spring_coefficient), 0.5)
+			wheel.bump_damping = maxf(float(source_config.front_bump_damping), 0.0)
+			wheel.rebound_damping = maxf(float(source_config.front_rebound_damping), 0.0)
+		else:
+			wheel.spring_coefficient = maxf(float(source_config.rear_spring_coefficient), 0.5)
+			wheel.bump_damping = maxf(float(source_config.rear_bump_damping), 0.0)
+			wheel.rebound_damping = maxf(float(source_config.rear_rebound_damping), 0.0)
 
 
 func get_reference_params() -> Dictionary:
@@ -199,7 +225,6 @@ func get_reference_params() -> Dictionary:
 		"rolling_resistance": rolling_resistance,
 		"aero_drag": aero_drag,
 		"weight_transfer_coeff": weight_transfer_coeff,
-		"yaw_damping": yaw_damping,
 		"final_drive": drivetrain.final_drive,
 		"gear_ratios": Array(drivetrain.gear_ratios),
 		"upshift_rpm": drivetrain.upshift_rpm,
@@ -419,22 +444,33 @@ func get_telemetry_row() -> Dictionary:
 
 func _substep(delta: float, throttle: float, brake: float, steer: float) -> void:
 	surface_mu = base_mu * float(SURFACE_TABLE.get(surface_type, 1.0))
-	var steer_angle := steering_system.update(steer, delta)
+	var current_speed_kmh := Vector2(_vx, _vz).length() * 3.6
+	var steer_angle := steering_system.update(steer, delta, current_speed_kmh)
 	var steer_angles := _ackermann_angles(steer_angle)
 	var forward := _forward_vector(_heading)
 	var right := _right_vector(_heading)
 	var forward_speed := Vector2(_vx, _vz).dot(forward)
+	var lateral_accel := _yaw_rate * forward_speed
 
 	engine.update(delta, _average_rear_wheel_angular_velocity(), drivetrain.effective_ratio())
 	_update_auto_shift(delta)
 
-	var loads := _compute_normal_loads(accel_long)
+	var target_loads := _compute_normal_loads(accel_long, lateral_accel)
+	# Aero downforce: speed² × drag coefficient × downforce ratio, split evenly per wheel
+	var aero_load_per_wheel := aero_drag * speed_ms * speed_ms * aero_downforce_ratio * 0.25
+	# Apply spring-filtered loads and push into wheels
+	var loads := {}
+	for slot_id in SLOT_IDS:
+		var wheel = wheels[slot_id]
+		var target := float(target_loads[slot_id]) + aero_load_per_wheel
+		loads[slot_id] = wheel.update_filtered_load(target, delta)
 	var drive_torques := drivetrain.calculate_rear_wheel_torques(throttle, float(loads["RL"]), float(loads["RR"]))
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
 		wheel.normal_load = float(loads[slot_id])
 		wheel.surface_mu = surface_mu
 		wheel.grip_scale = _wheel_grip_scale(slot_id)
+		wheel.lat_grip_scale = _wheel_lat_grip_scale(slot_id)
 		wheel.drive_torque = float(drive_torques[slot_id])
 		wheel.brake_torque = _brake_torque_for_slot(slot_id, brake)
 		wheel.steer_angle = float(steer_angles.get(slot_id, 0.0))
@@ -457,11 +493,16 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 		var brake_direction := signf(v_long)
 		if brake_direction == 0.0:
 			brake_direction = signf(wheel.angular_velocity)
-		var drive_force_request: float = wheel.drive_torque / maxf(wheel.wheel_radius, 0.0001)
-		var brake_force_request: float = wheel.brake_torque / maxf(wheel.wheel_radius, 0.0001) * brake_direction
+
+		# Engine braking (negative drive_torque) acts like additional brake: opposes
+		# current motion via brake_direction. Prevents static backwards creep at idle.
+		var raw_drive: float = wheel.drive_torque / maxf(wheel.wheel_radius, 0.0001)
+		var engine_brake: float = maxf(-raw_drive, 0.0)
+		var drive_force_request: float = maxf(raw_drive, 0.0)
+		var brake_force_request: float = (wheel.brake_torque / maxf(wheel.wheel_radius, 0.0001) + engine_brake) * brake_direction
 
 		wheel.compute_contact_forces(
-			drive_force_request - brake_force_request - v_long * longitudinal_stiffness * 0.02,
+			drive_force_request - brake_force_request - v_long * longitudinal_stiffness * delta,
 			v_lat * lateral_stiffness
 		)
 		wheel.update_angular_velocity(delta, v_long)
@@ -477,7 +518,7 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 	var acceleration := total_force / maxf(vehicle_mass_kg, 1.0)
 	_vx += acceleration.x * delta
 	_vz += acceleration.y * delta
-	_yaw_rate += ((yaw_torque - yaw_damping * _yaw_rate) / maxf(inertia_yaw, 1.0)) * delta
+	_yaw_rate += (yaw_torque / maxf(inertia_yaw, 1.0)) * delta
 	_heading = wrapf(_heading + _yaw_rate * delta, -PI, PI)
 	_pos_x += _vx * delta
 	_pos_z += _vz * delta
@@ -490,7 +531,7 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 
 func _airborne_substep(delta: float, throttle: float, brake: float, steer: float) -> void:
 	surface_mu = base_mu * float(SURFACE_TABLE.get(surface_type, 1.0))
-	var steer_angle := steering_system.update(steer, delta)
+	var steer_angle := steering_system.update(steer, delta, speed_kmh)
 	var steer_angles := _ackermann_angles(steer_angle)
 	engine.update(delta, _average_rear_wheel_angular_velocity(), drivetrain.effective_ratio())
 	_update_auto_shift(delta)
@@ -559,17 +600,19 @@ func _ackermann_angles(center_angle: float) -> Dictionary:
 	}
 
 
-func _compute_normal_loads(longitudinal_acceleration: float) -> Dictionary:
+func _compute_normal_loads(longitudinal_acceleration: float, lateral_acceleration: float = 0.0) -> Dictionary:
 	var base_front := vehicle_mass_kg * GRAVITY * front_weight_bias
 	var base_rear := vehicle_mass_kg * GRAVITY * (1.0 - front_weight_bias)
-	var transfer := vehicle_mass_kg * longitudinal_acceleration * cg_height / maxf(wheelbase, 0.0001) * weight_transfer_coeff
-	var front := maxf(base_front - transfer, 0.0)
-	var rear := maxf(base_rear + transfer, 0.0)
+	var avg_track := (track_front + track_rear) * 0.5
+	var long_transfer := vehicle_mass_kg * longitudinal_acceleration * cg_height / maxf(wheelbase, 0.0001) * weight_transfer_coeff
+	var lat_transfer := vehicle_mass_kg * lateral_acceleration * cg_height / maxf(avg_track, 0.0001) * weight_transfer_coeff
+	var front := maxf(base_front - long_transfer, 0.0)
+	var rear := maxf(base_rear + long_transfer, 0.0)
 	return {
-		"FL": front * 0.5,
-		"FR": front * 0.5,
-		"RL": rear * 0.5,
-		"RR": rear * 0.5,
+		"FL": maxf(front * 0.5 - lat_transfer, 0.0),
+		"FR": maxf(front * 0.5 + lat_transfer, 0.0),
+		"RL": maxf(rear  * 0.5 - lat_transfer, 0.0),
+		"RR": maxf(rear  * 0.5 + lat_transfer, 0.0),
 	}
 
 
@@ -581,6 +624,10 @@ func _brake_torque_for_slot(slot_id: String, brake: float) -> float:
 
 func _wheel_grip_scale(slot_id: String) -> float:
 	return front_wheel_grip_scale if slot_id in ["FL", "FR"] else rear_wheel_grip_scale
+
+
+func _wheel_lat_grip_scale(slot_id: String) -> float:
+	return front_wheel_lat_grip_scale if slot_id in ["FL", "FR"] else rear_wheel_lat_grip_scale
 
 
 func _update_auto_shift(delta: float) -> void:
