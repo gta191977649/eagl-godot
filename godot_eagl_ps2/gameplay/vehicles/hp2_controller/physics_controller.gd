@@ -470,9 +470,22 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 	var right := _right_vector(_heading)
 	var forward_speed := Vector2(_vx, _vz).dot(forward)
 	var lateral_accel := _yaw_rate * forward_speed
+	var reverse_active: bool = throttle <= 0.05 and brake > 0.05 and (
+		(drivetrain.current_gear == 0 and forward_speed <= 0.35) or
+		(forward_speed <= 0.35 and current_speed_kmh <= 4.5)
+	)
+	var drive_input := throttle
+	var brake_input := brake
+	if reverse_active:
+		drivetrain.current_gear = 0
+		drive_input = brake
+		brake_input = 0.0
+	elif drivetrain.current_gear == 0:
+		drivetrain.current_gear = 1
 
 	engine.update(delta, _average_rear_wheel_angular_velocity(), drivetrain.effective_ratio())
-	_update_auto_shift(delta)
+	if drivetrain.current_gear > 0:
+		_update_auto_shift(delta)
 
 	var target_loads := _compute_normal_loads(accel_long, lateral_accel)
 	# Aero downforce: speed² × drag coefficient × downforce ratio, split evenly per wheel
@@ -483,7 +496,7 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 		var wheel = wheels[slot_id]
 		var target := float(target_loads[slot_id]) + aero_load_per_wheel
 		loads[slot_id] = wheel.update_filtered_load(target, delta)
-	var drive_torques := drivetrain.calculate_rear_wheel_torques(throttle, float(loads["RL"]), float(loads["RR"]))
+	var drive_torques := drivetrain.calculate_rear_wheel_torques(drive_input, float(loads["RL"]), float(loads["RR"]))
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
 		wheel.normal_load = float(loads[slot_id])
@@ -491,7 +504,7 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 		wheel.grip_scale = _wheel_grip_scale(slot_id)
 		wheel.lat_grip_scale = _wheel_lat_grip_scale(slot_id)
 		wheel.drive_torque = float(drive_torques[slot_id])
-		wheel.brake_torque = _brake_torque_for_slot(slot_id, brake)
+		wheel.brake_torque = _brake_torque_for_slot(slot_id, brake_input)
 		wheel.steer_angle = float(steer_angles.get(slot_id, 0.0))
 
 	sideslip_deg = _compute_sideslip()
@@ -516,8 +529,11 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 		# Engine braking (negative drive_torque) acts like additional brake: opposes
 		# current motion via brake_direction. Prevents static backwards creep at idle.
 		var raw_drive: float = wheel.drive_torque / maxf(wheel.wheel_radius, 0.0001)
-		var engine_brake: float = maxf(-raw_drive, 0.0)
-		var drive_force_request: float = maxf(raw_drive, 0.0)
+		var engine_brake := 0.0
+		var drive_force_request := raw_drive
+		if raw_drive < 0.0 and not reverse_active:
+			engine_brake = -raw_drive
+			drive_force_request = 0.0
 		var brake_force_request: float = (wheel.brake_torque / maxf(wheel.wheel_radius, 0.0001) + engine_brake) * brake_direction
 
 		wheel.compute_contact_forces(
@@ -778,6 +794,8 @@ func _update_visuals(delta: float) -> void:
 func _visual_wheel_angular_velocity(slot_id: String, wheel) -> float:
 	var visual_angular_velocity: float = wheel.angular_velocity
 	if slot_id in ["RL", "RR"]:
+		if drivetrain.current_gear == 0:
+			return visual_angular_velocity
 		var brake_input := float(_last_inputs.get("brake", 0.0))
 		if brake_input > 0.05 and speed_kmh > 5.0:
 			var brake_lock := clampf((brake_input - 0.05) / 0.65, 0.0, 1.0)

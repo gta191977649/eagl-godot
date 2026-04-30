@@ -85,7 +85,7 @@ func update_angular_velocity(delta: float, longitudinal_velocity: float) -> void
 	var target := longitudinal_velocity / maxf(wheel_radius, 0.0001)
 	if brake_torque > 0.0:
 		target = lerpf(target, 0.0, clampf(brake_torque / 2200.0, 0.0, 0.85))
-	if drive_torque > 0.0 and grip_utilization > 0.98:
+	if absf(drive_torque) > 0.0 and grip_utilization > 0.98:
 		target += drive_torque * 0.015
 	angular_velocity = lerpf(angular_velocity, target, clampf(delta * 18.0, 0.0, 1.0))
 	angular_velocity = clampf(angular_velocity, -450.0, 450.0)

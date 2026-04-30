@@ -18,14 +18,14 @@ func reset_runtime() -> void:
 
 
 func effective_ratio() -> float:
-	var gear_index := clampi(current_gear, 1, gear_ratios.size() - 1)
+	var gear_index := clampi(current_gear, 0, gear_ratios.size() - 1)
 	return gear_ratios[gear_index] * final_drive
 
 
 func calculate_rear_wheel_torques(throttle: float, load_rl: float, load_rr: float) -> Dictionary:
 	var torque := 0.0
 	if engine != null:
-		torque = engine.get_net_torque(throttle) * absf(effective_ratio())
+		torque = engine.get_net_torque(throttle) * effective_ratio()
 
 	var total_rear_load := maxf(load_rl + load_rr, 0.0001)
 	var rr_split := clampf(load_rr / total_rear_load, 0.0, 1.0)
