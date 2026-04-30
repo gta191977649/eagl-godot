@@ -5,12 +5,6 @@ const CarLoaderScript = preload("res://eagl/assets/car/car_loader.gd")
 const GlobalBHandlingLoaderScript = preload("res://eagl/handling/globalb_handling_loader.gd")
 
 const DEFAULT_PLATFORM := "EAGL_HOTPUSUIT2_PS2"
-const CAMERA_DISTANCE := 8.5
-const CAMERA_TARGET_HEIGHT := 1.55
-const CAMERA_LOOK_AHEAD := 2.75
-const CAMERA_MOUSE_SENSITIVITY := 0.0035
-const CAMERA_MIN_PITCH := deg_to_rad(-18.0)
-const CAMERA_MAX_PITCH := deg_to_rad(45.0)
 
 @export var platform := DEFAULT_PLATFORM
 @export_global_dir var game_root := ""
@@ -55,12 +49,9 @@ const CAMERA_MAX_PITCH := deg_to_rad(45.0)
 
 @onready var track: EAGLTrack = $Track
 @onready var car: EAGLCar = $Car
-@onready var camera: Camera3D = $FollowCamera
+@onready var camera = $CarCamera
 
 var _car_loader = null
-var _camera_yaw := 0.0
-var _camera_pitch := deg_to_rad(14.0)
-var _camera_target_position := Vector3.ZERO
 var _spawn_transform := Transform3D.IDENTITY
 var _car_spawned := false
 var _respawn_cooldown_remaining := 0.0
@@ -73,11 +64,6 @@ func _ready() -> void:
 	_bind_track_signals()
 	_prepare_car_config()
 	track.load_track(track_id)
-
-
-func _process(delta: float) -> void:
-	if _car_spawned:
-		_update_camera(delta)
 
 
 func _physics_process(delta: float) -> void:
@@ -94,9 +80,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	elif event.is_action_pressed("car_reset"):
 		_reset_car_to_nearest_route_input()
-	elif event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		_camera_yaw -= event.relative.x * CAMERA_MOUSE_SENSITIVITY
-		_camera_pitch = clampf(_camera_pitch - event.relative.y * CAMERA_MOUSE_SENSITIVITY, CAMERA_MIN_PITCH, CAMERA_MAX_PITCH)
 
 
 func _configure_track() -> void:
@@ -151,8 +134,9 @@ func _on_track_loaded(_loaded_track_id: String, track_node: Node3D, _stats: Dict
 	_spawn_transform = _start_line_spawn_transform(track_node)
 	car.reset_runtime_state(_spawn_transform)
 	car.sync_wheel_slots_from_visual()
+	camera.set_target(car)
 	_configure_camera_clip(track_node)
-	_seed_camera_from_car()
+	camera.reset_to_target()
 	_car_spawned = true
 	camera.current = true
 
@@ -311,27 +295,6 @@ func _configure_camera_clip(track_node: Node3D) -> void:
 	camera.far = far_distance
 
 
-func _update_camera(_delta: float) -> void:
-	var forward: Vector3 = car.global_transform.basis * Vector3(0.0, 0.0, 1.0)
-	var desired_target := car.global_transform.origin + Vector3.UP * CAMERA_TARGET_HEIGHT + forward * CAMERA_LOOK_AHEAD
-	var horizontal_radius := cos(_camera_pitch) * CAMERA_DISTANCE
-	var orbit_offset := Vector3(
-		-cos(_camera_yaw) * horizontal_radius,
-		sin(_camera_pitch) * CAMERA_DISTANCE,
-		-sin(_camera_yaw) * horizontal_radius
-	)
-	_camera_target_position = desired_target
-	camera.global_position = desired_target + orbit_offset
-	camera.look_at(_camera_target_position, Vector3.UP)
-
-
-func _seed_camera_from_car() -> void:
-	var forward: Vector3 = (car.global_transform.basis * Vector3(0.0, 0.0, 1.0)).normalized()
-	_camera_yaw = atan2(-forward.z, forward.x)
-	_camera_target_position = car.global_transform.origin + Vector3.UP * CAMERA_TARGET_HEIGHT
-	_update_camera(0.0)
-
-
 func _check_route_respawn() -> void:
 	if not enable_route_respawn or _respawn_cooldown_remaining > 0.0 or track == null:
 		return
@@ -372,7 +335,7 @@ func _respawn_at_route_point(route_hit: Dictionary) -> void:
 	var basis := Basis(right, up, forward).orthonormalized()
 	var origin := route_position + Vector3.UP * (_spawn_height_for_config(car.config) + respawn_height_offset)
 	car.reset_runtime_state(Transform3D(basis, origin))
-	_seed_camera_from_car()
+	camera.reset_to_target()
 	_respawn_cooldown_remaining = respawn_cooldown
 	print("Gamelevel respawned car at route segment %s" % int(route_hit.get("segment_index", -1)))
 
@@ -384,6 +347,9 @@ func _ensure_input_actions() -> void:
 	_ensure_key_action("car_steer_right", [KEY_D, KEY_RIGHT])
 	_ensure_key_action("car_handbrake", [KEY_SPACE])
 	_ensure_key_action("car_reset", [KEY_R])
+	_ensure_key_action("camera_pov_change", [KEY_V])
+	_ensure_key_action("camera_front_toggle", [KEY_B])
+	_ensure_key_action("camera_look_back", [KEY_X])
 
 
 func _ensure_key_action(action_name: String, keycodes: Array[int]) -> void:

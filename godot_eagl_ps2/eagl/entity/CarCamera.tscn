@@ -1,0 +1,10 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://eagl/entity/car_camera.gd" id="1"]
+
+[node name="CarCamera" type="Camera3D"]
+current = true
+fov = 71.520996
+near = 0.1
+far = 30000.0
+script = ExtResource("1")

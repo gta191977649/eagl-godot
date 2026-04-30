@@ -15,6 +15,7 @@ var _procedural_shaders: Dictionary = {}
 var texture_filter_mode := "linear_mipmap"
 var use_scene_lighting := true
 var is_vehicle := false
+var use_vertex_colors_as_baked_lighting := true
 
 const BODY_SHADER := preload("res://shader/body.gdshader")
 const WINDOW_SHADER := preload("res://shader/window.gdshader")
@@ -22,7 +23,7 @@ const WHEEL_SHADER := preload("res://shader/wheel.gdshader")
 
 
 func material_for_block(object_name: String, block: Dictionary, block_index: int, uses_vertex_colors: bool, texture_hash: int = 0) -> Material:
-	var use_lighting := _should_use_lit_material(object_name)
+	var use_lighting := _should_use_lit_material(object_name, uses_vertex_colors)
 	var fallback_kind := _fallback_material_kind(object_name, texture_hash)
 	var texture_info: Dictionary = texture_bank.get_info(texture_hash) if texture_bank != null and texture_hash != 0 and texture_bank.has_texture(texture_hash) else {}
 	var texture_uses_vertex_color := uses_vertex_colors and not _should_ignore_texture_vertex_color(object_name, texture_info)
@@ -94,6 +95,7 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 		shader_material.set_meta("eagl_texture_filter_mode", texture_filter_mode)
 		shader_material.set_meta("eagl_texture_repeat_enabled", texture_repeat_enabled)
 		shader_material.set_meta("eagl_use_lighting", use_lighting)
+		shader_material.set_meta("eagl_vertex_colors_as_baked_lighting", _uses_vertex_colors_as_baked_lighting(uses_vertex_colors))
 		shader_material.set_meta("eagl_force_opaque_road_edge", force_opaque_road_edge)
 		shader_material.set_meta("eagl_vertex_color_modulate_scale", PS2_VERTEX_COLOR_MODULATE_SCALE)
 		shader_material.set_meta("eagl_use_vertex_color", texture_uses_vertex_color)
@@ -130,6 +132,8 @@ func material_for_block(object_name: String, block: Dictionary, block_index: int
 	material.metallic = _fallback_material_metallic(fallback_kind)
 	material.roughness = _fallback_material_roughness(fallback_kind)
 	material.set_meta("eagl_fallback_material_kind", fallback_kind)
+	material.set_meta("eagl_use_lighting", use_lighting)
+	material.set_meta("eagl_vertex_colors_as_baked_lighting", _uses_vertex_colors_as_baked_lighting(uses_vertex_colors))
 	_materials[key] = material
 	return material
 
@@ -203,11 +207,17 @@ func _should_force_opaque_road_edge(object_name: String, texture_info: Dictionar
 	)
 
 
-func _should_use_lit_material(object_name: String) -> bool:
+func _should_use_lit_material(object_name: String, uses_vertex_colors: bool) -> bool:
 	if not use_scene_lighting:
+		return false
+	if _uses_vertex_colors_as_baked_lighting(uses_vertex_colors):
 		return false
 	var name := object_name.to_upper()
 	return not (name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER")
+
+
+func _uses_vertex_colors_as_baked_lighting(uses_vertex_colors: bool) -> bool:
+	return use_vertex_colors_as_baked_lighting and uses_vertex_colors and not is_vehicle
 
 
 func _should_ignore_texture_vertex_color(object_name: String, texture_info: Dictionary) -> bool:
