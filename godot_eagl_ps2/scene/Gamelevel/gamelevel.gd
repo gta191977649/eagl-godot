@@ -50,6 +50,7 @@ const DEFAULT_PLATFORM := "EAGL_HOTPUSUIT2_PS2"
 @onready var track: EAGLTrack = $Track
 @onready var car: EAGLCar = $Car
 @onready var camera = $CarCamera
+@onready var debug_ui = $DebugUi
 
 var _car_loader = null
 var _spawn_transform := Transform3D.IDENTITY
@@ -64,6 +65,10 @@ func _ready() -> void:
 	_bind_track_signals()
 	_prepare_car_config()
 	track.load_track(track_id)
+
+
+func _process(_delta: float) -> void:
+	_update_debug_label()
 
 
 func _physics_process(delta: float) -> void:
@@ -144,6 +149,28 @@ func _on_track_loaded(_loaded_track_id: String, track_node: Node3D, _stats: Dict
 func _on_track_failed(failed_track_id: String, message: String) -> void:
 	_car_spawned = false
 	push_error("Gamelevel failed to load track %s: %s" % [failed_track_id, message])
+
+
+func _update_debug_label() -> void:
+	if debug_ui == null or not debug_ui.has_method("set_debug_info"):
+		return
+	debug_ui.set_debug_info(
+		_debug_track_name(),
+		_debug_camera_mode_name()
+	)
+
+
+func _debug_track_name() -> String:
+	var loaded_track := track.get_track_node() if track != null else null
+	if loaded_track != null:
+		return "%s (%s)" % [loaded_track.name, track_id]
+	return track_id
+
+
+func _debug_camera_mode_name() -> String:
+	if camera != null and camera.has_method("get_camera_mode_name"):
+		return String(camera.get_camera_mode_name())
+	return "UNKNOWN"
 
 
 func _ensure_track_collision_enabled(track_node: Node3D) -> void:
@@ -347,8 +374,8 @@ func _ensure_input_actions() -> void:
 	_ensure_key_action("car_steer_right", [KEY_D, KEY_RIGHT])
 	_ensure_key_action("car_handbrake", [KEY_SPACE])
 	_ensure_key_action("car_reset", [KEY_R])
-	_ensure_key_action("camera_pov_change", [KEY_V])
-	_ensure_key_action("camera_front_toggle", [KEY_B])
+	_ensure_key_action("camera_pov_change", [KEY_C])
+	_ensure_key_action("camera_chase_reverse_hold", [KEY_B])
 	_ensure_key_action("camera_look_back", [KEY_X])
 
 

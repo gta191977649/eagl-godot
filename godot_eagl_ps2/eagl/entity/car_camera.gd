@@ -2,14 +2,21 @@ class_name EAGLCarCamera
 extends Camera3D
 
 enum CameraProfileType {
-	CHASE_FAR = 0,
-	CHASE_CLOSE = 1,
-	HOOD = 2,
-	BUMPER = 3,
-	REAR_CHASE = 4,
-	FRONT_LOOKBACK = 5,
+	DRIVE_CHASE = 0,
+	DRIVE_CHASE_CLOSE = 1,
+	DRIVE_FIXED_NEAR = 2,
+	DRIVE_FIXED_FORWARD = 3,
+	DRIVE_CHASE_REVERSE = 4,
 }
 
+const CAMERA_PROFILE_NAMES := [
+	"DRIVE_CHASE",
+	"DRIVE_CHASE_CLOSE",
+	"DRIVE_FIXED_NEAR",
+	"DRIVE_FIXED_FORWARD",
+	"DRIVE_CHASE_REVERSE",
+]
+const CYCLE_PROFILE_COUNT := 4
 const ANGLE_UNITS := 65536.0
 const ANGLE_UNIT_TO_RAD := TAU / ANGLE_UNITS
 const HP2_VELOCITY_BLEND_SPEED := 8.32
@@ -33,7 +40,6 @@ const HP2_FOV_WIDE := 0x4000 * 360.0 / ANGLE_UNITS
 @export var collision_margin := 0.35
 @export var enable_collision := true
 @export var auto_current := true
-@export var front_profile := CameraProfileType.FRONT_LOOKBACK
 
 @export_group("Chase")
 @export var chase_distance := 8.32
@@ -52,9 +58,6 @@ const HP2_FOV_WIDE := 0x4000 * 360.0 / ANGLE_UNITS
 @export var bumper_forward := 2.0
 @export var bumper_height := 1.08
 @export var bumper_look_distance := 30.0
-@export var front_lookback_distance := 8.0
-@export var front_lookback_height := 2.1
-@export var front_lookback_target_height := 1.1
 
 var _yaw := 0.0
 var _last_car_yaw := 0.0
@@ -63,12 +66,11 @@ var _turn_sway := 0.0
 var _turn_hold := 0.0
 var _was_seeded := false
 var _look_back := false
-var _stored_non_front_profile := CameraProfileType.CHASE_FAR
+var _chase_reverse_held := false
 
 
 func _ready() -> void:
-	if not _is_front_profile(current_profile):
-		_stored_non_front_profile = current_profile
+	current_profile = _cycle_profile_index(current_profile)
 	if target == null and target_path != NodePath():
 		target = get_node_or_null(target_path) as Node3D
 	if auto_current:
@@ -88,8 +90,10 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("camera_pov_change"):
 		cycle_profile()
-	elif event.is_action_pressed("camera_front_toggle"):
-		toggle_front_camera()
+	elif event.is_action_pressed("camera_chase_reverse_hold"):
+		set_chase_reverse_held(true)
+	elif event.is_action_released("camera_chase_reverse_hold"):
+		set_chase_reverse_held(false)
 	elif event.is_action_pressed("camera_look_back"):
 		_look_back = true
 	elif event.is_action_released("camera_look_back"):
@@ -107,26 +111,20 @@ func reset_to_target() -> void:
 
 
 func cycle_profile() -> void:
-	if _is_front_profile(current_profile):
+	current_profile = (current_profile + 1) % CYCLE_PROFILE_COUNT
+	_reset_profile_motion()
+
+
+func set_chase_reverse_held(held: bool) -> void:
+	if _chase_reverse_held == held:
 		return
-	var normal_profiles := [
-		CameraProfileType.CHASE_FAR,
-		CameraProfileType.CHASE_CLOSE,
-		CameraProfileType.REAR_CHASE,
-	]
-	var index := normal_profiles.find(current_profile)
-	current_profile = normal_profiles[(index + 1) % normal_profiles.size()]
-	_stored_non_front_profile = current_profile
+	_chase_reverse_held = held
 	_reset_profile_motion()
 
 
-func toggle_front_camera() -> void:
-	if _is_front_profile(current_profile):
-		current_profile = _stored_non_front_profile
-	else:
-		_stored_non_front_profile = current_profile
-		current_profile = front_profile
-	_reset_profile_motion()
+func get_camera_mode_name() -> String:
+	var profile := _profile_type()
+	return CAMERA_PROFILE_NAMES[clampi(profile, 0, CAMERA_PROFILE_NAMES.size() - 1)]
 
 
 func _reset_profile_motion() -> void:
@@ -150,14 +148,11 @@ func _seed_from_target() -> void:
 func _update_drive_camera(delta: float) -> void:
 	var profile := _profile_type()
 	_apply_profile_fov(profile)
-	if profile == CameraProfileType.BUMPER:
+	if profile == CameraProfileType.DRIVE_FIXED_FORWARD:
 		_update_forward_camera(bumper_forward, bumper_height)
 		return
-	if profile == CameraProfileType.HOOD:
+	if profile == CameraProfileType.DRIVE_FIXED_NEAR:
 		_update_forward_camera(hood_forward, hood_height)
-		return
-	if profile == CameraProfileType.FRONT_LOOKBACK:
-		_update_front_lookback_camera()
 		return
 
 	var car_position := target.global_transform.origin
@@ -165,7 +160,7 @@ func _update_drive_camera(delta: float) -> void:
 	var velocity := _target_velocity()
 	var horizontal_velocity := Vector3(velocity.x, 0.0, velocity.z)
 	var chase_forward := _drive_chase_forward(car_forward, horizontal_velocity)
-	if _look_back or profile == CameraProfileType.REAR_CHASE:
+	if _look_back or profile == CameraProfileType.DRIVE_CHASE_REVERSE:
 		chase_forward = -chase_forward
 
 	var target_yaw := _yaw_from_forward(chase_forward)
@@ -179,10 +174,10 @@ func _update_drive_camera(delta: float) -> void:
 
 	var distance := chase_distance
 	var height := chase_height
-	if profile == CameraProfileType.CHASE_CLOSE:
+	if profile == CameraProfileType.DRIVE_CHASE_CLOSE:
 		distance = chase_close_distance
 		height = chase_close_height
-	elif profile == CameraProfileType.REAR_CHASE:
+	elif profile == CameraProfileType.DRIVE_CHASE_REVERSE:
 		distance = chase_close_distance
 		height = chase_close_height
 
@@ -205,14 +200,6 @@ func _update_forward_camera(forward_offset: float, height_offset: float) -> void
 		car_forward = -car_forward
 	global_position = origin
 	look_at(origin + car_forward * bumper_look_distance, Vector3.UP)
-
-
-func _update_front_lookback_camera() -> void:
-	var car_forward := _target_forward()
-	var target_point := target.global_transform.origin + Vector3.UP * front_lookback_target_height
-	var desired_position := target.global_transform.origin + car_forward * front_lookback_distance + Vector3.UP * front_lookback_height
-	global_position = _collide_camera(target_point, desired_position)
-	look_at(target_point, Vector3.UP)
 
 
 func _drive_chase_forward(car_forward: Vector3, horizontal_velocity: Vector3) -> Vector3:
@@ -278,32 +265,30 @@ func _collide_camera(target_point: Vector3, desired_position: Vector3) -> Vector
 
 
 func _profile_type() -> int:
+	if _chase_reverse_held:
+		return CameraProfileType.DRIVE_CHASE_REVERSE
 	match current_profile:
 		1:
-			return CameraProfileType.CHASE_CLOSE
+			return CameraProfileType.DRIVE_CHASE_CLOSE
 		2:
-			return CameraProfileType.HOOD
+			return CameraProfileType.DRIVE_FIXED_NEAR
 		3:
-			return CameraProfileType.BUMPER
-		4:
-			return CameraProfileType.REAR_CHASE
-		5:
-			return CameraProfileType.FRONT_LOOKBACK
+			return CameraProfileType.DRIVE_FIXED_FORWARD
 		_:
-			return CameraProfileType.CHASE_FAR
+			return CameraProfileType.DRIVE_CHASE
 
 
 func _apply_profile_fov(profile := -1) -> void:
 	if profile < 0:
 		profile = _profile_type()
-	if profile == CameraProfileType.HOOD or profile == CameraProfileType.BUMPER or profile == CameraProfileType.FRONT_LOOKBACK:
+	if profile == CameraProfileType.DRIVE_FIXED_NEAR or profile == CameraProfileType.DRIVE_FIXED_FORWARD:
 		fov = HP2_FOV_WIDE
 	else:
 		fov = HP2_FOV_NARROW
 
 
-func _is_front_profile(profile: int) -> bool:
-	return profile == CameraProfileType.HOOD or profile == CameraProfileType.BUMPER or profile == CameraProfileType.FRONT_LOOKBACK
+func _cycle_profile_index(profile: int) -> int:
+	return clampi(profile, 0, CYCLE_PROFILE_COUNT - 1)
 
 
 func _target_forward() -> Vector3:

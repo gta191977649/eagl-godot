@@ -6,6 +6,7 @@
 [ext_resource type="PackedScene" uid="uid://d1767pd6qqkrd" path="res://gameplay/ui/level_ui.tscn" id="4_g6qnq"]
 [ext_resource type="AudioStream" uid="uid://1ubhf6rian52" path="res://scene/Gamelevel/test.mp3" id="5_om873"]
 [ext_resource type="PackedScene" path="res://eagl/entity/CarCamera.tscn" id="6_5jd2h"]
+[ext_resource type="PackedScene" uid="uid://dna6xdqvs4aqb" path="res://gameplay/debug/debug_ui.tscn" id="7_fcg17"]
 
 [node name="Gamelevel" type="Node3D" unique_id=147918230]
 script = ExtResource("1")
@@ -21,7 +22,8 @@ draw_debug = false
 
 [node name="LevelUi" parent="." unique_id=1906406008 instance=ExtResource("4_g6qnq")]
 
+[node name="DebugUi" parent="." unique_id=1186101336 instance=ExtResource("7_fcg17")]
+
 [node name="AudioStreamPlayer" type="AudioStreamPlayer" parent="." unique_id=943783468]
 stream = ExtResource("5_om873")
-autoplay = true
-parameters/looping = true
+parameters/looping = false
