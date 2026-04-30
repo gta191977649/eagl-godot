@@ -17,6 +17,122 @@ const CAMERA_MAX_PITCH = deg_to_rad(45.0)
 const CAMERA_FILL_LIGHT_ENERGY = 2.2
 const CAMERA_FILL_LIGHT_RANGE = 28.0
 const AIRBORNE_DEBUG_HEIGHT = 1.65
+const HUD_MARGIN = 10
+const HUD_GAP = 8
+const HUD_WIDE_MIN_WIDTH = 1180.0
+const HUD_LEFT_WIDTH = 360.0
+const HUD_RIGHT_WIDTH = 400.0
+
+
+class EngineCurvePlot:
+	extends Control
+
+	var torque_curve: Array[Vector2] = []
+	var friction_curve: Array[Vector2] = []
+	var torque_label := "Torque"
+	var friction_label := "Friction"
+	var current_rpm := 0.0
+	var max_rpm := 1.0
+
+	func set_curves(new_torque_curve: Array, new_friction_curve: Array) -> void:
+		torque_curve = _typed_curve(new_torque_curve)
+		friction_curve = _typed_curve(new_friction_curve)
+		queue_redraw()
+
+	func set_runtime_rpm(new_current_rpm: float, new_max_rpm: float) -> void:
+		current_rpm = maxf(new_current_rpm, 0.0)
+		max_rpm = maxf(new_max_rpm, 1.0)
+		queue_redraw()
+
+	func _draw() -> void:
+		var rect := Rect2(Vector2.ZERO, size)
+		draw_rect(rect, Color(0.035, 0.038, 0.044, 0.82), true)
+		draw_rect(rect, Color(0.30, 0.34, 0.38, 0.75), false, 1.0)
+		var content_x := 30.0
+		var content_w := maxf(size.x - 40.0, 10.0)
+		var plot_h := maxf((size.y - 52.0) * 0.5, 42.0)
+		var torque_plot := Rect2(Vector2(content_x, 22.0), Vector2(content_w, plot_h))
+		var friction_plot := Rect2(Vector2(content_x, torque_plot.position.y + torque_plot.size.y + 19.0), Vector2(content_w, plot_h))
+		_draw_grid(torque_plot)
+		_draw_grid(friction_plot)
+		var torque_range := _curve_range(torque_curve, true)
+		var friction_range := _curve_range(friction_curve, false)
+		_draw_curve(torque_plot, torque_curve, float(torque_range.x), float(torque_range.y), Color(1.0, 0.58, 0.18, 1.0), 2.2)
+		_draw_curve(friction_plot, friction_curve, float(friction_range.x), float(friction_range.y), Color(0.24, 0.78, 1.0, 1.0), 2.0)
+		_draw_rpm_indicator(torque_plot)
+		_draw_rpm_indicator(friction_plot)
+		var font := get_theme_default_font()
+		if font != null:
+			draw_string(font, Vector2(8.0, 15.0), "Engine curves", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 12, Color(0.90, 0.92, 0.94))
+			draw_string(font, Vector2(8.0, size.y - 5.0), "x: rpm/redline", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, Color(0.62, 0.66, 0.70))
+			draw_string(font, Vector2(size.x - 72.0, 15.0), "%.0f rpm" % current_rpm, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, Color(1.0, 0.92, 0.34))
+			draw_rect(Rect2(Vector2(size.x - 104.0, torque_plot.position.y + 8.0), Vector2(10.0, 3.0)), Color(1.0, 0.58, 0.18, 1.0), true)
+			draw_string(font, Vector2(size.x - 90.0, torque_plot.position.y + 14.0), "%s %.0f-%.0f" % [torque_label, float(torque_range.x), float(torque_range.y)], HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, Color(0.90, 0.92, 0.94))
+			draw_rect(Rect2(Vector2(size.x - 104.0, friction_plot.position.y + 8.0), Vector2(10.0, 3.0)), Color(0.24, 0.78, 1.0, 1.0), true)
+			draw_string(font, Vector2(size.x - 90.0, friction_plot.position.y + 14.0), "%s %.1f-%.1f" % [friction_label, float(friction_range.x), float(friction_range.y)], HORIZONTAL_ALIGNMENT_LEFT, -1.0, 10, Color(0.90, 0.92, 0.94))
+
+	func _draw_curve(plot: Rect2, curve: Array[Vector2], min_y: float, max_y: float, color: Color, width: float) -> void:
+		if curve.size() < 2:
+			return
+		var previous := _plot_point(plot, curve[0], min_y, max_y)
+		for index in range(1, curve.size()):
+			var current := _plot_point(plot, curve[index], min_y, max_y)
+			draw_line(previous, current, color, width, true)
+			previous = current
+		for point in curve:
+			draw_circle(_plot_point(plot, point, min_y, max_y), 2.3, color)
+
+	func _draw_rpm_indicator(plot: Rect2) -> void:
+		var normalized := clampf(current_rpm / max_rpm, 0.0, 1.0)
+		var x := plot.position.x + normalized * plot.size.x
+		draw_line(Vector2(x, plot.position.y), Vector2(x, plot.position.y + plot.size.y), Color(1.0, 0.92, 0.34, 0.95), 1.6, true)
+		draw_circle(Vector2(x, plot.position.y), 3.0, Color(1.0, 0.92, 0.34, 1.0))
+
+	func _draw_grid(plot: Rect2) -> void:
+		for i in range(5):
+			var x := plot.position.x + plot.size.x * float(i) / 4.0
+			draw_line(Vector2(x, plot.position.y), Vector2(x, plot.position.y + plot.size.y), Color(0.18, 0.20, 0.23, 0.85), 1.0)
+			var y := plot.position.y + plot.size.y * float(i) / 4.0
+			draw_line(Vector2(plot.position.x, y), Vector2(plot.position.x + plot.size.x, y), Color(0.18, 0.20, 0.23, 0.85), 1.0)
+
+	func _plot_point(plot: Rect2, point: Vector2, min_y: float, max_y: float) -> Vector2:
+		var y_alpha := (point.y - min_y) / maxf(max_y - min_y, 0.0001)
+		return Vector2(
+			plot.position.x + clampf(point.x, 0.0, 1.0) * plot.size.x,
+			plot.position.y + (1.0 - clampf(y_alpha, 0.0, 1.0)) * plot.size.y
+		)
+
+	func _curve_range(curve: Array[Vector2], include_zero: bool) -> Vector2:
+		if curve.is_empty():
+			return Vector2(0.0, 1.0)
+		var min_y := 0.0 if include_zero else curve[0].y
+		var max_y := curve[0].y
+		for point in curve:
+			min_y = minf(min_y, point.y)
+			max_y = maxf(max_y, point.y)
+		var span := maxf(max_y - min_y, 0.0001)
+		var padding := span * 0.18
+		if include_zero:
+			min_y = 0.0
+		else:
+			min_y -= padding
+		max_y += padding
+		var step := 50.0 if max_y > 100.0 else 1.0
+		min_y = floor(min_y / step) * step
+		max_y = ceil(max_y / step) * step
+		if max_y <= min_y:
+			max_y = min_y + step
+		return Vector2(min_y, max_y)
+
+	func _typed_curve(raw_curve: Array) -> Array[Vector2]:
+		var out: Array[Vector2] = []
+		for point in raw_curve:
+			if point is Vector2:
+				out.append(point)
+			elif point is Array and point.size() >= 2:
+				out.append(Vector2(float(point[0]), float(point[1])))
+		return out
+
 
 @export var platform := DEFAULT_PLATFORM
 @export_global_dir var game_root = ""
@@ -48,6 +164,9 @@ var _selected_car_index := -1
 var _syncing_ui := false
 var _car_display_name_cache := {}
 var _airborne_debug_enabled := false
+var _engine_curve_plot: EngineCurvePlot
+var _parameter_summary_label: Label
+var _debug_grid: GridContainer
 
 
 func _enter_tree() -> void:
@@ -85,6 +204,8 @@ func _ready() -> void:
 	_ensure_input_actions()
 	_setup_ground()
 	_setup_lighting()
+	_ensure_debug_parameter_panels()
+	_ensure_debug_hud_layout()
 	_bind_ui()
 	_seed_camera_from_car()
 	_spawn_transform = _spawn_transform_for_config(car.config)
@@ -100,7 +221,9 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_update_camera(delta)
+	_update_hud_grid_columns()
 	_update_telemetry()
+	_update_parameter_debug_ui()
 
 
 func _update_camera(delta: float) -> void:
@@ -136,7 +259,7 @@ func _update_telemetry() -> void:
 		])
 		if car.config.globalb_handling_profile_count > 0:
 			lines.append("PSeq:  %s" % _format_profile_sequence(car.config.globalb_handling_profile_sequence))
-	lines.append("Speed: %5.1f km/h" % float(snapshot.get("speed_kph", 0.0)))
+	lines.append("Speed: %5.1f km/h" % float(snapshot.get("speed_kmh", 0.0)))
 	lines.append("RPM:   %5.0f" % float(snapshot.get("rpm", 0.0)))
 	lines.append("Gear:  %d" % int(snapshot.get("gear", 1)))
 	lines.append("Slip:  %+5.1f deg" % float(snapshot.get("slip_angle_deg", 0.0)))
@@ -173,6 +296,240 @@ func _update_telemetry() -> void:
 			]
 		)
 	telemetry.text = "\n".join(lines)
+
+
+func _ensure_debug_parameter_panels() -> void:
+	var hud := get_node_or_null("HUD") as CanvasLayer
+	if hud == null:
+		return
+	if hud.get_node_or_null("EngineCurvePanel") == null:
+		var curve_panel := PanelContainer.new()
+		curve_panel.name = "EngineCurvePanel"
+		curve_panel.offset_left = 16.0
+		curve_panel.offset_top = 220.0
+		curve_panel.offset_right = 536.0
+		curve_panel.offset_bottom = 490.0
+		hud.add_child(curve_panel)
+
+		var curve_margin := MarginContainer.new()
+		curve_margin.name = "MarginContainer"
+		curve_margin.add_theme_constant_override("margin_left", 6)
+		curve_margin.add_theme_constant_override("margin_top", 6)
+		curve_margin.add_theme_constant_override("margin_right", 6)
+		curve_margin.add_theme_constant_override("margin_bottom", 6)
+		curve_panel.add_child(curve_margin)
+
+		_engine_curve_plot = EngineCurvePlot.new()
+		_engine_curve_plot.name = "CurvePlot"
+		_engine_curve_plot.custom_minimum_size = Vector2(348.0, 218.0)
+		_engine_curve_plot.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_engine_curve_plot.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		curve_margin.add_child(_engine_curve_plot)
+	else:
+		_engine_curve_plot = hud.get_node("EngineCurvePanel/MarginContainer/CurvePlot") as EngineCurvePlot
+
+	if hud.get_node_or_null("ParameterPanel") == null:
+		var parameter_panel := PanelContainer.new()
+		parameter_panel.name = "ParameterPanel"
+		parameter_panel.offset_left = 16.0
+		parameter_panel.offset_top = 500.0
+		parameter_panel.offset_right = 536.0
+		parameter_panel.offset_bottom = 790.0
+		hud.add_child(parameter_panel)
+
+		var parameter_margin := MarginContainer.new()
+		parameter_margin.name = "MarginContainer"
+		parameter_margin.add_theme_constant_override("margin_left", 8)
+		parameter_margin.add_theme_constant_override("margin_top", 6)
+		parameter_margin.add_theme_constant_override("margin_right", 8)
+		parameter_margin.add_theme_constant_override("margin_bottom", 6)
+		parameter_panel.add_child(parameter_margin)
+
+		var parameter_scroll := ScrollContainer.new()
+		parameter_scroll.name = "ScrollContainer"
+		parameter_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		parameter_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		parameter_margin.add_child(parameter_scroll)
+
+		_parameter_summary_label = Label.new()
+		_parameter_summary_label.name = "ParameterSummary"
+		_parameter_summary_label.add_theme_font_size_override("font_size", 11)
+		_parameter_summary_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_parameter_summary_label.text = "Loading parameters..."
+		_parameter_summary_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		parameter_scroll.add_child(_parameter_summary_label)
+	else:
+		_parameter_summary_label = hud.get_node("ParameterPanel/MarginContainer/ScrollContainer/ParameterSummary") as Label
+
+
+func _ensure_debug_hud_layout() -> void:
+	var hud := get_node_or_null("HUD") as CanvasLayer
+	if hud == null:
+		return
+	var root := hud.get_node_or_null("HUDRoot") as MarginContainer
+	if root == null:
+		root = MarginContainer.new()
+		root.name = "HUDRoot"
+		root.set_anchors_preset(Control.PRESET_FULL_RECT)
+		root.add_theme_constant_override("margin_left", HUD_MARGIN)
+		root.add_theme_constant_override("margin_top", HUD_MARGIN)
+		root.add_theme_constant_override("margin_right", HUD_MARGIN)
+		root.add_theme_constant_override("margin_bottom", HUD_MARGIN)
+		hud.add_child(root)
+
+		var scroll := ScrollContainer.new()
+		scroll.name = "ScrollContainer"
+		scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		root.add_child(scroll)
+
+		_debug_grid = GridContainer.new()
+		_debug_grid.name = "DebugGrid"
+		_debug_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_debug_grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		_debug_grid.add_theme_constant_override("h_separation", HUD_GAP)
+		_debug_grid.add_theme_constant_override("v_separation", HUD_GAP)
+		scroll.add_child(_debug_grid)
+	else:
+		_debug_grid = root.get_node("ScrollContainer/DebugGrid") as GridContainer
+
+	var left_column := _debug_grid.get_node_or_null("LeftColumn") as VBoxContainer
+	if left_column == null:
+		left_column = VBoxContainer.new()
+		left_column.name = "LeftColumn"
+		left_column.custom_minimum_size = Vector2(HUD_LEFT_WIDTH, 0.0)
+		left_column.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+		left_column.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		left_column.add_theme_constant_override("separation", HUD_GAP)
+		_debug_grid.add_child(left_column)
+
+	var telemetry_panel := get_node_or_null("HUD/TelemetryPanel") as Control
+	var controls_panel := get_node_or_null("HUD/ControlsPanel") as Control
+	_configure_panel_for_layout(telemetry_panel, Vector2(HUD_LEFT_WIDTH, 142.0), false)
+	_configure_panel_for_layout(get_node_or_null("HUD/EngineCurvePanel") as Control, Vector2(HUD_LEFT_WIDTH, 230.0), false)
+	_configure_panel_for_layout(get_node_or_null("HUD/ParameterPanel") as Control, Vector2(HUD_LEFT_WIDTH, 188.0), false)
+	_configure_panel_for_layout(controls_panel, Vector2(HUD_RIGHT_WIDTH, 372.0), false)
+	if telemetry != null:
+		telemetry.add_theme_font_size_override("font_size", 12)
+	if car_list != null:
+		car_list.custom_minimum_size = Vector2(0.0, 180.0)
+	if current_car_label != null:
+		current_car_label.add_theme_font_size_override("font_size", 14)
+
+	_reparent_control(telemetry_panel, left_column)
+	_reparent_control(get_node_or_null("HUD/EngineCurvePanel") as Control, left_column)
+	_reparent_control(get_node_or_null("HUD/ParameterPanel") as Control, left_column)
+	_reparent_control(controls_panel, _debug_grid)
+	_update_hud_grid_columns()
+
+
+func _configure_panel_for_layout(panel: Control, minimum_size: Vector2, expand_vertical: bool) -> void:
+	if panel == null:
+		return
+	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	panel.offset_left = 0.0
+	panel.offset_top = 0.0
+	panel.offset_right = 0.0
+	panel.offset_bottom = 0.0
+	panel.clip_contents = true
+	panel.custom_minimum_size = minimum_size
+	panel.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL if expand_vertical else Control.SIZE_SHRINK_BEGIN
+
+
+func _reparent_control(control: Control, new_parent: Node) -> void:
+	if control == null or new_parent == null or control.get_parent() == new_parent:
+		return
+	control.reparent(new_parent, false)
+
+
+func _update_hud_grid_columns() -> void:
+	if _debug_grid == null:
+		return
+	var viewport_size := get_viewport().get_visible_rect().size
+	_debug_grid.columns = 2 if viewport_size.x >= HUD_WIDE_MIN_WIDTH else 1
+
+
+func _update_parameter_debug_ui() -> void:
+	if car == null:
+		return
+	var snapshot: Dictionary = car.get_debug_snapshot() if car.has_method("get_debug_snapshot") else {}
+	if _engine_curve_plot != null:
+		var torque_curve: Array = []
+		var friction_curve: Array = []
+		if car.engine != null:
+			torque_curve = car.engine.torque_curve
+			friction_curve = car.engine.friction_curve
+			_engine_curve_plot.set_runtime_rpm(float(car.engine.rpm), float(car.engine.max_rpm))
+		_engine_curve_plot.set_curves(torque_curve, friction_curve)
+	if _parameter_summary_label != null:
+		_parameter_summary_label.text = _build_parameter_summary(snapshot)
+
+
+func _build_parameter_summary(snapshot: Dictionary) -> String:
+	if car == null or car.config == null:
+		return "No handling config loaded."
+	var cfg = car.config
+	var lines: Array[String] = []
+	lines.append("Loaded Handling Parameters")
+	lines.append("Car %s  row %d  dup %d  %s" % [
+		String(cfg.car_name),
+		int(cfg.row_index),
+		int(cfg.duplicate_index),
+		String(cfg.drive_type),
+	])
+	lines.append("Mass %.0f kg  WB %.3f m  Radius %.3f m" % [
+		float(cfg.mass_kg),
+		float(car.wheelbase),
+		float(car.wheel_radius),
+	])
+	lines.append("Gear %d  RPM %.0f  Shift %.0f/%.0f" % [
+		int(snapshot.get("gear", 1)),
+		float(snapshot.get("rpm", 0.0)),
+		float(car.drivetrain.downshift_rpm),
+		float(car.drivetrain.upshift_rpm),
+	])
+	lines.append("Final %.3f  Gears %s" % [
+		float(car.drivetrain.final_drive),
+		_format_float_array(Array(car.drivetrain.gear_ratios), "%.2f", 7),
+	])
+	lines.append("Grip long F/R %.2f %.2f  lat F/R %.2f %.2f" % [
+		float(car.front_wheel_grip_scale),
+		float(car.rear_wheel_grip_scale),
+		float(car.front_wheel_lat_grip_scale),
+		float(car.rear_wheel_lat_grip_scale),
+	])
+	lines.append("Surface %s  mu %.3f  brake %.0f  bias %.2f" % [
+		String(snapshot.get("surface_type", "")),
+		float(snapshot.get("surface_mu", 0.0)),
+		float(car.brake_torque_total),
+		float(car.brake_bias_front),
+	])
+	lines.append("Steer max %.1f deg  response %.2f  hi-scale %.2f@%.0f" % [
+		float(car.steering_system.max_steer_degrees),
+		float(car.steering_system.steering_response_rate),
+		float(car.steering_system.high_speed_steer_scale),
+		float(car.steering_system.high_speed_steer_kph),
+	])
+	lines.append("Aero %.4f  roll %.4f  WT %.2f  CG %.2f" % [
+		float(car.aero_drag),
+		float(car.rolling_resistance),
+		float(car.weight_transfer_coeff),
+		float(car.cg_height),
+	])
+	lines.append("Torque samples %s" % _format_float_array(Array(cfg.engine_torque_samples), "%.3f", 9))
+	lines.append("Friction samples %s" % _format_float_array(Array(cfg.engine_friction_samples), "%.3f", 3))
+	return "\n".join(lines)
+
+
+func _format_float_array(values: Array, pattern: String, max_items: int) -> String:
+	var parts: Array[String] = []
+	for index in range(mini(values.size(), max_items)):
+		parts.append(pattern % float(values[index]))
+	if values.size() > max_items:
+		parts.append("...")
+	return "[" + ", ".join(parts) + "]"
 
 
 func _ensure_input_actions() -> void:

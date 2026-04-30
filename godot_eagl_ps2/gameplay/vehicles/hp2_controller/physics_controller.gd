@@ -41,6 +41,7 @@ const MIN_SIDESLIP_SPEED_MS := 5.0 / 3.6
 @export var rear_wheel_lat_grip_scale := 1.0   # lateral
 @export var longitudinal_stiffness := 6000.0
 @export var lateral_stiffness := 6500.0
+@export var longitudinal_speed_damping := 0.0
 @export var brake_torque_total := 4200.0
 @export_range(0.0, 1.0) var brake_bias_front := 0.65
 @export var rolling_resistance := 0.035
@@ -150,6 +151,7 @@ func _apply_handling_profile_params(source_config) -> void:
 	engine.idle_rpm = float(source_config.idle_rpm)
 	engine.peak_rpm = float(source_config.engine_peak_rpm)
 	engine.max_rpm = float(source_config.engine_redline_rpm)
+	engine.apply_globalb_samples(source_config.engine_torque_samples, source_config.engine_friction_samples)
 	engine.rpm = engine.idle_rpm
 	drivetrain.final_drive = float(source_config.final_drive_ratio)
 	var ratios: Array[float] = [float(source_config.reverse_gear_ratio)]
@@ -157,7 +159,11 @@ func _apply_handling_profile_params(source_config) -> void:
 		ratios.append(float(ratio))
 	if ratios.size() > 1:
 		drivetrain.gear_ratios = PackedFloat32Array(ratios)
-	drivetrain.upshift_rpm = minf(float(source_config.shift_up_rpm), float(source_config.engine_peak_rpm) * 0.98)
+	drivetrain.upshift_rpm = clampf(
+		float(source_config.shift_up_rpm),
+		float(source_config.engine_peak_rpm) * 0.75,
+		float(source_config.engine_redline_rpm) - 100.0
+	)
 	drivetrain.downshift_rpm = float(source_config.shift_down_rpm)
 	# HP2-style speed-dependent steering: response_rate × lerp(low_scale, high_scale, (v/v_max)²)
 	steering_system.steering_response_rate = maxf(float(source_config.steering_response), 0.1)
@@ -176,6 +182,7 @@ func _apply_handling_profile_params(source_config) -> void:
 	var average_lat_grip := (float(source_config.front_lateral_grip) + float(source_config.rear_lateral_grip)) * 0.5
 	longitudinal_stiffness = 6000.0 * maxf(average_long_grip, 0.1)
 	lateral_stiffness = 6500.0 * maxf(average_lat_grip, 0.1)
+	longitudinal_speed_damping = 0.0
 	brake_torque_total = maxf(float(source_config.brake_force) * wheel_radius, 1.0)
 	rolling_resistance = maxf(float(source_config.rolling_resistance), 0.0)
 	aero_drag = maxf(float(source_config.aero_drag) * vehicle_mass_kg, 0.0)
@@ -218,7 +225,10 @@ func get_reference_params() -> Dictionary:
 		"base_mu": base_mu,
 		"front_wheel_grip_scale": front_wheel_grip_scale,
 		"rear_wheel_grip_scale": rear_wheel_grip_scale,
+		"front_wheel_lat_grip_scale": front_wheel_lat_grip_scale,
+		"rear_wheel_lat_grip_scale": rear_wheel_lat_grip_scale,
 		"longitudinal_stiffness": longitudinal_stiffness,
+		"longitudinal_speed_damping": longitudinal_speed_damping,
 		"lateral_stiffness": lateral_stiffness,
 		"brake_torque_total": brake_torque_total,
 		"brake_bias_front": brake_bias_front,
@@ -232,6 +242,8 @@ func get_reference_params() -> Dictionary:
 		"idle_rpm": engine.idle_rpm,
 		"peak_rpm": engine.peak_rpm,
 		"max_rpm": engine.max_rpm,
+		"torque_curve": _curve_to_array(engine.torque_curve),
+		"friction_curve": _curve_to_array(engine.friction_curve),
 		"steering_response_rate": steering_system.steering_response_rate,
 		"max_steer_degrees": steering_system.max_steer_degrees,
 		"assist_sideslip_threshold_deg": assist.sideslip_threshold_deg,
@@ -250,6 +262,13 @@ func _front_load_bias_from_config(source_config) -> float:
 	var rear_each_fraction: float = (front_x / denom) * 0.5
 	var front_each_fraction: float = 0.5 - rear_each_fraction
 	return clampf(front_each_fraction * 2.0, 0.25, 0.75)
+
+
+func _curve_to_array(curve: Array[Vector2]) -> Array:
+	var out: Array = []
+	for point in curve:
+		out.append([point.x, point.y])
+	return out
 
 
 func replace_visual(visual: Node3D) -> void:
@@ -502,7 +521,7 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 		var brake_force_request: float = (wheel.brake_torque / maxf(wheel.wheel_radius, 0.0001) + engine_brake) * brake_direction
 
 		wheel.compute_contact_forces(
-			drive_force_request - brake_force_request - v_long * longitudinal_stiffness * delta,
+			drive_force_request - brake_force_request - v_long * longitudinal_stiffness * longitudinal_speed_damping,
 			v_lat * lateral_stiffness
 		)
 		wheel.update_angular_velocity(delta, v_long)
@@ -749,7 +768,20 @@ func _update_visuals(delta: float) -> void:
 			steer_node.rotation = steer_rotation
 		var spin_node := _wheel_spin_nodes.get(slot_id, null) as Node3D
 		if spin_node != null:
-			_wheel_spin_angles[slot_id] = float(_wheel_spin_angles.get(slot_id, 0.0)) + wheel.angular_velocity * delta * visual_spin_scale
+			var visual_angular_velocity := _visual_wheel_angular_velocity(slot_id, wheel)
+			_wheel_spin_angles[slot_id] = float(_wheel_spin_angles.get(slot_id, 0.0)) + visual_angular_velocity * delta * visual_spin_scale
 			var spin_rotation := spin_node.rotation
 			spin_rotation.x = float(_wheel_spin_angles[slot_id]) * float(spin_node.get_meta("eagl_spin_direction", 1.0))
 			spin_node.rotation = spin_rotation
+
+
+func _visual_wheel_angular_velocity(slot_id: String, wheel) -> float:
+	var visual_angular_velocity: float = wheel.angular_velocity
+	if slot_id in ["RL", "RR"]:
+		var brake_input := float(_last_inputs.get("brake", 0.0))
+		if brake_input > 0.05 and speed_kmh > 5.0:
+			var brake_lock := clampf((brake_input - 0.05) / 0.65, 0.0, 1.0)
+			var hard_lock := clampf((brake_input - 0.72) / 0.28, 0.0, 1.0)
+			var lock_alpha := maxf(brake_lock * 0.92, hard_lock)
+			visual_angular_velocity = lerpf(visual_angular_velocity, 0.0, lock_alpha)
+	return visual_angular_velocity

@@ -231,6 +231,8 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.idle_rpm = _row_float(globalb_row, 0x2B0, _field_value_any(floats, ["engine_idle_rpm", "mass"], config.idle_rpm))
 	config.engine_peak_rpm = _field_value(floats, "engine_peak_rpm", config.engine_peak_rpm)
 	config.engine_redline_rpm = _field_value(floats, "engine_redline_rpm", config.engine_redline_rpm)
+	config.engine_torque_samples = _row_float_samples(globalb_row, 0x2C0, 9, config.engine_torque_samples)
+	config.engine_friction_samples = _row_float_samples(globalb_row, 0x2E4, 3, config.engine_friction_samples)
 	config.shift_up_rpm = config.engine_redline_rpm * 0.96
 	config.shift_down_rpm = maxf(config.idle_rpm * 2.5, config.engine_peak_rpm * 0.55)
 	return config
@@ -362,6 +364,18 @@ func _row_float(row: PackedByteArray, offset: int, fallback: float) -> float:
 	if row.is_empty() or offset < 0 or offset + 4 > row.size():
 		return fallback
 	return Binary.f32(row, offset)
+
+
+func _row_float_samples(row: PackedByteArray, offset: int, count: int, fallback: PackedFloat32Array) -> PackedFloat32Array:
+	if row.is_empty() or offset < 0 or offset + count * 4 > row.size():
+		return fallback
+	var samples := PackedFloat32Array()
+	for index in range(count):
+		var value := Binary.f32(row, offset + index * 4)
+		if not is_finite(value) or value <= 0.0 or value > 10.0:
+			return fallback
+		samples.append(value)
+	return samples
 
 
 func _drive_type_from_split(front_scale: float, rear_scale: float, rear_bias: float) -> String:

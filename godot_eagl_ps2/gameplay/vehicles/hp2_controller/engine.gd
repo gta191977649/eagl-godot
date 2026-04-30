@@ -40,6 +40,13 @@ func reset_runtime() -> void:
 	shift_cut_timer = 0.0
 
 
+func apply_globalb_samples(torque_samples: PackedFloat32Array, friction_samples: PackedFloat32Array) -> void:
+	if torque_samples.size() >= 2:
+		torque_curve = _samples_to_curve(torque_samples, 400.0)
+	if friction_samples.size() >= 2:
+		friction_curve = _samples_to_curve(friction_samples, 60.0)
+
+
 func get_net_torque(throttle: float) -> float:
 	var rpm_normalized := clampf(rpm / maxf(max_rpm, 1.0), 0.0, 1.0)
 	var peak_torque := _sample_curve(torque_curve, rpm_normalized) * throttle_scale
@@ -81,3 +88,18 @@ func _sample_curve(curve: Array[Vector2], x: float) -> float:
 			var alpha := clampf((x - previous.x) / maxf(current.x - previous.x, 0.0001), 0.0, 1.0)
 			return lerpf(previous.y, current.y, alpha)
 	return curve[curve.size() - 1].y
+
+
+func _samples_to_curve(samples: PackedFloat32Array, output_peak: float) -> Array[Vector2]:
+	var max_sample := 0.0
+	for sample in samples:
+		max_sample = maxf(max_sample, float(sample))
+	if max_sample <= 0.0001:
+		return []
+	var curve: Array[Vector2] = []
+	var denom := maxf(float(samples.size() - 1), 1.0)
+	for index in range(samples.size()):
+		var x := float(index) / denom
+		var y := float(samples[index]) / max_sample * output_peak
+		curve.append(Vector2(x, y))
+	return curve

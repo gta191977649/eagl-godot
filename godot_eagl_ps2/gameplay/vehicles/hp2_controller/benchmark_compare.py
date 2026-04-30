@@ -66,6 +66,8 @@ class ReferenceCar:
         self.base_mu = float(p.get("base_mu", 1.0))
         self.front_wheel_grip_scale = float(p.get("front_wheel_grip_scale", 1.0))
         self.rear_wheel_grip_scale = float(p.get("rear_wheel_grip_scale", 1.0))
+        self.front_wheel_lat_grip_scale = float(p.get("front_wheel_lat_grip_scale", self.front_wheel_grip_scale))
+        self.rear_wheel_lat_grip_scale = float(p.get("rear_wheel_lat_grip_scale", self.rear_wheel_grip_scale))
         self.final_drive = float(p.get("final_drive", 3.91))
         self.gears = [float(v) for v in p.get("gear_ratios", GEARS)]
         if len(self.gears) < 2:
@@ -73,9 +75,12 @@ class ReferenceCar:
         self.max_rpm = float(p.get("max_rpm", 8500.0))
         self.peak_rpm = float(p.get("peak_rpm", 6500.0))
         self.idle_rpm = float(p.get("idle_rpm", 900.0))
+        self.torque_curve = self._curve_from_params(p.get("torque_curve"), TORQUE_CURVE)
+        self.friction_curve = self._curve_from_params(p.get("friction_curve"), FRICTION_CURVE)
         self.upshift_rpm = float(p.get("upshift_rpm", min(self.max_rpm * 0.96, self.peak_rpm * 0.98)))
         self.downshift_rpm = float(p.get("downshift_rpm", self.max_rpm * 0.40))
         self.longitudinal_stiffness = float(p.get("longitudinal_stiffness", 6000.0))
+        self.longitudinal_speed_damping = float(p.get("longitudinal_speed_damping", 0.0))
         self.lateral_stiffness = float(p.get("lateral_stiffness", 6500.0))
         self.brake_torque_total = float(p.get("brake_torque_total", 4200.0))
         self.brake_bias_front = float(p.get("brake_bias_front", 0.65))
@@ -131,10 +136,10 @@ class ReferenceCar:
             self.shift_timer = 0.0
 
         rpm_n = min(1.0, max(0.0, self.rpm / self.max_rpm))
-        torque = sample_curve(TORQUE_CURVE, rpm_n)
+        torque = sample_curve(self.torque_curve, rpm_n)
         if self.shift_cut > 0.0:
             torque *= 0.35
-        friction = sample_curve(FRICTION_CURVE, rpm_n)
+        friction = sample_curve(self.friction_curve, rpm_n)
         net_torque = torque * throttle - friction * (1.0 - throttle)
         shaft = net_torque * abs(self.gears[self.gear] * self.final_drive)
 
@@ -170,10 +175,14 @@ class ReferenceCar:
             drive = shaft * 0.5 if slot.startswith("R") else 0.0
             brake_torque = brake * self.brake_torque_total * (self.brake_bias_front if slot.startswith("F") else 1.0 - self.brake_bias_front) * 0.5
             brake_dir = 1.0 if v_long >= 0.0 else -1.0
-            slip_long = drive / max(self.radius, 1e-6) - brake_torque / max(self.radius, 1e-6) * brake_dir - v_long * self.longitudinal_stiffness * 0.02
+            slip_long = (
+                drive / max(self.radius, 1e-6)
+                - brake_torque / max(self.radius, 1e-6) * brake_dir
+                - v_long * self.longitudinal_stiffness * self.longitudinal_speed_damping
+            )
             slip_lat = v_lat * self.lateral_stiffness
-            contact_speed = math.hypot(slip_long, slip_lat)
             grip_scale = self.front_wheel_grip_scale if slot.startswith("F") else self.rear_wheel_grip_scale
+            contact_speed = math.hypot(slip_long, slip_lat)
             max_grip = self.load[slot] * self.base_mu * grip_scale
             scale = min(1.0, max_grip / max(contact_speed, 0.0001))
             force_long = slip_long * scale
@@ -211,6 +220,17 @@ class ReferenceCar:
         if center_angle > 0.0:
             return {"FL": outer, "FR": inner, "RL": 0.0, "RR": 0.0}
         return {"FL": inner, "FR": outer, "RL": 0.0, "RR": 0.0}
+
+    @staticmethod
+    def _curve_from_params(value: object, fallback: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not isinstance(value, list) or len(value) < 2:
+            return fallback
+        curve: list[tuple[float, float]] = []
+        for point in value:
+            if not isinstance(point, list) or len(point) < 2:
+                return fallback
+            curve.append((float(point[0]), float(point[1])))
+        return curve
 
     def row(self, t: float) -> dict[str, float | str]:
         speed = math.hypot(self.vx, self.vy)
