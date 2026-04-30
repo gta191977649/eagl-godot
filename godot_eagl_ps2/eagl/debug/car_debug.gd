@@ -155,6 +155,10 @@ func _update_telemetry() -> void:
 	lines.append("EngT:  %6.1f" % float(snapshot.get("engine_force_total", 0.0)))
 	lines.append("Mouse: %s" % ("orbit" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED else "click to capture"))
 	lines.append("Air:   %s" % ("frozen" if _airborne_debug_enabled else "normal"))
+	lines.append("HP2 Asst: %s  mu=%.2f" % [
+		String(snapshot.get("assist_wheel", "")),
+		float(snapshot.get("surface_mu", 1.0)),
+	])
 	lines.append("")
 	for wheel in snapshot.get("wheels", []):
 		lines.append(
@@ -601,6 +605,11 @@ func _on_airborne_toggled(enabled: bool) -> void:
 
 func _apply_airborne_debug_state() -> void:
 	if car == null:
+		return
+	if car.has_method("set_airborne_debug_enabled"):
+		car.set_airborne_debug_enabled(_airborne_debug_enabled, AIRBORNE_DEBUG_HEIGHT)
+		if not _airborne_debug_enabled:
+			car.reset_runtime_state(_spawn_transform)
 		return
 	car.freeze = _airborne_debug_enabled
 	car.linear_velocity = Vector3.ZERO

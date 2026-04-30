@@ -1,0 +1,19 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://f0p7v8p525th"
+
+[deps]
+
+files=["res://gameplay/vehicles/hp2_controller/results/benchmark_summary.speed.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.yaw.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.sideslip.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.godot.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.reference.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.godot.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.reference.translation"]
+
+source_file="res://gameplay/vehicles/hp2_controller/results/benchmark_summary.csv"
+dest_files=["res://gameplay/vehicles/hp2_controller/results/benchmark_summary.speed.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.yaw.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.sideslip.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.godot.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.reference.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.godot.translation", "res://gameplay/vehicles/hp2_controller/results/benchmark_summary.reference.translation"]
+
+[params]
+
+compress=1
+delimiter=0
+unescape_keys=false
+unescape_translations=true
