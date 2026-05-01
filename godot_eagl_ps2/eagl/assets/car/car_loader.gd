@@ -8,14 +8,19 @@ const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_ban
 
 const SLOT_IDS := ["FL", "FR", "RL", "RR"]
 const TIRE_DETAIL_SUFFIXES := ["A", "B", "C"]
+
+
 const CAR_WINDOW_MATERIAL_HASHES := [
+	
 	0x7b220ddf,
 	0xe7e4ef49,
 	0x1b0763a0,
 	0x60f8b13c,
 	0x4cdebfca,
 	0x0ab88f5d,
+	
 ]
+
 const TIRE_RIM_MATERIAL_HASH := 0x001d38b3
 const TIRE_CAP_MATERIAL_HASH := 0xc8c5a8a4
 

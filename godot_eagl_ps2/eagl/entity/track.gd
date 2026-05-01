@@ -22,6 +22,7 @@ signal track_failed(track_id: String, message: String)
 @export var collision_debug_surface_offset := 0.08
 @export var collision_layer := 1
 @export var collision_mask := 1
+@export var drive_area_debug_visible := false
 @export var build_route := true
 @export var route_debug_visible := false
 @export var route_debug_height_offset := 1.0
@@ -104,6 +105,11 @@ func set_collision_debug_visible(visible: bool) -> void:
 func set_route_debug_visible(visible: bool) -> void:
 	route_debug_visible = visible
 	_apply_route_debug_visible()
+
+
+func set_drive_area_debug_visible(visible: bool) -> void:
+	drive_area_debug_visible = visible
+	_apply_drive_area_debug_visible()
 
 
 func get_nearest_route_point(world_position: Vector3) -> Dictionary:
@@ -208,6 +214,7 @@ func _replace_track_node(next_track_node: Node3D) -> void:
 	_content_root.add_child(_track_node)
 	_track_node.propagate_call("set_visible", [true])
 	_apply_collision_debug_visible()
+	_apply_drive_area_debug_visible()
 	_apply_route_debug_visible()
 	_track_node.force_update_transform()
 
@@ -216,8 +223,16 @@ func _apply_collision_debug_visible() -> void:
 	if _track_node == null:
 		return
 	for node in _track_node.find_children("*", "MeshInstance3D", true, false):
-		if bool(node.get_meta("eagl_collision_debug_overlay", false)):
+		if bool(node.get_meta("eagl_collision_debug_overlay", false)) and not _is_drive_area_overlay(node):
 			node.visible = collision_debug_visible
+
+
+func _apply_drive_area_debug_visible() -> void:
+	if _track_node == null:
+		return
+	for node in _track_node.find_children("*", "MeshInstance3D", true, false):
+		if _is_drive_area_overlay(node):
+			node.visible = drive_area_debug_visible
 
 
 func _apply_route_debug_visible() -> void:
@@ -226,6 +241,13 @@ func _apply_route_debug_visible() -> void:
 	for node in _track_node.find_children("*", "GeometryInstance3D", true, false):
 		if bool(node.get_meta("eagl_route_debug_overlay", false)):
 			node.visible = route_debug_visible
+
+
+func _is_drive_area_overlay(node: Node) -> bool:
+	return (
+		bool(node.get_meta("eagl_collision_debug_overlay", false))
+		and String(node.get_meta("eagl_collision_category", "")) == "DriveArea"
+	)
 
 
 func _track_load_error(node: Node3D) -> String:

@@ -68,9 +68,9 @@ func load_asset(track_id: String):
 		stats["from_cache"] = true
 		return cached
 
-	var asset = parser.parse(files)
-	asset.texture_bank = PS2TextureBankScript.new()
-	asset.texture_bank.load_for_track(files)
+	var texture_bank = PS2TextureBankScript.new()
+	texture_bank.load_for_track(files)
+	var asset = parser.parse(files, texture_bank)
 	for message in asset.texture_bank.errors:
 		asset.add_warning(message)
 	stats = asset.summary()

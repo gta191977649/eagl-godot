@@ -11,8 +11,21 @@ const POSITION_S8_SCALE := 1.0 / 128.0
 const CHUNK_TRACK_METADATA := 0x00034200
 const CHUNK_SUN_FLARE_CONFIG := 0x00034202
 const CHUNK_FOG_CONFIG := 0x00034250
+const CHUNK_TRACK_ROUTE := 0x00034121
+const CHUNK_TRACK_ROUTE_EDGES := 0x00034122
+const CHUNK_TRACK_POLYGON_COLLISION := 0x00034132
 const CHUNK_ROUTE_ROOT := 0x80034500
 const CHUNK_ROUTE_RADAR := 0x00034510
+const CHUNK_ALLOWED_ROAD_AREAS := 0x00034530
+const TRACK_ROUTE_DRIVE_AREA_MAX_INDEX := 0x31
+const TRACK_ROUTE_EDGE_RECORD_SIZE := 0x0c
+const TRACK_COLLISION_POLYGON_RECORD_SIZE := 0x20
+const ALLOWED_ROAD_AREA_RECORD_SIZE := 0x3c
+const ALLOWED_ROAD_AREA_MAX_POINTS := 6
+const ALLOWED_ROAD_AREA_METADATA_SIZE := 8
+const TRACK_DRIVE_SURFACE_NORMAL_Y_MIN := 0.05
+const DRIVE_AREA_POLYGON_GRID_SIZE := 16.0
+const DRIVE_AREA_POLYGON_EDGE_EPSILON := 0.08
 
 const SUN_FLARE_TEXTURE_HASHES := [
 	0x47beb4b6, # SUNCENTER
@@ -30,11 +43,12 @@ const SUN_FLARE_TEXTURE_NAMES := [
 ]
 
 
-func parse(files: Dictionary):
+func parse(files: Dictionary, preloaded_texture_bank = null):
 	var asset = TrackAssetScript.new()
 	asset.track_id = files.get("track_id", "")
 	asset.source_path = files.get("model", "")
 	asset.source_files = files.duplicate(true)
+	asset.texture_bank = preloaded_texture_bank
 	if asset.source_path == "":
 		asset.add_warning("Track parser received no model path")
 		return asset
@@ -120,9 +134,13 @@ func _parse_scene_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray
 		asset.scenery_instances.append_array(section.get("instances", []))
 	asset.environment_config = _parse_environment_config(chunks, bundle)
 	asset.unknown_chunks = _collect_unknown_chunks(chunks)
+	asset.collision_templates = _parse_collision_templates(chunks, bundle)
+	asset.allowed_road_areas = _parse_allowed_road_areas(chunks, bundle)
+	asset.track_route_segments = _parse_track_route_segments(chunks, bundle)
+	asset.track_route_edges = _parse_track_route_edges(chunks, bundle)
+	asset.track_collision_polygons = _parse_track_collision_polygons(chunks, bundle)
 	_build_collision_surfaces(asset, chunks, bundle)
 	_parse_route_into(asset, chunks, bundle)
-
 
 func _parse_mesh_object(object_chunk: Dictionary, bundle: PackedByteArray) -> Dictionary:
 	var header_chunk := _child_with_id(object_chunk, 0x00034003)
@@ -188,7 +206,6 @@ func _parse_mesh_object(object_chunk: Dictionary, bundle: PackedByteArray) -> Di
 		"name_hash": Binary.u32(header_payload, 0x08) if header_payload.size() >= 0x0C else 0,
 	}
 
-
 func _assign_source_roles(solid_packs: Array[Dictionary]) -> void:
 	for pack in solid_packs:
 		var role := "STATIC_SOLID_PACK"
@@ -209,11 +226,12 @@ func _is_special_solid_object_name(object_name: String) -> bool:
 	var name := object_name.to_upper()
 	return name.begins_with("SKYDOME") or name.contains("ENVMAP") or name == "WATER" or (name.begins_with("TRACK") and name.contains("STARTLINE"))
 
-
 func _extract_blocks_from_strip_entries(vif_payload: PackedByteArray, metadata_payload: PackedByteArray, _object_name: String) -> Array[Dictionary]:
+	
 	var clean_metadata := _strip_vif_prefix(metadata_payload)
 	var record_count := clean_metadata.size() / 0x40
-	if record_count <= 0:
+	
+	if record_count <= 0: 
 		return []
 
 	var blocks: Array[Dictionary] = []
@@ -228,6 +246,7 @@ func _extract_blocks_from_strip_entries(vif_payload: PackedByteArray, metadata_p
 		if decoded.size() != 1:
 			return []
 		var texture_index_raw: int = strip_entry["texture_index_raw"]
+		
 		blocks.append({
 			"run": decoded[0],
 			"primitive_mode": "strip",
@@ -239,8 +258,8 @@ func _extract_blocks_from_strip_entries(vif_payload: PackedByteArray, metadata_p
 			"source_qword_size": qword_size,
 			"strip_entry": strip_entry,
 		})
+		
 	return blocks
-
 
 func _parse_strip_entry_record(record: PackedByteArray) -> Dictionary:
 	var texture_index_raw := Binary.u32(record, 0)
@@ -261,7 +280,6 @@ func _parse_strip_entry_record(record: PackedByteArray) -> Dictionary:
 		"count_byte": (word_1c >> 16) & 0xFF,
 		"packed_ff_or_zero": (word_1c >> 24) & 0xFF,
 	}
-
 
 func _extract_vif_vertex_runs(payload: PackedByteArray) -> Array[Dictionary]:
 	payload = _strip_vif_prefix(payload)
@@ -400,7 +418,6 @@ func _decode_position_values(command: int, count: int, payload: PackedByteArray,
 		out.append(row)
 	return out
 
-
 func _append_texcoord_pairs(texcoords: Array[Vector2], command: int, count: int, payload: PackedByteArray, offset: int) -> void:
 	var base_command := _base_unpack_command(command)
 	if base_command == 0x6C:
@@ -446,14 +463,12 @@ func _vif_command_payload_size(command: int, count: int, imm: int) -> int:
 		return (imm if imm > 0 else 0x10000) * 16
 	return -1
 
-
 func _unpack_data_size(command: int, count: int) -> int:
 	if not _is_unpack_command(command) or _unpack_format_name(command) == "":
 		return -1
 	var vn := (command >> 2) & 0x03
 	var vl := command & 0x03
 	return Binary.align(((0x08 >> vl) * (vn + 1) * count) >> 1, 4)
-
 
 func _unpack_format_name(command: int) -> String:
 	match command & 0x0F:
@@ -485,7 +500,6 @@ func _unpack_format_name(command: int) -> String:
 			return "V4_5"
 	return ""
 
-
 func _position_layout(base_command: int) -> Dictionary:
 	match base_command:
 		0x60:
@@ -514,25 +528,20 @@ func _position_layout(base_command: int) -> Dictionary:
 			return {"components": 4, "kind": "s8"}
 	return {}
 
-
 func _has_position_layout(base_command: int) -> bool:
 	return not _position_layout(base_command).is_empty()
-
 
 func _base_unpack_command(command: int) -> int:
 	return command & 0xEF
 
-
 func _is_unpack_command(command: int) -> bool:
 	return command >= 0x60 and command <= 0x7F
-
 
 func _extract_scenery_instances(chunks: Array[Dictionary], bundle: PackedByteArray, objects: Array[Dictionary], primary_objects: Array[Dictionary]) -> Array[Dictionary]:
 	var instances: Array[Dictionary] = []
 	for section in _parse_scenery_sections(chunks, bundle, objects, primary_objects):
 		instances.append_array(section.get("instances", []))
 	return instances
-
 
 func _parse_scenery_sections(chunks: Array[Dictionary], bundle: PackedByteArray, objects: Array[Dictionary], primary_objects: Array[Dictionary]) -> Array[Dictionary]:
 	if objects.is_empty() and primary_objects.is_empty():
@@ -588,11 +597,101 @@ func _parse_scenery_sections(chunks: Array[Dictionary], bundle: PackedByteArray,
 		section_index += 1
 	return sections
 
-
 func _build_collision_surfaces(asset, chunks: Array[Dictionary], bundle: PackedByteArray) -> void:
 	var surfaces: Array[Dictionary] = []
 	var skipped := {}
-	var direct_surface_keys := {}
+	if not _append_track_collision_drive_surface(asset, surfaces):
+		_append_track_polygon_surfaces(asset, surfaces, skipped)
+	_append_drive_area_debug_surface(asset, surfaces)
+	_append_track_collision_template_surfaces(asset, surfaces, skipped)
+
+	var cs_candidates := _collect_collision_chunk_candidates(chunks, bundle)
+	var resolved_cs := 0
+	for surface in surfaces:
+		if String(surface.get("collision_source_kind", "")) == "track_polygon_template":
+			resolved_cs += 1
+
+	asset.collision_surfaces = surfaces
+	asset.collision_stats = _collision_stats_for_surfaces(surfaces, skipped, cs_candidates, resolved_cs, 0)
+	asset.collision_stats["track_polygon_template_count"] = asset.collision_templates.size()
+	asset.collision_stats["route_zone_area_count"] = asset.allowed_road_areas.size()
+	asset.collision_stats["track_route_segment_count"] = asset.track_route_segments.size()
+	asset.collision_stats["track_route_edge_count"] = asset.track_route_edges.size()
+	asset.collision_stats["track_collision_polygon_count"] = asset.track_collision_polygons.size()
+	asset.collision_stats["track_collision_drive_area_polygon_count"] = _track_collision_drive_area_polygon_count(asset.track_collision_polygons)
+
+
+func _append_track_polygon_surfaces(asset, surfaces: Array[Dictionary], skipped: Dictionary) -> void:
+	for obj in asset.objects:
+		if bool(obj.get("is_scenery_template", false)):
+			continue
+		var category := _collision_category_for_object(obj)
+		if category != "Road" and category != "Terrain":
+			continue
+		var surface := _track_polygon_surface_for_object(asset, obj, category, obj.get("transform", []), "DIRECT_SOLID", {})
+		if surface.is_empty():
+			_count_collision_skip(skipped, "empty_track_polygon_surface")
+			continue
+		surfaces.append(surface)
+
+
+func _append_track_collision_drive_surface(asset, surfaces: Array[Dictionary]) -> bool:
+	var faces := PackedVector3Array()
+	for polygon in asset.track_collision_polygons:
+		if not _track_collision_polygon_contributes_to_drive_area(polygon):
+			continue
+		var points: PackedVector3Array = polygon.get("points_godot", PackedVector3Array())
+		if points.size() < 3:
+			continue
+		_append_drive_surface_face_if_valid(faces, points[0], points[1], points[2])
+		if points.size() >= 4:
+			_append_drive_surface_face_if_valid(faces, points[0], points[2], points[3])
+	if faces.is_empty():
+		return false
+	surfaces.append(_collision_surface_from_faces(
+		"Road",
+		"drive_area",
+		"TrackPolygonCollision",
+		"TRACK_POLYGON_COLLISION_AREA",
+		faces,
+		"track_polygon_collision_area",
+		{
+			"source_chunk_offset": -1,
+			"source_record_offset": -1,
+			"index": -1,
+		}
+	))
+	return true
+
+
+func _append_drive_surface_face_if_valid(faces: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3) -> void:
+	var normal := (b - a).cross(c - a)
+	if normal.length_squared() <= 0.0001:
+		return
+	if normal.y < 0.0:
+		var swap := b
+		b = c
+		c = swap
+		normal = (b - a).cross(c - a)
+	if normal.length_squared() <= 0.0001:
+		return
+	normal = normal.normalized()
+	if normal.y < TRACK_DRIVE_SURFACE_NORMAL_Y_MIN:
+		return
+	faces.append(a)
+	faces.append(b)
+	faces.append(c)
+
+
+func _track_collision_drive_area_polygon_count(polygons: Array[Dictionary]) -> int:
+	var count := 0
+	for polygon in polygons:
+		if _track_collision_polygon_contributes_to_drive_area(polygon):
+			count += 1
+	return count
+
+
+func _append_track_collision_template_surfaces(asset, surfaces: Array[Dictionary], skipped: Dictionary) -> void:
 	for obj in asset.objects:
 		if bool(obj.get("is_scenery_template", false)):
 			continue
@@ -600,12 +699,13 @@ func _build_collision_surfaces(asset, chunks: Array[Dictionary], bundle: PackedB
 		if category == "":
 			_count_collision_skip(skipped, "excluded_object")
 			continue
-		var surface := _collision_surface_for_object(obj, category, obj.get("transform", []), "DIRECT_SOLID", {})
+		if category == "Road" or category == "Terrain":
+			continue
+		var surface := _template_collision_surface_for_object(asset, obj, category, obj.get("transform", []), "DIRECT_SOLID", {})
 		if surface.is_empty():
-			_count_collision_skip(skipped, "empty_source_polygons")
+			_count_collision_skip(skipped, "missing_track_collision_template")
 			continue
 		surfaces.append(surface)
-		direct_surface_keys[int(obj.get("chunk_offset", -1))] = true
 
 	for instance in asset.scenery_instances:
 		var object_index := int(instance.get("object_index", -1))
@@ -616,26 +716,520 @@ func _build_collision_surfaces(asset, chunks: Array[Dictionary], bundle: PackedB
 		var category := _collision_category_for_object(obj, true)
 		if category == "":
 			continue
-		var surface := _collision_surface_for_object(obj, category, instance.get("transform", []), "SCENERY_INSTANCE", instance)
+		if category == "Road" or category == "Terrain":
+			continue
+		var surface := _template_collision_surface_for_object(asset, obj, category, instance.get("transform", []), "SCENERY_INSTANCE", instance)
 		if surface.is_empty():
-			_count_collision_skip(skipped, "empty_scenery_polygons")
+			_count_collision_skip(skipped, "missing_scenery_track_collision_template")
 			continue
 		surfaces.append(surface)
 
-	var cs_candidates := _collect_collision_chunk_candidates(chunks, bundle)
-	var resolved_cs := 0
+func _append_drive_area_debug_surface(asset, surfaces: Array[Dictionary]) -> void:
+	var boundary_lines := _drive_area_boundary_lines_from_track_collision_polygons(asset.track_collision_polygons)
+	var source_kind := "track_polygon_collision_area"
+	if boundary_lines.is_empty():
+		boundary_lines = _drive_area_boundary_lines_from_track_polygon_surfaces(surfaces)
+		source_kind = "track_polygon_drive_area"
+	if boundary_lines.is_empty():
+		boundary_lines = _drive_area_boundary_lines_from_track_route_segments(asset.track_route_segments, asset.track_route_edges)
+		source_kind = "track_route_boundary_fallback"
+	if boundary_lines.is_empty():
+		return
+	surfaces.append({
+		"category": "DriveArea",
+		"material_kind": "drive_area",
+		"object_name": "DriveAreaBoundary",
+		"chunk_offset": -1,
+		"source_chunk_offset": -1,
+		"solid_pack_index": -1,
+		"solid_pack_offset": -1,
+		"placement_kind": "TRACK_POLYGON_COLLISION_AREA",
+		"section_number": -1,
+		"record_index": -1,
+		"triangle_count": 0,
+		"line_count": int(boundary_lines.size() / 2),
+		"block_count": 0,
+		"collision_source_kind": source_kind,
+		"debug_only": true,
+		"debug_lines": boundary_lines,
+		"faces": PackedVector3Array(),
+	})
+
+
+func _drive_area_boundary_lines_from_track_route_segments(segments: Array[Dictionary], route_edges: Array[Dictionary]) -> PackedVector3Array:
+	var polygons: Array[PackedVector2Array] = []
+	var height_samples := PackedVector3Array()
+	var route_points_by_index := _drive_area_route_points_by_index(segments)
+	for segment in segments:
+		if not _track_route_segment_contributes_to_drive_area(segment):
+			continue
+		var points: Array = segment.get("points", [])
+		if points.size() < 2:
+			continue
+		for point_index in range(points.size() - 1):
+			var a := _drive_area_boundary_points_for_route_point(points[point_index])
+			var b := _drive_area_boundary_points_for_route_point(points[point_index + 1])
+			if a.is_empty() or b.is_empty():
+				continue
+			var quad := _drive_area_quad_from_boundary_points(a, b)
+			if quad.size() < 3:
+				continue
+			polygons.append(quad)
+			height_samples.append(a["left"])
+			height_samples.append(a["right"])
+			height_samples.append(b["left"])
+			height_samples.append(b["right"])
+		_append_drive_area_route_edge_quads(polygons, height_samples, points, route_edges, route_points_by_index)
+	return _drive_area_boundary_lines_from_merged_polygons(_merge_drive_area_polygons(polygons), height_samples)
+
+
+func _drive_area_boundary_lines_from_track_collision_polygons(polygons: Array[Dictionary]) -> PackedVector3Array:
+	var edges: Array[Dictionary] = []
+	var polygon_infos: Array[Dictionary] = []
+	var polygon_grid := {}
+	for polygon in polygons:
+		if not _track_collision_polygon_contributes_to_drive_area(polygon):
+			continue
+		var points: PackedVector3Array = polygon.get("points_godot", PackedVector3Array())
+		if points.size() < 3:
+			continue
+		var projected_polygon := _projected_drive_area_polygon(points)
+		if projected_polygon.size() < 3:
+			continue
+		var owner_index := polygon_infos.size()
+		polygon_infos.append(_projected_polygon_info(projected_polygon))
+		_index_projected_polygon(polygon_grid, polygon_infos[owner_index], owner_index)
+		for point_index in range(points.size()):
+			_append_projected_boundary_edge(edges, points[point_index], points[(point_index + 1) % points.size()], owner_index)
+	return _projected_boundary_lines_from_split_edges(edges, polygon_infos, polygon_grid)
+
+
+func _track_collision_polygon_contributes_to_drive_area(polygon: Dictionary) -> bool:
+	var flags := int(polygon.get("flags", 0))
+	return (flags & 0x0a) == 0
+
+
+func _append_projected_boundary_edge(edges: Array[Dictionary], a: Vector3, b: Vector3, owner_index: int) -> void:
+	# DriveArea is a 2D outline; adjacent polygons may share X/Z edges with slightly different heights.
+	var qa := _projected_boundary_point_key(a)
+	var qb := _projected_boundary_point_key(b)
+	if qa == qb:
+		return
+	var dx := qb.x - qa.x
+	var dy := qb.y - qa.y
+	var divisor := _int_gcd(absi(dx), absi(dy))
+	if divisor <= 0:
+		return
+	var dir_x := dx / divisor
+	var dir_y := dy / divisor
+	if dir_x < 0 or (dir_x == 0 and dir_y < 0):
+		dir_x = -dir_x
+		dir_y = -dir_y
+	var ta := qa.x * dir_x + qa.y * dir_y
+	var tb := qb.x * dir_x + qb.y * dir_y
+	if ta == tb:
+		return
+	var normal_x := -dir_y
+	var normal_y := dir_x
+	var line_offset := normal_x * qa.x + normal_y * qa.y
+	edges.append({
+		"a": a,
+		"b": b,
+		"ta": ta,
+		"tb": tb,
+		"start": mini(ta, tb),
+		"end": maxi(ta, tb),
+		"line_key": "%d,%d,%d" % [dir_x, dir_y, line_offset],
+		"owner": owner_index,
+	})
+
+
+func _projected_boundary_lines_from_split_edges(edges: Array[Dictionary], polygon_infos: Array[Dictionary], polygon_grid: Dictionary) -> PackedVector3Array:
+	var by_line := {}
+	for edge in edges:
+		var line_key := String(edge.get("line_key", ""))
+		if line_key == "":
+			continue
+		if not by_line.has(line_key):
+			by_line[line_key] = []
+		by_line[line_key].append(edge)
+
+	var lines := PackedVector3Array()
+	for line_key in by_line.keys():
+		var line_edges: Array = by_line[line_key]
+		var cuts: Array[int] = []
+		for edge in line_edges:
+			cuts.append(int(edge["start"]))
+			cuts.append(int(edge["end"]))
+		cuts.sort()
+		cuts = _unique_ints(cuts)
+		for cut_index in range(cuts.size() - 1):
+			var segment_start := int(cuts[cut_index])
+			var segment_end := int(cuts[cut_index + 1])
+			if segment_start == segment_end:
+				continue
+			var covering_edge := {}
+			var covering_count := 0
+			for edge in line_edges:
+				if int(edge["start"]) <= segment_start and segment_end <= int(edge["end"]):
+					covering_count += 1
+					covering_edge = edge
+					if covering_count > 1:
+						break
+			if covering_count != 1:
+				continue
+			var a := _point_on_projected_edge(covering_edge, segment_start)
+			var b := _point_on_projected_edge(covering_edge, segment_end)
+			if _projected_segment_is_covered_by_another_polygon(a, b, int(covering_edge.get("owner", -1)), polygon_infos, polygon_grid):
+				continue
+			lines.append(a)
+			lines.append(b)
+	return lines
+
+
+func _projected_segment_is_covered_by_another_polygon(a: Vector3, b: Vector3, owner_index: int, polygon_infos: Array[Dictionary], polygon_grid: Dictionary) -> bool:
+	var samples := [
+		a.lerp(b, 0.25),
+		a.lerp(b, 0.5),
+		a.lerp(b, 0.75),
+	]
+	for sample_3d in samples:
+		var sample := Vector2(sample_3d.x, sample_3d.z)
+		var key := _projected_polygon_grid_key(floori(sample.x / DRIVE_AREA_POLYGON_GRID_SIZE), floori(sample.y / DRIVE_AREA_POLYGON_GRID_SIZE))
+		var candidates: Array = polygon_grid.get(key, [])
+		for candidate_index in candidates:
+			var index := int(candidate_index)
+			if index == owner_index or index < 0 or index >= polygon_infos.size():
+				continue
+			var info: Dictionary = polygon_infos[index]
+			if not _projected_point_in_bounds(sample, info):
+				continue
+			var polygon: PackedVector2Array = info.get("points", PackedVector2Array())
+			if Geometry2D.is_point_in_polygon(sample, polygon) or _projected_point_on_polygon_edge(sample, polygon):
+				return true
+	return false
+
+
+func _projected_point_in_bounds(point: Vector2, info: Dictionary) -> bool:
+	return (
+		point.x >= float(info.get("min_x", 0.0)) - DRIVE_AREA_POLYGON_EDGE_EPSILON
+		and point.x <= float(info.get("max_x", 0.0)) + DRIVE_AREA_POLYGON_EDGE_EPSILON
+		and point.y >= float(info.get("min_y", 0.0)) - DRIVE_AREA_POLYGON_EDGE_EPSILON
+		and point.y <= float(info.get("max_y", 0.0)) + DRIVE_AREA_POLYGON_EDGE_EPSILON
+	)
+
+
+func _projected_point_on_polygon_edge(point: Vector2, polygon: PackedVector2Array) -> bool:
+	for index in range(polygon.size()):
+		if _point_segment_distance_squared_2d(point, polygon[index], polygon[(index + 1) % polygon.size()]) <= DRIVE_AREA_POLYGON_EDGE_EPSILON * DRIVE_AREA_POLYGON_EDGE_EPSILON:
+			return true
+	return false
+
+
+func _point_segment_distance_squared_2d(point: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var length_squared := ab.length_squared()
+	if length_squared <= 0.000001:
+		return point.distance_squared_to(a)
+	var t := clampf((point - a).dot(ab) / length_squared, 0.0, 1.0)
+	return point.distance_squared_to(a + ab * t)
+
+
+func _point_on_projected_edge(edge: Dictionary, t: int) -> Vector3:
+	var ta := float(edge["ta"])
+	var tb := float(edge["tb"])
+	var denom := tb - ta
+	if absf(denom) <= 0.000001:
+		return edge["a"]
+	var alpha := clampf((float(t) - ta) / denom, 0.0, 1.0)
+	var a: Vector3 = edge["a"]
+	var b: Vector3 = edge["b"]
+	return a.lerp(b, alpha)
+
+
+func _projected_boundary_point_key(point: Vector3) -> Vector2i:
+	return Vector2i(
+		roundi(point.x * 20.0),
+		roundi(point.z * 20.0)
+	)
+
+
+func _projected_drive_area_polygon(points: PackedVector3Array) -> PackedVector2Array:
+	var polygon := PackedVector2Array()
+	for point in points:
+		polygon.append(Vector2(point.x, point.z))
+	return polygon
+
+
+func _projected_polygon_info(polygon: PackedVector2Array) -> Dictionary:
+	var min_x := polygon[0].x
+	var max_x := polygon[0].x
+	var min_y := polygon[0].y
+	var max_y := polygon[0].y
+	for point in polygon:
+		min_x = minf(min_x, point.x)
+		max_x = maxf(max_x, point.x)
+		min_y = minf(min_y, point.y)
+		max_y = maxf(max_y, point.y)
+	return {
+		"points": polygon,
+		"min_x": min_x,
+		"max_x": max_x,
+		"min_y": min_y,
+		"max_y": max_y,
+	}
+
+
+func _index_projected_polygon(grid: Dictionary, info: Dictionary, polygon_index: int) -> void:
+	var min_cell_x := floori(float(info.get("min_x", 0.0)) / DRIVE_AREA_POLYGON_GRID_SIZE)
+	var max_cell_x := floori(float(info.get("max_x", 0.0)) / DRIVE_AREA_POLYGON_GRID_SIZE)
+	var min_cell_y := floori(float(info.get("min_y", 0.0)) / DRIVE_AREA_POLYGON_GRID_SIZE)
+	var max_cell_y := floori(float(info.get("max_y", 0.0)) / DRIVE_AREA_POLYGON_GRID_SIZE)
+	for cell_x in range(min_cell_x, max_cell_x + 1):
+		for cell_y in range(min_cell_y, max_cell_y + 1):
+			var key := _projected_polygon_grid_key(cell_x, cell_y)
+			if not grid.has(key):
+				grid[key] = []
+			grid[key].append(polygon_index)
+
+
+func _projected_polygon_grid_key(cell_x: int, cell_y: int) -> String:
+	return "%d,%d" % [cell_x, cell_y]
+
+
+func _unique_ints(values: Array[int]) -> Array[int]:
+	var out: Array[int] = []
+	var has_previous := false
+	var previous := 0
+	for value in values:
+		if has_previous and value == previous:
+			continue
+		out.append(value)
+		previous = value
+		has_previous = true
+	return out
+
+
+func _int_gcd(a: int, b: int) -> int:
+	while b != 0:
+		var next := a % b
+		a = b
+		b = next
+	return a
+
+
+func _drive_area_route_points_by_index(segments: Array[Dictionary]) -> Dictionary:
+	var by_index := {}
+	for segment in segments:
+		if not _track_route_segment_contributes_to_drive_area(segment):
+			continue
+		by_index[int(segment.get("route_index", -1))] = segment.get("points", [])
+	return by_index
+
+
+func _append_drive_area_route_edge_quads(polygons: Array[PackedVector2Array], height_samples: PackedVector3Array, points: Array, route_edges: Array[Dictionary], route_points_by_index: Dictionary) -> void:
+	for point in points:
+		var edge_index := int(point.get("route_edge_index", 0xff))
+		if edge_index == 0xff or edge_index < 0 or edge_index >= route_edges.size():
+			continue
+		var edge: Dictionary = route_edges[edge_index]
+		var target_route_index := int(edge.get("target_route_index", -1))
+		if target_route_index < 0 or target_route_index >= TRACK_ROUTE_DRIVE_AREA_MAX_INDEX:
+			continue
+		var target_points: Array = route_points_by_index.get(target_route_index, [])
+		var target_point_index := int(edge.get("target_point_index", -1))
+		if target_point_index < 0 or target_point_index >= target_points.size():
+			continue
+		var source_boundary := _drive_area_boundary_points_for_route_point(point)
+		var target_boundary := _drive_area_boundary_points_for_route_point(target_points[target_point_index])
+		if source_boundary.is_empty() or target_boundary.is_empty():
+			continue
+		var connector := _drive_area_quad_between_boundaries(source_boundary, target_boundary)
+		if connector.size() < 3:
+			continue
+		polygons.append(connector)
+		height_samples.append(source_boundary["left"])
+		height_samples.append(source_boundary["right"])
+		height_samples.append(target_boundary["left"])
+		height_samples.append(target_boundary["right"])
+
+
+func _track_route_segment_contributes_to_drive_area(segment: Dictionary) -> bool:
+	var route_index := int(segment.get("route_index", -1))
+	return route_index >= 0 and route_index < TRACK_ROUTE_DRIVE_AREA_MAX_INDEX
+
+
+func _drive_area_quad_from_boundary_points(a: Dictionary, b: Dictionary) -> PackedVector2Array:
+	var polygon := PackedVector2Array([
+		_drive_area_point_3d_to_2d(a["left"]),
+		_drive_area_point_3d_to_2d(b["left"]),
+		_drive_area_point_3d_to_2d(b["right"]),
+		_drive_area_point_3d_to_2d(a["right"]),
+	])
+	if absf(_drive_area_polygon_area(polygon)) <= 0.001:
+		return PackedVector2Array()
+	return polygon
+
+
+func _drive_area_quad_between_boundaries(a: Dictionary, b: Dictionary) -> PackedVector2Array:
+	var a_left: Vector3 = a["left"]
+	var a_right: Vector3 = a["right"]
+	var b_left: Vector3 = b["left"]
+	var b_right: Vector3 = b["right"]
+	var same_side_distance := a_left.distance_squared_to(b_left) + a_right.distance_squared_to(b_right)
+	var crossed_distance := a_left.distance_squared_to(b_right) + a_right.distance_squared_to(b_left)
+	if crossed_distance < same_side_distance:
+		return _drive_area_quad_from_points(a_left, b_right, b_left, a_right)
+	return _drive_area_quad_from_points(a_left, b_left, b_right, a_right)
+
+
+func _drive_area_quad_from_points(a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> PackedVector2Array:
+	var polygon := PackedVector2Array([
+		_drive_area_point_3d_to_2d(a),
+		_drive_area_point_3d_to_2d(b),
+		_drive_area_point_3d_to_2d(c),
+		_drive_area_point_3d_to_2d(d),
+	])
+	if absf(_drive_area_polygon_area(polygon)) <= 0.001:
+		return PackedVector2Array()
+	return polygon
+
+
+func _drive_area_point_3d_to_2d(point: Vector3) -> Vector2:
+	return Vector2(point.x, point.z)
+
+
+func _drive_area_polygon_from_corridor_edges(left_points: PackedVector3Array, right_points: PackedVector3Array) -> PackedVector2Array:
+	if left_points.size() < 2 or right_points.size() < 2:
+		return PackedVector2Array()
+	var polygon := PackedVector2Array()
+	for point in left_points:
+		polygon.append(Vector2(point.x, point.z))
+	for index in range(right_points.size() - 1, -1, -1):
+		var point := right_points[index]
+		polygon.append(Vector2(point.x, point.z))
+	if absf(_drive_area_polygon_area(polygon)) <= 0.001:
+		return PackedVector2Array()
+	return polygon
+
+
+func _merge_drive_area_polygons(polygons: Array[PackedVector2Array]) -> Array[PackedVector2Array]:
+	var merged: Array[PackedVector2Array] = []
+	for polygon in polygons:
+		var pending: Array[PackedVector2Array] = [polygon]
+		var existing_index := 0
+		while existing_index < merged.size():
+			var next_pending: Array[PackedVector2Array] = []
+			var consumed_existing := false
+			for candidate in pending:
+				var union_result := Geometry2D.merge_polygons(merged[existing_index], candidate)
+				if union_result.size() == 1:
+					next_pending.append(union_result[0])
+					consumed_existing = true
+				else:
+					next_pending.append(candidate)
+			pending = next_pending
+			if consumed_existing:
+				merged.remove_at(existing_index)
+			else:
+				existing_index += 1
+		for candidate in pending:
+			if candidate.size() >= 3:
+				merged.append(candidate)
+	return merged
+
+
+func _drive_area_boundary_lines_from_merged_polygons(polygons: Array[PackedVector2Array], height_samples: PackedVector3Array) -> PackedVector3Array:
+	var lines := PackedVector3Array()
+	for polygon in polygons:
+		if polygon.size() < 3:
+			continue
+		for index in range(polygon.size()):
+			lines.append(_drive_area_point_2d_to_3d(polygon[index], height_samples))
+			lines.append(_drive_area_point_2d_to_3d(polygon[(index + 1) % polygon.size()], height_samples))
+	return lines
+
+
+func _drive_area_point_2d_to_3d(point: Vector2, height_samples: PackedVector3Array) -> Vector3:
+	if height_samples.is_empty():
+		return Vector3(point.x, 0.0, point.y)
+	var nearest := height_samples[0]
+	var nearest_distance := Vector2(nearest.x, nearest.z).distance_squared_to(point)
+	for index in range(1, height_samples.size()):
+		var sample := height_samples[index]
+		var distance := Vector2(sample.x, sample.z).distance_squared_to(point)
+		if distance < nearest_distance:
+			nearest = sample
+			nearest_distance = distance
+	return Vector3(point.x, nearest.y, point.y)
+
+
+func _drive_area_polygon_area(polygon: PackedVector2Array) -> float:
+	var area := 0.0
+	for index in range(polygon.size()):
+		var a := polygon[index]
+		var b := polygon[(index + 1) % polygon.size()]
+		area += a.x * b.y - b.x * a.y
+	return area * 0.5
+
+
+func _drive_area_boundary_points_for_route_point(point: Dictionary) -> Dictionary:
+	var center: Vector3 = point.get("position_godot", Vector3.ZERO)
+	var forward_ps2: Vector2 = point.get("forward_ps2_2d", Vector2.ZERO)
+	if forward_ps2.length_squared() <= 0.000001:
+		return {}
+	var right_ps2 := Vector2(forward_ps2.y, -forward_ps2.x).normalized()
+	var right_godot := Vector3(right_ps2.x, 0.0, -right_ps2.y).normalized()
+	var left_width := maxf(float(point.get("left_width", 0.0)), 0.0)
+	var right_width := maxf(float(point.get("right_width", 0.0)), 0.0)
+	if left_width <= 0.001 and right_width <= 0.001:
+		return {}
+	return {
+		"left": center - right_godot * left_width,
+		"right": center + right_godot * right_width,
+	}
+
+
+func _drive_area_boundary_lines_from_allowed_road_areas(areas: Array[Dictionary]) -> PackedVector3Array:
+	var lines := PackedVector3Array()
+	for area in areas:
+		var points: PackedVector3Array = area.get("points_godot_flat", PackedVector3Array())
+		if points.size() < 3:
+			continue
+		for index in range(points.size()):
+			lines.append(points[index])
+			lines.append(points[(index + 1) % points.size()])
+	return lines
+
+
+func _drive_area_boundary_lines_from_track_polygon_surfaces(surfaces: Array[Dictionary]) -> PackedVector3Array:
+	var drive_faces := PackedVector3Array()
 	for surface in surfaces:
-		if String(surface.get("object_name", "")).to_upper().begins_with("CS_"):
-			resolved_cs += 1
+		if String(surface.get("collision_source_kind", "")) != "track_polygon_surface":
+			continue
+		if not _surface_contributes_to_drive_area(surface):
+			continue
+		drive_faces.append_array(surface.get("faces", PackedVector3Array()))
+	return _boundary_lines_for_faces(drive_faces)
 
-	asset.collision_surfaces = surfaces
-	asset.collision_stats = _collision_stats_for_surfaces(surfaces, skipped, cs_candidates, resolved_cs, direct_surface_keys.size())
+
+func _surface_contributes_to_drive_area(surface: Dictionary) -> bool:
+	var category := String(surface.get("category", ""))
+	return category == "Road" or category == "Terrain"
 
 
-func _collision_surface_for_object(obj: Dictionary, category: String, transform_rows: Array, placement_kind: String, placement: Dictionary) -> Dictionary:
+func _collision_surface_for_object(asset, obj: Dictionary, category: String, transform_rows: Array, placement_kind: String, placement: Dictionary) -> Dictionary:
+	if category == "Road" or category == "Terrain":
+		return _track_polygon_surface_for_object(asset, obj, category, transform_rows, placement_kind, placement)
+	return _template_collision_surface_for_object(asset, obj, category, transform_rows, placement_kind, placement)
+
+
+func _track_polygon_surface_for_object(asset, obj: Dictionary, category: String, transform_rows: Array, placement_kind: String, placement: Dictionary) -> Dictionary:
 	var faces := PackedVector3Array()
 	var block_count := 0
 	for block in obj.get("blocks", []):
+		if _collision_block_uses_shadow_texture(asset, obj, block):
+			continue
 		var run: Dictionary = block.get("run", {})
 		var vertices: Array = run.get("vertices", [])
 		if vertices.size() < 3:
@@ -651,21 +1245,88 @@ func _collision_surface_for_object(obj: Dictionary, category: String, transform_
 			var c := int(indices[index + 2])
 			if a < 0 or b < 0 or c < 0 or a >= transformed.size() or b >= transformed.size() or c >= transformed.size():
 				continue
-			var va := transformed[a]
-			var vb := transformed[b]
-			var vc := transformed[c]
-			if (vb - va).cross(vc - va).length_squared() <= 0.000001:
-				continue
-			faces.append(va)
-			faces.append(vb)
-			faces.append(vc)
+			_append_face_if_valid(faces, transformed[a], transformed[b], transformed[c])
 		block_count += 1
 	if faces.is_empty():
 		return {}
 
-	var material_kind := _collision_material_kind(category, obj.get("name", ""))
+	return _collision_surface_dictionary(
+		obj,
+		category,
+		_collision_material_kind(category, obj.get("name", "")),
+		placement_kind,
+		placement,
+		faces,
+		block_count,
+		"track_polygon_surface",
+		{}
+	)
+
+
+func _template_collision_surface_for_object(asset, obj: Dictionary, category: String, transform_rows: Array, placement_kind: String, placement: Dictionary) -> Dictionary:
+	if asset == null:
+		return {}
+	var object_name := String(obj.get("name", ""))
+	var template: Dictionary = _collision_template_for_object_name(asset.collision_templates, object_name)
+	if template.is_empty():
+		return {}
+	var local_points: PackedVector3Array = template.get("local_points", PackedVector3Array())
+	if local_points.size() < 2:
+		return {}
+	var faces := _box_faces_from_local_points(local_points, transform_rows, _collision_template_min_size(category))
+	if faces.is_empty():
+		return {}
+	return _collision_surface_dictionary(
+		obj,
+		category,
+		_collision_material_kind(category, object_name),
+		placement_kind,
+		placement,
+		faces,
+		0,
+		"track_polygon_template",
+		template
+	)
+
+
+func _collision_template_for_object_name(templates: Dictionary, object_name: String) -> Dictionary:
+	var exact: Dictionary = templates.get(object_name.to_upper(), {})
+	if not exact.is_empty():
+		return exact
+	var normalized_object := _normalized_collision_name(object_name)
+	if normalized_object == "":
+		return {}
+	var best := {}
+	var best_length := 0
+	for key in templates.keys():
+		var template: Dictionary = templates[key]
+		var normalized_template := _normalized_collision_name(String(template.get("name", key)))
+		if normalized_template.length() < 5:
+			continue
+		if normalized_object.contains(normalized_template) or normalized_template.contains(normalized_object):
+			if normalized_template.length() > best_length:
+				best = template
+				best_length = normalized_template.length()
+	return best
+
+
+func _normalized_collision_name(value: String) -> String:
+	var name := value.to_upper()
+	for prefix in ["CS_", "XS_", "XW_", "XWU_", "XT_", "XB_", "XF_", "XH_"]:
+		if name.begins_with(prefix):
+			name = name.substr(prefix.length())
+			break
+	var out := ""
+	for index in range(name.length()):
+		var code := name.unicode_at(index)
+		if (code >= 65 and code <= 90) or (code >= 48 and code <= 57):
+			out += char(code)
+	return out
+
+
+func _collision_surface_dictionary(obj: Dictionary, category: String, material_kind: String, placement_kind: String, placement: Dictionary, faces: PackedVector3Array, block_count: int, source_kind: String, template: Dictionary) -> Dictionary:
 	var source_chunk_offset := int(obj.get("chunk_offset", -1))
-	return {
+	var surface := {
 		"category": category,
 		"material_kind": material_kind,
 		"object_name": obj.get("name", ""),
@@ -678,8 +1339,231 @@ func _collision_surface_for_object(obj: Dictionary, category: String, transform_
 		"record_index": placement.get("record_index", -1),
 		"triangle_count": int(faces.size() / 3),
 		"block_count": block_count,
+		"collision_source_kind": source_kind,
 		"faces": faces,
 	}
+	if not template.is_empty():
+		surface["collision_template_offset"] = template.get("source_chunk_offset", -1)
+		surface["collision_template_name"] = template.get("name", "")
+	return surface
+
+
+func _collision_surface_from_faces(category: String, material_kind: String, object_name: String, placement_kind: String, faces: PackedVector3Array, source_kind: String, source: Dictionary, debug_only: bool = false) -> Dictionary:
+	return {
+		"category": category,
+		"material_kind": material_kind,
+		"object_name": object_name,
+		"chunk_offset": int(source.get("source_chunk_offset", -1)),
+		"source_chunk_offset": int(source.get("source_chunk_offset", -1)),
+		"source_record_offset": int(source.get("source_record_offset", -1)),
+		"solid_pack_index": -1,
+		"solid_pack_offset": -1,
+		"placement_kind": placement_kind,
+		"section_number": -1,
+		"record_index": int(source.get("index", -1)),
+		"triangle_count": int(faces.size() / 3),
+		"block_count": 0,
+		"collision_source_kind": source_kind,
+		"debug_only": debug_only,
+		"faces": faces,
+	}
+
+
+func _boundary_lines_for_faces(faces: PackedVector3Array) -> PackedVector3Array:
+	var edges := {}
+	for index in range(0, faces.size() - 2, 3):
+		_count_boundary_edge(edges, faces[index], faces[index + 1])
+		_count_boundary_edge(edges, faces[index + 1], faces[index + 2])
+		_count_boundary_edge(edges, faces[index + 2], faces[index])
+	var lines := PackedVector3Array()
+	for key in edges.keys():
+		var edge: Dictionary = edges[key]
+		if int(edge.get("count", 0)) != 1:
+			continue
+		lines.append(edge["a"])
+		lines.append(edge["b"])
+	return lines
+
+
+func _count_boundary_edge(edges: Dictionary, a: Vector3, b: Vector3) -> void:
+	var a_key := _quantized_boundary_point_key(a)
+	var b_key := _quantized_boundary_point_key(b)
+	var key := "%s|%s" % [a_key, b_key] if a_key < b_key else "%s|%s" % [b_key, a_key]
+	if edges.has(key):
+		edges[key]["count"] = int(edges[key]["count"]) + 1
+	else:
+		edges[key] = {
+			"count": 1,
+			"a": a,
+			"b": b,
+		}
+
+
+func _quantized_boundary_point_key(point: Vector3) -> String:
+	return "%d,%d,%d" % [
+		roundi(point.x * 20.0),
+		roundi(point.y * 20.0),
+		roundi(point.z * 20.0),
+	]
+
+
+func _collision_block_uses_shadow_texture(asset, obj: Dictionary, block: Dictionary) -> bool:
+	if asset == null or asset.texture_bank == null:
+		return false
+	var texture_index := int(block.get("texture_index", -1))
+	if texture_index < 0:
+		return false
+	var texture_hashes: Array = obj.get("texture_hashes", [])
+	if texture_index >= texture_hashes.size():
+		return false
+	var texture_hash := int(texture_hashes[texture_index])
+	if texture_hash == 0:
+		return false
+	var info: Dictionary = asset.texture_bank.get_info(texture_hash)
+	var texture_name := String(info.get("name", "")).to_upper()
+	return texture_name != "" and _is_shadow_texture_name(texture_name)
+
+
+func _is_shadow_texture_name(texture_name: String) -> bool:
+	return texture_name.to_upper().contains("SHAD")
+
+
+func _parse_collision_templates(chunks: Array[Dictionary], bundle: PackedByteArray) -> Dictionary:
+	var templates := {}
+	for parent in _walk_chunks(chunks):
+		if int(parent.get("id", 0)) != 0x80034020:
+			continue
+		var children: Array = parent.get("children", [])
+		var index := 0
+		while index < children.size():
+			var header: Dictionary = children[index]
+			if int(header.get("id", 0)) != 0x00034021:
+				index += 1
+				continue
+			var name := _collision_template_name(_payload(bundle, header))
+			var vertices := PackedVector3Array()
+			var source_offset := int(header.get("offset", -1))
+			if index + 1 < children.size() and int(children[index + 1].get("id", 0)) == 0x00034024:
+				vertices = _collision_template_vertices(_payload(bundle, children[index + 1]))
+			if name != "" and vertices.size() >= 2:
+				templates[name.to_upper()] = {
+					"name": name,
+					"source_chunk_offset": source_offset,
+					"local_points": vertices,
+					"point_count": vertices.size(),
+				}
+			index += 1
+	return templates
+
+
+func _collision_template_name(payload: PackedByteArray) -> String:
+	var candidate := _find_collision_candidate_name(payload)
+	if candidate != "":
+		return candidate
+	for start in range(payload.size()):
+		var end := start
+		while end < payload.size():
+			var byte: int = payload[end]
+			if byte == 0:
+				break
+			if byte < 0x20 or byte > 0x7E:
+				break
+			end += 1
+		if end - start >= 4 and end < payload.size() and payload[end] == 0:
+			var value := Binary.ascii(payload, start, end)
+			if value.to_upper().contains("CS_"):
+				var cs_offset := value.to_upper().find("CS_")
+				return value.substr(cs_offset)
+	return ""
+
+
+func _collision_template_vertices(payload: PackedByteArray) -> PackedVector3Array:
+	var points := PackedVector3Array()
+	if payload.size() < 28:
+		return points
+	for offset in range(8, payload.size() - 19, 20):
+		var point := Vector3(
+			Binary.f32(payload, offset + 4),
+			Binary.f32(payload, offset + 8),
+			Binary.f32(payload, offset + 12)
+		)
+		if _is_reasonable_collision_point(point):
+			points.append(point)
+	return points
+
+
+func _is_reasonable_collision_point(point: Vector3) -> bool:
+	return (
+		is_finite(point.x) and is_finite(point.y) and is_finite(point.z)
+		and absf(point.x) < 10000.0
+		and absf(point.y) < 10000.0
+		and absf(point.z) < 10000.0
+	)
+
+
+func _collision_template_min_size(category: String) -> Vector3:
+	if category == "WallBarrier":
+		return Vector3(0.35, 0.35, 1.2)
+	return Vector3(0.15, 0.15, 0.15)
+
+
+func _box_faces_from_local_points(local_points: PackedVector3Array, transform_rows: Array, min_size: Vector3) -> PackedVector3Array:
+	if local_points.is_empty():
+		return PackedVector3Array()
+	var min_point := local_points[0]
+	var max_point := local_points[0]
+	for point in local_points:
+		min_point.x = minf(min_point.x, point.x)
+		min_point.y = minf(min_point.y, point.y)
+		min_point.z = minf(min_point.z, point.z)
+		max_point.x = maxf(max_point.x, point.x)
+		max_point.y = maxf(max_point.y, point.y)
+		max_point.z = maxf(max_point.z, point.z)
+	var center := (min_point + max_point) * 0.5
+	var size := max_point - min_point
+	size.x = maxf(size.x, min_size.x)
+	size.y = maxf(size.y, min_size.y)
+	size.z = maxf(size.z, min_size.z)
+	min_point = center - size * 0.5
+	max_point = center + size * 0.5
+	return _box_faces_from_local_bounds(min_point, max_point, transform_rows)
+
+
+func _box_faces_from_local_bounds(min_point: Vector3, max_point: Vector3, transform_rows: Array) -> PackedVector3Array:
+	var corners := [
+		Vector3(min_point.x, min_point.y, min_point.z),
+		Vector3(max_point.x, min_point.y, min_point.z),
+		Vector3(max_point.x, max_point.y, min_point.z),
+		Vector3(min_point.x, max_point.y, min_point.z),
+		Vector3(min_point.x, min_point.y, max_point.z),
+		Vector3(max_point.x, min_point.y, max_point.z),
+		Vector3(max_point.x, max_point.y, max_point.z),
+		Vector3(min_point.x, max_point.y, max_point.z),
+	]
+	var world: Array[Vector3] = []
+	for corner in corners:
+		world.append(TrackMathUtils.ps2_to_godot_vec3(TrackMathUtils.transform_point_rows(corner, transform_rows)))
+	var quads := [
+		[0, 1, 2, 3],
+		[4, 7, 6, 5],
+		[0, 4, 5, 1],
+		[1, 5, 6, 2],
+		[2, 6, 7, 3],
+		[3, 7, 4, 0],
+	]
+	var faces := PackedVector3Array()
+	for quad in quads:
+		_append_face_if_valid(faces, world[quad[0]], world[quad[1]], world[quad[2]])
+		_append_face_if_valid(faces, world[quad[0]], world[quad[2]], world[quad[3]])
+	return faces
+
+
+func _append_face_if_valid(faces: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3) -> void:
+	if (b - a).cross(c - a).length_squared() <= 0.000001:
+		return
+	faces.append(a)
+	faces.append(b)
+	faces.append(c)
 
 
 func _collision_category_for_object(obj: Dictionary, allow_scenery_collision: bool = false) -> String:
@@ -688,7 +1572,13 @@ func _collision_category_for_object(obj: Dictionary, allow_scenery_collision: bo
 		return ""
 	if name.begins_with("RD_") or name.begins_with("DIRTRD_") or name.begins_with("LI_RD_") or name.contains("ROAD"):
 		return "Road"
+	if name.contains("BOARDWALK") or name.contains("OUTRING"):
+		return "Road"
 	if name.begins_with("TRN_") or name.contains("TERRAIN") or name.contains("CLIFF") or name.contains("ROCK") or name.contains("GULLEY"):
+		return "Terrain"
+	if name.begins_with("LK_") and (name.contains("GRND") or name.contains("GROUND")):
+		return "Terrain"
+	if name.begins_with("ST_") and (name.contains("SHORE") or name.contains("GROUND") or name.contains("GRND")):
 		return "Terrain"
 	if name.contains("WALL") or name.contains("BARRIER") or name.contains("GUARD") or name.contains("RAIL") or name.contains("FENCE") or name.contains("SEA_WALL") or name.contains("SEAWALL") or name.contains("RAMP"):
 		return "WallBarrier"
@@ -869,9 +1759,12 @@ func _find_collision_candidate_name(payload: PackedByteArray) -> String:
 
 func _collision_stats_for_surfaces(surfaces: Array[Dictionary], skipped: Dictionary, cs_candidates: Array[Dictionary], resolved_cs: int, direct_object_count: int) -> Dictionary:
 	var by_category := {}
+	var by_source := {}
 	var total_triangles := 0
 	for surface in surfaces:
 		var category := String(surface.get("category", "Unknown"))
+		var source_kind := String(surface.get("collision_source_kind", "track_collision"))
+		by_source[source_kind] = int(by_source.get(source_kind, 0)) + 1
 		if not by_category.has(category):
 			by_category[category] = {
 				"surfaces": 0,
@@ -902,6 +1795,7 @@ func _collision_stats_for_surfaces(surfaces: Array[Dictionary], skipped: Diction
 		"triangle_count": total_triangles,
 		"direct_object_count": direct_object_count,
 		"by_category": compact_by_category,
+		"by_source": by_source,
 		"skipped": skipped.duplicate(true),
 		"cs_chunk_candidate_count": cs_candidates.size(),
 		"cs_named_candidate_count": named_cs_candidates,
@@ -912,6 +1806,215 @@ func _collision_stats_for_surfaces(surfaces: Array[Dictionary], skipped: Diction
 
 func _count_collision_skip(skipped: Dictionary, reason: String) -> void:
 	skipped[reason] = int(skipped.get(reason, 0)) + 1
+
+
+func _parse_allowed_road_areas(chunks: Array[Dictionary], bundle: PackedByteArray) -> Array[Dictionary]:
+	var areas: Array[Dictionary] = []
+	for chunk in _walk_chunks(chunks):
+		if int(chunk.get("id", 0)) != CHUNK_ALLOWED_ROAD_AREAS:
+			continue
+		var payload := _payload(bundle, chunk)
+		if payload.size() < 4:
+			continue
+		var declared_count := Binary.u32(payload, 0)
+		var offset := 4
+		for area_index in range(declared_count):
+			if offset + ALLOWED_ROAD_AREA_RECORD_SIZE > payload.size():
+				break
+			var vertex_count := Binary.u32(payload, offset)
+			var record_offset := offset
+			if vertex_count < 3 or vertex_count > ALLOWED_ROAD_AREA_MAX_POINTS:
+				offset += ALLOWED_ROAD_AREA_RECORD_SIZE
+				break
+			var points_2d: Array[Vector2] = []
+			var points_3d := PackedVector3Array()
+			var points_offset := record_offset + 4
+			for vertex_index in range(vertex_count):
+				var point := Vector2(
+					Binary.f32(payload, points_offset),
+					Binary.f32(payload, points_offset + 4)
+				)
+				points_offset += 8
+				if _is_reasonable_allowed_road_point(point):
+					points_2d.append(point)
+					points_3d.append(Vector3(point.x, 0.0, -point.y))
+			var metadata_offset := record_offset + 4 + ALLOWED_ROAD_AREA_MAX_POINTS * 8
+			var metadata := PackedByteArray()
+			if metadata_offset + ALLOWED_ROAD_AREA_METADATA_SIZE <= payload.size():
+				metadata = payload.slice(metadata_offset, metadata_offset + ALLOWED_ROAD_AREA_METADATA_SIZE)
+			if points_3d.size() >= 3:
+				areas.append({
+					"index": area_index,
+					"declared_vertex_count": vertex_count,
+					"point_count": points_3d.size(),
+					"points_ps2_2d": points_2d,
+					"points_godot_flat": points_3d,
+					"metadata": metadata,
+					"source_chunk_offset": int(chunk.get("offset", -1)),
+					"source_record_offset": record_offset,
+					"source_metadata_offset": metadata_offset,
+				})
+			offset += ALLOWED_ROAD_AREA_RECORD_SIZE
+		break
+	return areas
+
+
+func _is_reasonable_allowed_road_point(point: Vector2) -> bool:
+	return (
+		is_finite(point.x) and is_finite(point.y)
+		and absf(point.x) < 100000.0
+		and absf(point.y) < 100000.0
+	)
+
+
+func _parse_track_collision_polygons(chunks: Array[Dictionary], bundle: PackedByteArray) -> Array[Dictionary]:
+	var polygons: Array[Dictionary] = []
+	for chunk in _walk_chunks(chunks):
+		if int(chunk.get("id", 0)) != CHUNK_TRACK_POLYGON_COLLISION:
+			continue
+		var payload := _payload(bundle, chunk)
+		var polygon_count := int(payload.size() / TRACK_COLLISION_POLYGON_RECORD_SIZE)
+		for polygon_index in range(polygon_count):
+			var offset := polygon_index * TRACK_COLLISION_POLYGON_RECORD_SIZE
+			var polygon := _parse_track_collision_polygon_record(payload, offset, polygon_index, int(chunk.get("offset", -1)))
+			if not polygon.is_empty():
+				polygons.append(polygon)
+		break
+	return polygons
+
+
+func _parse_track_collision_polygon_record(payload: PackedByteArray, offset: int, polygon_index: int, chunk_offset: int) -> Dictionary:
+	if offset + TRACK_COLLISION_POLYGON_RECORD_SIZE > payload.size():
+		return {}
+	var material_id := Binary.u8(payload, offset + 0x02)
+	var flags := Binary.u8(payload, offset + 0x03)
+	var vertex_count := 4 if (flags & 0x10) != 0 else 3
+	var z_base := Binary.s16(payload, offset + 0x04)
+	var points_ps2: Array[Vector3] = []
+	var points_godot := PackedVector3Array()
+	for vertex_index in range(vertex_count):
+		var x := float(Binary.s16(payload, offset + 0x08 + vertex_index * 2)) / 8.0
+		var y := float(Binary.s16(payload, offset + 0x10 + vertex_index * 2)) / 8.0
+		var z := float(z_base) + float(Binary.s16(payload, offset + 0x18 + vertex_index * 2)) / 256.0
+		if (flags & 0x04) != 0:
+			z *= 4.0
+		var point_ps2 := Vector3(x, y, z)
+		points_ps2.append(point_ps2)
+		points_godot.append(TrackMathUtils.ps2_to_godot_vec3(point_ps2))
+	if points_godot.size() < 3:
+		return {}
+	var faces := PackedVector3Array()
+	faces.append(points_godot[0])
+	faces.append(points_godot[1])
+	faces.append(points_godot[2])
+	if points_godot.size() == 4:
+		faces.append(points_godot[0])
+		faces.append(points_godot[2])
+		faces.append(points_godot[3])
+	return {
+		"index": polygon_index,
+		"material_id": material_id,
+		"flags": flags,
+		"vertex_count": vertex_count,
+		"points_ps2": points_ps2,
+		"points_godot": points_godot,
+		"faces": faces,
+		"source_chunk_offset": chunk_offset,
+		"source_record_offset": offset,
+	}
+
+
+func _parse_track_route_segments(chunks: Array[Dictionary], bundle: PackedByteArray) -> Array[Dictionary]:
+	var segments: Array[Dictionary] = []
+	for chunk in _walk_chunks(chunks):
+		if int(chunk.get("id", 0)) != CHUNK_TRACK_ROUTE:
+			continue
+		var payload := _payload(bundle, chunk)
+		var offset := 0
+		var segment_index := 0
+		while offset + 0x428 <= payload.size():
+			var point_count := Binary.u32(payload, offset + 0x10)
+			if point_count <= 0 or point_count > 0x400:
+				break
+			var record_size := 0x428 + int(point_count) * 0x70
+			if offset + record_size > payload.size():
+				break
+			var route_index := Binary.s16(payload, offset + 0x0A)
+			var route_type := Binary.u32(payload, offset + 0x0C)
+			var flags := Binary.u32(payload, offset + 0x18)
+			var points: Array[Dictionary] = []
+			for point_index in range(point_count):
+				var point_offset := offset + 0x428 + point_index * 0x70
+				var position_ps2 := Vector3(
+					Binary.f32(payload, point_offset),
+					Binary.f32(payload, point_offset + 0x04),
+					Binary.f32(payload, point_offset + 0x08)
+				)
+				var forward_ps2 := Vector2(
+					Binary.f32(payload, point_offset + 0x0C),
+					Binary.f32(payload, point_offset + 0x10)
+				)
+				points.append({
+					"index": point_index,
+					"position_ps2": position_ps2,
+					"position_godot": TrackMathUtils.ps2_to_godot_vec3(position_ps2),
+					"forward_ps2_2d": forward_ps2,
+					"segment_length": Binary.f32(payload, point_offset + 0x14),
+					"left_width": Binary.f32(payload, point_offset + 0x18),
+					"right_width": Binary.f32(payload, point_offset + 0x1C),
+					"route_edge_index": Binary.u8(payload, point_offset + 0x2C),
+					"route_edge_flags": Binary.u32(payload, point_offset + 0x2C),
+					"boundary_offsets_raw": [
+						Binary.s16(payload, point_offset + 0x30),
+						Binary.s16(payload, point_offset + 0x32),
+						Binary.s16(payload, point_offset + 0x34),
+						Binary.s16(payload, point_offset + 0x36),
+					],
+					"boundary_offsets": [
+						float(Binary.s16(payload, point_offset + 0x30)) / 256.0,
+						float(Binary.s16(payload, point_offset + 0x32)) / 256.0,
+						float(Binary.s16(payload, point_offset + 0x34)) / 256.0,
+						float(Binary.s16(payload, point_offset + 0x36)) / 256.0,
+					],
+					"source_record_offset": point_offset,
+				})
+			segments.append({
+				"index": segment_index,
+				"route_index": route_index,
+				"route_type": route_type,
+				"flags": flags,
+				"point_count": point_count,
+				"points": points,
+				"source_chunk_offset": int(chunk.get("offset", -1)),
+				"source_record_offset": offset,
+			})
+			offset += record_size
+			segment_index += 1
+		break
+	return segments
+
+
+func _parse_track_route_edges(chunks: Array[Dictionary], bundle: PackedByteArray) -> Array[Dictionary]:
+	var edges: Array[Dictionary] = []
+	for chunk in _walk_chunks(chunks):
+		if int(chunk.get("id", 0)) != CHUNK_TRACK_ROUTE_EDGES:
+			continue
+		var payload := _payload(bundle, chunk)
+		var edge_count := int(payload.size() / TRACK_ROUTE_EDGE_RECORD_SIZE)
+		for edge_index in range(edge_count):
+			var offset := edge_index * TRACK_ROUTE_EDGE_RECORD_SIZE
+			edges.append({
+				"index": edge_index,
+				"target_route_index": Binary.u8(payload, offset),
+				"mode": Binary.u8(payload, offset + 0x01),
+				"target_point_index": Binary.u16(payload, offset + 0x02),
+				"metadata0": Binary.u32(payload, offset + 0x04),
+				"metadata1": Binary.u32(payload, offset + 0x08),
+				"source_chunk_offset": int(chunk.get("offset", -1)),
+				"source_record_offset": offset,
+			})
+		break
+	return edges
 
 
 func _parse_route_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray) -> void:

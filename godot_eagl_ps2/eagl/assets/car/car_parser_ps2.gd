@@ -65,7 +65,7 @@ const ORIGINAL_WHEEL_SLOT_SPECS := [
 ]
 
 
-func parse(files: Dictionary):
+func parse(files: Dictionary, _preloaded_texture_bank = null):
 	var asset = CarAssetScript.new()
 	asset.car_id = files.get("car_id", "")
 	asset.source_path = files.get("model", "")

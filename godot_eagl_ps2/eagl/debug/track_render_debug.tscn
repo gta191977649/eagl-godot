@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://54ksxtqpoc74" path="res://eagl/debug/track_render_debug.gd" id="1_debug"]
 [ext_resource type="Script" uid="uid://8j6k08bqinvm" path="res://eagl/debug/free_camera.gd" id="2_free_camera"]
+[ext_resource type="PackedScene" uid="uid://dna6xdqvs4aqb" path="res://gameplay/debug/debug_ui.tscn" id="3_runtime_debug"]
 
 [node name="TrackRenderDebug" type="Node3D" unique_id=1668483575]
 script = ExtResource("1_debug")
@@ -196,3 +197,6 @@ text = "FPS: -
 LODs: -
 VSync: on"
 horizontal_alignment = 2
+
+[node name="RuntimeDebugUi" parent="." instance=ExtResource("3_runtime_debug")]
+layer = 2

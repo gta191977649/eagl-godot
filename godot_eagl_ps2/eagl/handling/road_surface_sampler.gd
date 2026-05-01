@@ -36,6 +36,8 @@ func build_from_track_asset(asset) -> void:
 	clear()
 	if asset == null:
 		return
+	if _build_from_track_collision_polygons(asset):
+		return
 
 	for obj in asset.objects:
 		if bool(obj.get("is_scenery_template", false)):
@@ -73,6 +75,27 @@ func build_from_track_asset(asset) -> void:
 				if a_index >= transformed.size() or b_index >= transformed.size() or c_index >= transformed.size():
 					continue
 				_add_triangle(transformed[a_index], transformed[b_index], transformed[c_index], material_id)
+
+
+func _build_from_track_collision_polygons(asset) -> bool:
+	var polygons_value = asset.get("track_collision_polygons")
+	if typeof(polygons_value) != TYPE_ARRAY:
+		return false
+	var polygons: Array = polygons_value
+	if polygons.is_empty():
+		return false
+	for polygon in polygons:
+		var flags := int(polygon.get("flags", 0))
+		if (flags & 0x0a) != 0:
+			continue
+		var points: Array = polygon.get("points_ps2", [])
+		if points.size() < 3:
+			continue
+		var material_id := int(polygon.get("material_id", -1))
+		_add_triangle(points[0], points[1], points[2], material_id)
+		if points.size() >= 4:
+			_add_triangle(points[0], points[2], points[3], material_id)
+	return not _triangles.is_empty()
 
 
 func sample_surface(sample_point_ps2: Vector3) -> Dictionary:

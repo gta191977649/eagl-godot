@@ -6,6 +6,7 @@ const CATEGORY_ORDER := [
 	"Terrain",
 	"WallBarrier",
 	"SceneryCollision",
+	"DriveArea",
 ]
 
 const CATEGORY_COLORS := {
@@ -13,6 +14,7 @@ const CATEGORY_COLORS := {
 	"Terrain": Color(0.0, 0.85, 1.0, 0.22),
 	"WallBarrier": Color(1.0, 0.12, 0.02, 0.34),
 	"SceneryCollision": Color(1.0, 0.82, 0.02, 0.32),
+	"DriveArea": Color(0.05, 0.35, 1.0, 0.28),
 }
 
 const DEFAULT_DEBUG_SURFACE_OFFSET := 0.08
@@ -49,7 +51,9 @@ func set_debug_overlay_visible(track_root: Node, visible: bool) -> void:
 
 
 func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary], layer: int, mask: int, overlay_visible: bool, overlay_surface_offset: float, source_stats: Dictionary) -> Dictionary:
-	var grouped := _group_faces_by_category(surfaces)
+	var physics_grouped := _group_faces_by_category(surfaces, false)
+	var overlay_grouped := _group_faces_by_category(surfaces, true)
+	var overlay_line_grouped := _group_debug_lines_by_category(surfaces)
 	var body_count := 0
 	var shape_count := 0
 	var overlay_count := 0
@@ -57,37 +61,50 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 	var by_category := {}
 
 	for category in CATEGORY_ORDER:
-		var faces: PackedVector3Array = grouped.get(category, PackedVector3Array())
-		if faces.is_empty():
+		var faces: PackedVector3Array = physics_grouped.get(category, PackedVector3Array())
+		var overlay_faces: PackedVector3Array = overlay_grouped.get(category, PackedVector3Array())
+		var overlay_lines: PackedVector3Array = overlay_line_grouped.get(category, PackedVector3Array())
+		if faces.is_empty() and overlay_faces.is_empty() and overlay_lines.is_empty():
 			continue
-		var body := StaticBody3D.new()
+		var body: Node3D
+		if faces.is_empty():
+			body = Node3D.new()
+		else:
+			var static_body := StaticBody3D.new()
+			static_body.collision_layer = layer
+			static_body.collision_mask = mask
+			body = static_body
+			body_count += 1
 		body.name = category
-		body.collision_layer = layer
-		body.collision_mask = mask
 		body.set_meta("eagl_collision_category", category)
 		body.set_meta("eagl_collision_triangle_count", int(faces.size() / 3))
 		collision_root.add_child(body)
 
-		var shape := ConcavePolygonShape3D.new()
-		shape.backface_collision = true
-		shape.set_faces(faces)
-		var shape_node := CollisionShape3D.new()
-		shape_node.name = "%sShape" % category
-		shape_node.shape = shape
-		body.add_child(shape_node)
+		if not faces.is_empty():
+			var shape := ConcavePolygonShape3D.new()
+			shape.backface_collision = true
+			shape.set_faces(faces)
+			var shape_node := CollisionShape3D.new()
+			shape_node.name = "%sShape" % category
+			shape_node.shape = shape
+			body.add_child(shape_node)
+			shape_count += 1
+			triangle_count += int(faces.size() / 3)
+			by_category[category] = {
+				"triangles": int(faces.size() / 3),
+				"shapes": 1,
+				"body": body.name,
+			}
 
-		var overlay := _make_overlay_mesh(category, faces, overlay_visible, overlay_surface_offset)
-		body.add_child(overlay)
+		if not overlay_faces.is_empty():
+			var overlay := _make_overlay_mesh(category, overlay_faces, overlay_visible, overlay_surface_offset)
+			body.add_child(overlay)
+			overlay_count += 1
+		if not overlay_lines.is_empty():
+			var line_overlay := _make_overlay_line_mesh(category, overlay_lines, overlay_visible)
+			body.add_child(line_overlay)
+			overlay_count += 1
 
-		body_count += 1
-		shape_count += 1
-		overlay_count += 1
-		triangle_count += int(faces.size() / 3)
-		by_category[category] = {
-			"triangles": int(faces.size() / 3),
-			"shapes": 1,
-			"body": body.name,
-		}
 
 	var stats := source_stats.duplicate(true)
 	stats["enabled"] = true
@@ -103,12 +120,14 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 	return stats
 
 
-func _group_faces_by_category(surfaces: Array[Dictionary]) -> Dictionary:
+func _group_faces_by_category(surfaces: Array[Dictionary], include_debug_only: bool) -> Dictionary:
 	var grouped := {}
 	for category in CATEGORY_ORDER:
 		grouped[category] = PackedVector3Array()
 
 	for surface in surfaces:
+		if bool(surface.get("debug_only", false)) and not include_debug_only:
+			continue
 		var category := String(surface.get("category", ""))
 		if not grouped.has(category):
 			continue
@@ -119,17 +138,35 @@ func _group_faces_by_category(surfaces: Array[Dictionary]) -> Dictionary:
 	return grouped
 
 
+func _group_debug_lines_by_category(surfaces: Array[Dictionary]) -> Dictionary:
+	var grouped := {}
+	for category in CATEGORY_ORDER:
+		grouped[category] = PackedVector3Array()
+
+	for surface in surfaces:
+		var category := String(surface.get("category", ""))
+		if not grouped.has(category):
+			continue
+		var target: PackedVector3Array = grouped[category]
+		var lines: PackedVector3Array = surface.get("debug_lines", PackedVector3Array())
+		target.append_array(lines)
+		grouped[category] = target
+	return grouped
+
+
 func _make_overlay_mesh(category: String, faces: PackedVector3Array, visible: bool, surface_offset: float) -> MeshInstance3D:
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = _offset_overlay_faces(faces, surface_offset)
+	arrays[Mesh.ARRAY_VERTEX] = _wireframe_overlay_lines(faces, surface_offset)
 
 	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
 
 	var material := StandardMaterial3D.new()
 	material.resource_name = "%sCollisionOverlay" % category
-	material.albedo_color = CATEGORY_COLORS.get(category, Color(1.0, 1.0, 1.0, 0.25))
+	var color: Color = CATEGORY_COLORS.get(category, Color(1.0, 1.0, 1.0, 0.85))
+	color.a = maxf(color.a, 0.85)
+	material.albedo_color = color
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
@@ -149,6 +186,55 @@ func _make_overlay_mesh(category: String, faces: PackedVector3Array, visible: bo
 	overlay.set_meta("eagl_collision_triangle_count", int(faces.size() / 3))
 	overlay.set_meta("eagl_collision_debug_surface_offset", surface_offset)
 	return overlay
+
+
+func _make_overlay_line_mesh(category: String, lines: PackedVector3Array, visible: bool) -> MeshInstance3D:
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = lines
+
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+
+	var material := StandardMaterial3D.new()
+	material.resource_name = "%sCollisionOverlay" % category
+	var color: Color = CATEGORY_COLORS.get(category, Color(1.0, 1.0, 1.0, 0.85))
+	color.a = maxf(color.a, 0.85)
+	material.albedo_color = color
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	material.no_depth_test = true
+	material.render_priority = 11
+	mesh.surface_set_material(0, material)
+
+	var overlay := MeshInstance3D.new()
+	overlay.name = "%sOverlay" % category
+	overlay.mesh = mesh
+	overlay.visible = visible
+	overlay.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	overlay.extra_cull_margin = 1.0
+	overlay.set_meta("eagl_collision_debug_overlay", true)
+	overlay.set_meta("eagl_collision_category", category)
+	overlay.set_meta("eagl_collision_line_count", int(lines.size() / 2))
+	return overlay
+
+
+func _wireframe_overlay_lines(faces: PackedVector3Array, surface_offset: float) -> PackedVector3Array:
+	var offset_faces := _offset_overlay_faces(faces, surface_offset)
+	var lines := PackedVector3Array()
+	for index in range(0, offset_faces.size() - 2, 3):
+		var a := offset_faces[index]
+		var b := offset_faces[index + 1]
+		var c := offset_faces[index + 2]
+		lines.append(a)
+		lines.append(b)
+		lines.append(b)
+		lines.append(c)
+		lines.append(c)
+		lines.append(a)
+	return lines
 
 
 func _offset_overlay_faces(faces: PackedVector3Array, surface_offset: float) -> PackedVector3Array:

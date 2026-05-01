@@ -18,6 +18,7 @@ const PS2TextureBankScript := preload("res://eagl/assets/texture/ps2_texture_ban
 @export var collision_debug_surface_offset := 0.08
 @export var collision_layer := 1
 @export var collision_mask := 1
+@export var drive_area_debug_visible := false
 @export var build_route := true
 @export var route_debug_visible := false
 @export var route_debug_height_offset := 1.0
@@ -45,6 +46,7 @@ var _fps_update_elapsed := 0.0
 @onready var _route_toggle: CheckButton = $DebugUI/DebugUILayout/SafeMargin/VerticalBands/TopControls/RenderDebugPanel/RenderDebugFlow/RouteToggle
 @onready var _camera_position_label: Label = $DebugUI/DebugUILayout/CameraPositionPanel/CameraPositionLabel
 @onready var _fps_label: Label = $DebugUI/DebugUILayout/FpsPanel/FpsLabel
+@onready var _runtime_debug_ui := get_node_or_null("RuntimeDebugUi")
 
 
 func _ready() -> void:
@@ -64,6 +66,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_update_camera_position_label()
 	_update_fps_label(delta)
+	_update_runtime_debug_ui()
 
 
 func _load_debug_track() -> void:
@@ -117,8 +120,12 @@ func _load_debug_track() -> void:
 		push_error(loader.resolver.last_error)
 		return
 
-	await _set_loading_status("Parsing BUN mesh and scenery chunks", 0.35, true)
-	var asset = loader.parser.parse(files)
+	await _set_loading_status("Decoding PS2 textures and generating mipmaps", 0.35, true)
+	var texture_bank := PS2TextureBankScript.new()
+	texture_bank.load_for_track(files)
+
+	await _set_loading_status("Parsing BUN mesh and scenery chunks", 0.60, true)
+	var asset = loader.parser.parse(files, texture_bank)
 	if asset == null:
 		_is_loading = false
 		_set_track_controls_enabled(true)
@@ -126,9 +133,6 @@ func _load_debug_track() -> void:
 		push_error("Track parser returned no asset")
 		return
 
-	await _set_loading_status("Decoding PS2 textures and generating mipmaps", 0.60, true)
-	asset.texture_bank = PS2TextureBankScript.new()
-	asset.texture_bank.load_for_track(files)
 	for message in asset.texture_bank.errors:
 		asset.add_warning(message)
 
@@ -164,6 +168,7 @@ func _load_debug_track() -> void:
 	_replace_track_node(next_track_node)
 	_ensure_debug_lighting()
 	_apply_collision_debug_visible()
+	_apply_drive_area_debug_visible()
 	_apply_route_debug_visible()
 	_frame_camera(track_node)
 	await _set_loading_status("Loaded TRACK%s" % files.get("track_id", track_id), 1.0, true)
@@ -203,6 +208,25 @@ func _load_debug_track() -> void:
 
 func reload_track() -> void:
 	_load_debug_track()
+
+
+func set_collision_debug_visible(visible: bool) -> void:
+	collision_debug_visible = visible
+	if _collision_toggle != null:
+		_collision_toggle.set_pressed_no_signal(visible)
+	_apply_collision_debug_visible()
+
+
+func set_route_debug_visible(visible: bool) -> void:
+	route_debug_visible = visible
+	if _route_toggle != null:
+		_route_toggle.set_pressed_no_signal(visible)
+	_apply_route_debug_visible()
+
+
+func set_drive_area_debug_visible(visible: bool) -> void:
+	drive_area_debug_visible = visible
+	_apply_drive_area_debug_visible()
 
 
 func _populate_track_selector() -> void:
@@ -325,21 +349,27 @@ func _on_track_selected(index: int) -> void:
 
 
 func _on_collision_debug_toggled(enabled: bool) -> void:
-	collision_debug_visible = enabled
-	_apply_collision_debug_visible()
+	set_collision_debug_visible(enabled)
 
 
 func _on_route_debug_toggled(enabled: bool) -> void:
-	route_debug_visible = enabled
-	_apply_route_debug_visible()
+	set_route_debug_visible(enabled)
 
 
 func _apply_collision_debug_visible() -> void:
 	if track_node == null:
 		return
 	for node in track_node.find_children("*", "MeshInstance3D", true, false):
-		if bool(node.get_meta("eagl_collision_debug_overlay", false)):
+		if bool(node.get_meta("eagl_collision_debug_overlay", false)) and not _is_drive_area_overlay(node):
 			node.visible = collision_debug_visible
+
+
+func _apply_drive_area_debug_visible() -> void:
+	if track_node == null:
+		return
+	for node in track_node.find_children("*", "MeshInstance3D", true, false):
+		if _is_drive_area_overlay(node):
+			node.visible = drive_area_debug_visible
 
 
 func _apply_route_debug_visible() -> void:
@@ -348,6 +378,20 @@ func _apply_route_debug_visible() -> void:
 	for node in track_node.find_children("*", "GeometryInstance3D", true, false):
 		if bool(node.get_meta("eagl_route_debug_overlay", false)):
 			node.visible = route_debug_visible
+
+
+func _is_drive_area_overlay(node: Node) -> bool:
+	return (
+		bool(node.get_meta("eagl_collision_debug_overlay", false))
+		and String(node.get_meta("eagl_collision_category", "")) == "DriveArea"
+	)
+
+
+func _update_runtime_debug_ui() -> void:
+	if _runtime_debug_ui == null or not _runtime_debug_ui.has_method("set_debug_info"):
+		return
+	var loaded_track: String = track_node.name if track_node != null else _track_display_name(track_id)
+	_runtime_debug_ui.call("set_debug_info", loaded_track, "Free camera")
 
 
 func _set_track_controls_enabled(enabled: bool) -> void:

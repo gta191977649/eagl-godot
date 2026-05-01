@@ -10,9 +10,14 @@ var scenery_template_offsets: Dictionary = {}
 var unknown_chunks: Array[Dictionary] = []
 var environment_config: Dictionary = {}
 var collision_surfaces: Array[Dictionary] = []
+var collision_templates: Dictionary = {}
+var allowed_road_areas: Array[Dictionary] = []
+var track_collision_polygons: Array[Dictionary] = []
 var collision_stats: Dictionary = {}
 var route_points: Array[Dictionary] = []
 var route_stats: Dictionary = {}
+var track_route_segments: Array[Dictionary] = []
+var track_route_edges: Array[Dictionary] = []
 var texture_bank = null
 var bounds := AABB()
 var has_bounds := false
@@ -52,9 +57,14 @@ func summary() -> Dictionary:
 		"vertex_count": vertex_count(),
 		"collision_surface_count": collision_surfaces.size(),
 		"collision_triangle_count": collision_triangle_count(),
+		"collision_template_count": collision_templates.size(),
+		"allowed_road_area_count": allowed_road_areas.size(),
+		"track_collision_polygon_count": track_collision_polygons.size(),
 		"collision_stats": collision_stats.duplicate(true),
 		"route_point_count": route_points.size(),
 		"route_stats": route_stats.duplicate(true),
+		"track_route_segment_count": track_route_segments.size(),
+		"track_route_edge_count": track_route_edges.size(),
 		"solid_pack_count": solid_packs.size(),
 		"scenery_section_count": scenery_sections.size(),
 		"scenery_instance_count": scenery_instances.size(),

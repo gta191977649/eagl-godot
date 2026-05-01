@@ -97,6 +97,8 @@ func _project_route_points(source_points: Array[Dictionary], collision_surfaces:
 	var road_faces := PackedVector3Array()
 	var terrain_faces := PackedVector3Array()
 	for surface in collision_surfaces:
+		if bool(surface.get("debug_only", false)):
+			continue
 		var category := String(surface.get("category", ""))
 		if category == "Road":
 			road_faces.append_array(surface.get("faces", PackedVector3Array()))
