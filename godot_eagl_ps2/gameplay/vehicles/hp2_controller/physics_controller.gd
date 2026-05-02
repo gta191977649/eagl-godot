@@ -9,6 +9,7 @@ const HP2SteeringSystemScript = preload("res://gameplay/vehicles/hp2_controller/
 const HP2AssistScript = preload("res://gameplay/vehicles/hp2_controller/hp2_assist.gd")
 const HP2PlayerInputScript = preload("res://gameplay/vehicles/hp2_controller/player_input.gd")
 const VehicleBodyConfigAdapter = preload("res://eagl/handling/vehicle_body_config_adapter.gd")
+const MathUtils = preload("res://eagl/utils/math_utils.gd")
 
 const SLOT_IDS := ["FL", "FR", "RL", "RR"]
 const SURFACE_TABLE := {
@@ -19,11 +20,24 @@ const SURFACE_TABLE := {
 	"ice": 0.2,
 }
 const GRAVITY := 9.81
+const SUBSTEP_TARGET_DT := 0.0044
+const SUSPENSION_DENOM_EPSILON := 0.05
+const DEBUG_WHEEL_PHYSICS_SEGMENTS := 20
 const MIN_SIDESLIP_SPEED_MS := 5.0 / 3.6
 const AUTO_SHIFT_SLIP_LIMIT := 4.0
 const AUTO_SHIFT_REDLIMIT_MARGIN_RPM := 100.0
+const SUSPENSION_PARAM_FORCE_SCALE := 1000.0
+const GROUNDED_HEAVE_DAMPING := 2.5
+const GROUNDED_UPRIGHT_STIFFNESS := 1800.0
+const GROUNDED_PITCH_DAMPING := 420.0
+const GROUNDED_ROLL_DAMPING := 420.0
+const GROUNDED_MAX_ANGULAR_SPEED := 8.0
+const REST_SETTLE_LINEAR_SPEED := 0.05
+const REST_SETTLE_ANGULAR_SPEED := 0.04
+const REST_SETTLE_LINEAR_DAMP := 2.5
+const REST_SETTLE_ANGULAR_DAMP := 2.0
 
-@export_group("Planar Body")
+@export_group("Physical Body")
 @export var vehicle_mass_kg := 1450.0
 @export var inertia_yaw := 2200.0
 @export var wheelbase := 2.60
@@ -55,6 +69,7 @@ const AUTO_SHIFT_REDLIMIT_MARGIN_RPM := 100.0
 @export var substeps := 4
 @export var auto_simulate := true
 @export var visual_spin_scale := 1.0
+@export var visual_suspension_travel_scale := 1.5
 
 @export var config = null
 @export var draw_debug := false
@@ -98,33 +113,55 @@ var _wheel_suspension_nodes: Dictionary = {}
 var _wheel_steer_nodes: Dictionary = {}
 var _wheel_spin_nodes: Dictionary = {}
 var _wheel_spin_angles: Dictionary = {}
+var _debug_mesh := ImmediateMesh.new()
+var _debug_mesh_instance: MeshInstance3D
+var _debug_material: StandardMaterial3D
 
 
 func _ready() -> void:
 	_visual_root = get_node_or_null("VisualRoot") as Node3D
 	if _visual_root != null:
 		_visual_root.transform = Transform3D(VehicleBodyConfigAdapter.visual_anchor_basis(), Vector3.ZERO)
-	freeze = true
+	freeze = false
+	custom_integrator = true
+	gravity_scale = 0.0
+	continuous_cd = true
+	contact_monitor = true
+	max_contacts_reported = 8
+	can_sleep = false
+	_configure_chassis_collision_shape()
 	if config != null:
 		apply_config(config)
 	mass = vehicle_mass_kg
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
 	center_of_mass = Vector3.ZERO
 	drivetrain.engine = engine
-	_rebuild_wheels()
+	if wheels.is_empty():
+		_rebuild_wheels()
 	if input_source == null:
 		input_source = HP2PlayerInputScript.new()
 	_sync_state_from_transform(global_transform)
-	_apply_state_to_body()
 	_refresh_visual_bindings()
+	set_debug_overlay_enabled(draw_debug)
 
 
 func set_surface_sampler(sampler) -> void:
 	surface_sampler = sampler
 
 
+func _configure_chassis_collision_shape() -> void:
+	var shape_node := get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if shape_node == null:
+		return
+	var position := shape_node.position
+	position.y = maxf(position.y, 0.45)
+	shape_node.position = position
+
+
 func _process(delta: float) -> void:
 	_update_visuals(delta)
+	if draw_debug:
+		_rebuild_debug_mesh()
 
 
 func apply_config(new_config) -> void:
@@ -149,9 +186,10 @@ func apply_config(new_config) -> void:
 		for radius in configured_radii:
 			radius_total += float(radius)
 		wheel_radius = radius_total / float(configured_radii.size())
-	_apply_handling_profile_params(config)
+	ride_height = _configured_ride_height(config)
 	mass = vehicle_mass_kg
 	_rebuild_wheels()
+	_apply_handling_profile_params(config)
 	_update_derived_state()
 
 
@@ -201,10 +239,25 @@ func _apply_handling_profile_params(source_config) -> void:
 
 
 func _apply_suspension_params_to_wheels(source_config) -> void:
+	var wheel_states: Array = []
+	if source_config.has_method("build_wheel_states"):
+		wheel_states = source_config.build_wheel_states()
 	for slot_id in SLOT_IDS:
 		var wheel = wheels.get(slot_id, null)
 		if wheel == null:
 			continue
+		for state in wheel_states:
+			if String(state.slot_id) != slot_id:
+				continue
+			wheel.pivot_local_z = float(state.pivot_local_position_ps2.z)
+			wheel.progressive_spring_scale = float(state.progressive_spring_scale)
+			wheel.bump_stop_coefficient = float(state.bump_stop_coefficient)
+			wheel.anti_roll_coefficient = float(state.anti_roll_coefficient)
+			wheel.min_travel = float(state.min_travel)
+			wheel.max_travel = float(state.max_travel)
+			wheel.reference_length = float(state.reference_length)
+			wheel.preload_force = float(state.preload_force)
+			break
 		if slot_id in ["FL", "FR"]:
 			wheel.spring_coefficient = maxf(float(source_config.front_spring_coefficient), 0.5)
 			wheel.bump_damping = maxf(float(source_config.front_bump_damping), 0.0)
@@ -213,6 +266,8 @@ func _apply_suspension_params_to_wheels(source_config) -> void:
 			wheel.spring_coefficient = maxf(float(source_config.rear_spring_coefficient), 0.5)
 			wheel.bump_damping = maxf(float(source_config.rear_bump_damping), 0.0)
 			wheel.rebound_damping = maxf(float(source_config.rear_rebound_damping), 0.0)
+		if float(wheel.preload_force) <= 0.0:
+			wheel.preload_force = _default_preload_for_slot(slot_id)
 
 
 func get_reference_params() -> Dictionary:
@@ -287,45 +342,179 @@ func replace_visual(visual: Node3D) -> void:
 		_visual_root = get_node_or_null("VisualRoot") as Node3D
 	if _visual_root == null:
 		return
-	var existing := _visual_root.get_node_or_null("CarVisual")
-	if existing != null:
-		_visual_root.remove_child(existing)
-		existing.queue_free()
+	var existing := _visual_root.get_node_or_null("CarVisual") as Node3D
+	if existing == null:
+		existing = Node3D.new()
+		existing.name = "CarVisual"
+		_visual_root.add_child(existing)
+	_ensure_scene_visual_components(existing)
+	_clear_scene_visual_content(existing)
 	if visual == null:
+		_refresh_visual_bindings()
 		return
 	if visual.get_parent() != null:
 		visual.get_parent().remove_child(visual)
-	visual.name = "CarVisual"
-	_visual_root.add_child(visual)
+	_merge_visual_content_into_scene(visual, existing)
+	visual.queue_free()
 	_refresh_visual_bindings()
 
 
 func sync_wheel_slots_from_visual() -> void:
+	var car_visual: Node3D = null
+	if _visual_root != null:
+		car_visual = _visual_root.get_node_or_null("CarVisual") as Node3D
+	if car_visual != null:
+		_ensure_scene_visual_components(car_visual)
 	_refresh_visual_bindings()
 	_update_visuals(0.0)
 
 
+func _ensure_scene_visual_components(car_visual: Node3D) -> void:
+	var body := _ensure_node3d(car_visual, "Body")
+	body.position = Vector3.ZERO
+	var wheel_pivots := _ensure_node3d(car_visual, "WheelPivots")
+	for slot_id in SLOT_IDS:
+		var wheel = wheels.get(slot_id, null)
+		var pivot := _ensure_node3d(wheel_pivots, slot_id)
+		if wheel != null:
+			pivot.position = _visual_pivot_position_for_wheel(wheel)
+		var suspension := _ensure_node3d(pivot, "Suspension")
+		var steer := _ensure_node3d(suspension, "Steer")
+		var roll := _ensure_node3d(steer, "Roll")
+		_ensure_node3d(roll, "Spin")
+	var dummies := _ensure_node3d(car_visual, "Dummies")
+	_ensure_node3d(dummies, "BODY_CENTER")
+	for slot_id in SLOT_IDS:
+		var dummy := _ensure_node3d(dummies, "%s_PIVOT" % slot_id)
+		var wheel = wheels.get(slot_id, null)
+		if wheel != null:
+			dummy.position = _visual_pivot_position_for_wheel(wheel)
+
+
+func _visual_pivot_position_for_wheel(wheel) -> Vector3:
+	return Vector3(float(wheel.local_position.y), float(wheel.pivot_local_z), float(wheel.local_position.x))
+
+
+func _ensure_node3d(parent: Node, child_name: String) -> Node3D:
+	var existing := parent.get_node_or_null(NodePath(child_name)) as Node3D
+	if existing != null:
+		return existing
+	var node := Node3D.new()
+	node.name = child_name
+	parent.add_child(node)
+	return node
+
+
+func _clear_scene_visual_content(car_visual: Node3D) -> void:
+	for child in car_visual.get_children():
+		if String(child.name) in ["Body", "WheelPivots", "Dummies"]:
+			continue
+		_remove_child_now(car_visual, child)
+	var body_root := car_visual.get_node_or_null("Body") as Node3D
+	if body_root != null:
+		_remove_all_children(body_root)
+	var wheel_pivots := car_visual.get_node_or_null("WheelPivots") as Node3D
+	if wheel_pivots != null:
+		for child in wheel_pivots.get_children():
+			if not (String(child.name) in SLOT_IDS):
+				_remove_child_now(wheel_pivots, child)
+		for slot_id in SLOT_IDS:
+			_clear_wheel_visual_content(wheel_pivots.get_node_or_null(slot_id) as Node3D)
+	var dummies_root := car_visual.get_node_or_null("Dummies") as Node3D
+	if dummies_root != null:
+		var expected_dummies := ["BODY_CENTER"]
+		for slot_id in SLOT_IDS:
+			expected_dummies.append("%s_PIVOT" % slot_id)
+		for child in dummies_root.get_children():
+			if not (String(child.name) in expected_dummies):
+				_remove_child_now(dummies_root, child)
+
+
+func _clear_wheel_visual_content(wheel_root: Node3D) -> void:
+	if wheel_root == null:
+		return
+	for child in wheel_root.get_children():
+		if String(child.name) != "Suspension":
+			_remove_child_now(wheel_root, child)
+	var suspension := wheel_root.get_node_or_null("Suspension") as Node3D
+	if suspension == null:
+		return
+	for child in suspension.get_children():
+		if String(child.name) != "Steer":
+			_remove_child_now(suspension, child)
+	var steer := suspension.get_node_or_null("Steer") as Node3D
+	if steer == null:
+		return
+	for child in steer.get_children():
+		if String(child.name) != "Roll":
+			_remove_child_now(steer, child)
+	var roll := steer.get_node_or_null("Roll") as Node3D
+	if roll == null:
+		return
+	for child in roll.get_children():
+		if String(child.name) != "Spin":
+			_remove_child_now(roll, child)
+	var spin := roll.get_node_or_null("Spin") as Node3D
+	if spin != null:
+		_remove_all_children(spin)
+
+
+func _merge_visual_content_into_scene(source: Node3D, destination: Node3D) -> void:
+	_copy_node_state(source, destination)
+	for child in source.get_children():
+		var target_child := destination.get_node_or_null(NodePath(String(child.name))) as Node3D
+		if child is Node3D and not (child is MeshInstance3D) and target_child != null:
+			_merge_visual_content_into_scene(child as Node3D, target_child)
+			continue
+		source.remove_child(child)
+		destination.add_child(child)
+
+
+func _copy_node_state(source: Node3D, destination: Node3D) -> void:
+	destination.transform = source.transform
+	for meta_name in source.get_meta_list():
+		destination.set_meta(String(meta_name), source.get_meta(String(meta_name)))
+
+
+func _remove_all_children(parent: Node) -> void:
+	for child in parent.get_children():
+		_remove_child_now(parent, child)
+
+
+func _remove_child_now(parent: Node, child: Node) -> void:
+	parent.remove_child(child)
+	child.queue_free()
+
+
 func set_debug_overlay_enabled(enabled: bool) -> void:
 	draw_debug = enabled
+	if draw_debug:
+		_ensure_debug_mesh()
+		if _debug_mesh_instance != null:
+			_debug_mesh_instance.visible = true
+			_rebuild_debug_mesh()
+	elif _debug_mesh_instance != null:
+		_debug_mesh.clear_surfaces()
+		_debug_mesh_instance.visible = false
 
 
 func set_airborne_debug_enabled(enabled: bool, airborne_height: float) -> void:
 	airborne_debug_enabled = enabled
-	_vx = 0.0
-	_vz = 0.0
-	_yaw_rate = 0.0
-	_vertical_velocity = 0.0
-	_display_y = airborne_height if enabled else ride_height
-	_apply_state_to_body()
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	sleeping = false
+	if enabled:
+		var airborne_transform := global_transform
+		airborne_transform.origin.y = airborne_height
+		global_transform = airborne_transform
+	_sync_state_from_transform(global_transform)
 
 
 func set_forward_speed(speed_mps: float) -> void:
-	var forward := _forward_vector(_heading)
-	_vx = forward.x * speed_mps
-	_vz = forward.y * speed_mps
+	var forward := -global_transform.basis.z.normalized()
+	linear_velocity = Vector3(forward.x * speed_mps, linear_velocity.y, forward.z * speed_mps)
 	_last_forward_speed = speed_mps
 	_update_derived_state()
-	_apply_state_to_body()
 
 
 func _physics_process(delta: float) -> void:
@@ -334,40 +523,41 @@ func _physics_process(delta: float) -> void:
 	var throttle: float = input_source.get_throttle() if input_source != null else 0.0
 	var brake: float = input_source.get_brake() if input_source != null else 0.0
 	var steer: float = input_source.get_steer() if input_source != null else 0.0
-	if airborne_debug_enabled and _is_airborne():
-		simulate_airborne(delta, throttle, brake, steer)
+	_store_inputs(throttle, brake, steer)
+	if throttle > 0.001 or brake > 0.001 or absf(steer) > 0.001:
+		sleeping = false
+
+
+func _store_inputs(throttle: float, brake: float, steer: float) -> void:
+	_last_inputs = {
+		"throttle": clampf(throttle, 0.0, 1.0),
+		"brake": clampf(brake, 0.0, 1.0),
+		"steer": clampf(steer, -1.0, 1.0),
+	}
+
+
+func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
+	if wheels.is_empty():
 		return
-	simulate(delta, throttle, brake, steer)
+	var step := maxf(state.step, 0.0001)
+	var step_count := int(floor(step / SUBSTEP_TARGET_DT)) + 1
+	var sub_dt := step / float(step_count)
+	for _index in range(step_count):
+		_step_physical_vehicle(state, sub_dt)
+	sim_time += step
+	_update_derived_state_from_state(state)
 
 
 func simulate(delta: float, throttle: float, brake: float, steer: float) -> void:
-	_last_inputs = {
-		"throttle": clampf(throttle, 0.0, 1.0),
-		"brake": clampf(brake, 0.0, 1.0),
-		"steer": clampf(steer, -1.0, 1.0),
-	}
-	var step_count := maxi(substeps, 1)
-	var step_delta := delta / float(step_count)
-	for _index in range(step_count):
-		_substep(step_delta, float(_last_inputs["throttle"]), float(_last_inputs["brake"]), float(_last_inputs["steer"]))
+	_store_inputs(throttle, brake, steer)
 	sim_time += delta
 	_update_derived_state()
-	_apply_state_to_body()
 
 
 func simulate_airborne(delta: float, throttle: float, brake: float, steer: float) -> void:
-	_last_inputs = {
-		"throttle": clampf(throttle, 0.0, 1.0),
-		"brake": clampf(brake, 0.0, 1.0),
-		"steer": clampf(steer, -1.0, 1.0),
-	}
-	var step_count := maxi(substeps, 1)
-	var step_delta := delta / float(step_count)
-	for _index in range(step_count):
-		_airborne_substep(step_delta, float(_last_inputs["throttle"]), float(_last_inputs["brake"]), float(_last_inputs["steer"]))
+	_store_inputs(throttle, brake, steer)
 	sim_time += delta
 	_update_derived_state()
-	_apply_state_to_body()
 
 
 func reset_runtime_state(target_transform: Transform3D = Transform3D.IDENTITY) -> void:
@@ -375,10 +565,10 @@ func reset_runtime_state(target_transform: Transform3D = Transform3D.IDENTITY) -
 	if resolved_transform == Transform3D.IDENTITY:
 		resolved_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, ride_height, 0.0))
 	_sync_state_from_transform(resolved_transform)
-	_vx = 0.0
-	_vz = 0.0
-	_yaw_rate = 0.0
-	_vertical_velocity = 0.0
+	global_transform = resolved_transform
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	sleeping = false
 	sim_time = 0.0
 	accel_long = 0.0
 	_last_forward_speed = 0.0
@@ -388,8 +578,12 @@ func reset_runtime_state(target_transform: Transform3D = Transform3D.IDENTITY) -
 	assist.reset_runtime()
 	for wheel in wheels.values():
 		wheel.reset_runtime()
+		wheel.previous_length = clampf(wheel.wheel_radius - (global_position.y + wheel.pivot_local_z), wheel.min_travel, wheel.max_travel)
+		wheel.current_length = wheel.previous_length
 	_update_derived_state()
-	_apply_state_to_body()
+	_update_visuals(0.0)
+	if draw_debug:
+		_rebuild_debug_mesh()
 
 
 func get_debug_snapshot() -> Dictionary:
@@ -400,13 +594,24 @@ func get_debug_snapshot() -> Dictionary:
 			continue
 		wheel_rows.append({
 			"slot": slot_id,
-			"grounded": true,
+			"grounded": wheel.grounded,
 			"rpm": wheel.angular_velocity * 60.0 / TAU,
 			"skid": wheel.grip_utilization,
 			"steering_deg": rad_to_deg(wheel.steer_angle),
 			"engine_force": wheel.force_long,
 			"brake_force": wheel.brake_torque,
 			"load": wheel.normal_load,
+			"raw_length": wheel.raw_length,
+			"current_length": wheel.current_length,
+			"travel_velocity": wheel.travel_velocity,
+			"spring_force": wheel.spring_force,
+			"damper_force": wheel.damper_force,
+			"suspension_force": wheel.suspension_force,
+			"normal_load": wheel.normal_load,
+			"world_pivot_ps2": wheel.world_pivot_ps2,
+			"world_wheel_center_ps2": wheel.world_wheel_center_ps2,
+			"contact_point_ps2": wheel.contact_point_ps2,
+			"normal_ps2": wheel.normal_ps2,
 			"grip": wheel.grip_utilization,
 			"slip_long": wheel.slip_long,
 			"slip_lat": wheel.slip_lat,
@@ -472,18 +677,22 @@ func get_telemetry_row() -> Dictionary:
 	}
 
 
-func _substep(delta: float, throttle: float, brake: float, steer: float) -> void:
+func _step_physical_vehicle(state: PhysicsDirectBodyState3D, delta: float) -> void:
 	surface_mu = base_mu * float(SURFACE_TABLE.get(surface_type, 1.0))
-	var current_speed_kmh := Vector2(_vx, _vz).length() * 3.6
-	var steer_angle := steering_system.update(steer, delta, current_speed_kmh)
-	var steer_angles := _ackermann_angles(steer_angle)
-	var forward := _forward_vector(_heading)
-	var right := _right_vector(_heading)
-	var forward_speed := Vector2(_vx, _vz).dot(forward)
-	var lateral_accel := _yaw_rate * forward_speed
+	var body_transform := state.transform
+	var body_origin_ps2 := _godot_to_ps2(body_transform.origin)
+	var body_up_ps2 := _basis_axis_ps2(body_transform.basis, Vector3(0.0, 0.0, 1.0))
+	var body_forward_ps2 := _basis_axis_ps2(body_transform.basis, Vector3(1.0, 0.0, 0.0))
+	var body_right_ps2 := body_up_ps2.cross(body_forward_ps2).normalized()
+	var flat_velocity_ps2 := _horizontal_ps2(_godot_to_ps2(state.linear_velocity))
+	var current_speed := flat_velocity_ps2.length()
+	var forward_speed := flat_velocity_ps2.dot(body_forward_ps2)
+	var throttle := float(_last_inputs.get("throttle", 0.0))
+	var brake := float(_last_inputs.get("brake", 0.0))
+	var steer := float(_last_inputs.get("steer", 0.0))
 	var reverse_active: bool = throttle <= 0.05 and brake > 0.05 and (
 		(drivetrain.current_gear == 0 and forward_speed <= 0.35) or
-		(forward_speed <= 0.35 and current_speed_kmh <= 4.5)
+		(forward_speed <= 0.35 and current_speed * 3.6 <= 4.5)
 	)
 	var drive_input := throttle
 	var brake_input := brake
@@ -494,20 +703,26 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 	elif drivetrain.current_gear == 0:
 		drivetrain.current_gear = 1
 
+	state.apply_impulse(Vector3.DOWN * vehicle_mass_kg * GRAVITY * delta)
+	var steer_angle := steering_system.update(steer, delta, current_speed * 3.6)
+	var steer_angles := _ackermann_angles(steer_angle)
 	engine.update(delta, _average_rear_wheel_angular_velocity(), drivetrain.effective_ratio())
 	if drivetrain.current_gear > 0:
 		_update_auto_shift(delta)
 
-	var target_loads := _compute_normal_loads(accel_long, lateral_accel)
-	# Aero downforce: speed² × drag coefficient × downforce ratio, split evenly per wheel
-	var aero_load_per_wheel := aero_drag * speed_ms * speed_ms * aero_downforce_ratio * 0.25
-	# Apply spring-filtered loads and push into wheels
+	_step_physical_suspension(state, body_transform, body_up_ps2, delta)
+	var aero_load_per_wheel := aero_drag * current_speed * current_speed * aero_downforce_ratio * 0.25
+	if aero_load_per_wheel > 0.0:
+		_apply_impulse_ps2(state, -body_up_ps2 * aero_load_per_wheel * 4.0 * delta, body_origin_ps2)
 	var loads := {}
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
-		var target := float(target_loads[slot_id]) + aero_load_per_wheel
-		target *= _drive_area_wheel_surface_scale(slot_id, _heading, _pos_x, _pos_z)
-		loads[slot_id] = wheel.update_filtered_load(target, delta)
+		var target := 0.0
+		if wheel.grounded:
+			target = maxf(float(wheel.suspension_force) + aero_load_per_wheel, 0.0)
+			if drive_area_surface_filter_enabled and surface_sampler != null and not surface_sampler.has_driveable_surface(wheel.contact_point_ps2):
+				target = 0.0
+		loads[slot_id] = target
 	var drive_torques := drivetrain.calculate_rear_wheel_torques(drive_input, float(loads["RL"]), float(loads["RR"]))
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
@@ -515,31 +730,144 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 		wheel.surface_mu = surface_mu
 		wheel.grip_scale = _wheel_grip_scale(slot_id)
 		wheel.lat_grip_scale = _wheel_lat_grip_scale(slot_id)
-		wheel.drive_torque = float(drive_torques[slot_id])
+		var drive_torque: float = float(drive_torques[slot_id])
+		if reverse_active:
+			drive_torque = -absf(drive_torque)
+		elif drivetrain.current_gear > 0 and drive_input > 0.001:
+			drive_torque = absf(drive_torque)
+		wheel.drive_torque = drive_torque
 		wheel.brake_torque = _brake_torque_for_slot(slot_id, brake_input)
 		wheel.steer_angle = float(steer_angles.get(slot_id, 0.0))
 
-	sideslip_deg = _compute_sideslip()
+	_update_derived_state_from_state(state)
 	assist.apply(wheels, speed_kmh, sideslip_deg)
+	_apply_physical_tire_forces(state, body_transform, body_up_ps2, delta, reverse_active)
+	_apply_drag_impulse(state, flat_velocity_ps2, current_speed, body_origin_ps2, delta)
+	_apply_grounded_chassis_damping(state, body_origin_ps2, body_up_ps2, body_forward_ps2, body_right_ps2, delta)
+	_apply_rest_settle(state, delta)
+	var new_forward_speed := _horizontal_ps2(_godot_to_ps2(state.linear_velocity)).dot(body_forward_ps2)
+	accel_long = (new_forward_speed - _last_forward_speed) / maxf(delta, 0.0001)
+	_last_forward_speed = new_forward_speed
+	current_gear = drivetrain.current_gear
+	shift_cut_active = engine.shift_cut_active
 
-	var total_force := Vector2.ZERO
-	var yaw_torque := 0.0
+
+func _step_physical_suspension(
+	state: PhysicsDirectBodyState3D,
+	body_transform: Transform3D,
+	body_up_ps2: Vector3,
+	delta: float
+) -> void:
 	for slot_id in SLOT_IDS:
-		var wheel = wheels[slot_id]
-		var local_pos: Vector2 = wheel.local_position
-		var world_pos := right * local_pos.x + forward * local_pos.y
-		var wheel_velocity := Vector2(_vx + _yaw_rate * world_pos.y, _vz - _yaw_rate * world_pos.x)
-		var wheel_heading: float = _heading + wheel.steer_angle
-		var wheel_forward := _forward_vector(wheel_heading)
-		var wheel_right := _right_vector(wheel_heading)
-		var v_long := wheel_velocity.dot(wheel_forward)
-		var v_lat := wheel_velocity.dot(wheel_right)
+		var wheel = wheels.get(slot_id, null)
+		if wheel == null:
+			continue
+		_step_physical_suspension_for_wheel(state, body_transform, body_up_ps2, slot_id, wheel, delta)
+
+
+func _step_physical_suspension_for_wheel(
+	state: PhysicsDirectBodyState3D,
+	body_transform: Transform3D,
+	body_up_ps2: Vector3,
+	slot_id: String,
+	wheel,
+	delta: float
+) -> void:
+	var pivot_world_ps2 := _transform_wheel_point_ps2(body_transform, wheel, true)
+	var length_min: float = minf(wheel.min_travel, wheel.max_travel)
+	var length_max: float = maxf(wheel.min_travel, wheel.max_travel)
+	var previous_length: float = clampf(wheel.previous_length, length_min, length_max)
+	wheel.world_pivot_ps2 = pivot_world_ps2
+	wheel.contact_point_ps2 = pivot_world_ps2
+	wheel.world_wheel_center_ps2 = pivot_world_ps2 + body_up_ps2 * previous_length
+	wheel.normal_ps2 = body_up_ps2
+	wheel.raw_length = previous_length
+	wheel.current_length = previous_length
+	wheel.travel_velocity = 0.0
+	wheel.overtravel = 0.0
+	wheel.spring_force = 0.0
+	wheel.damper_force = 0.0
+	wheel.suspension_force = 0.0
+	wheel.normal_load = 0.0
+	wheel.grounded = false
+	wheel.visual_suspension_offset = previous_length
+
+	var surface := _sample_surface_for_suspension(pivot_world_ps2)
+	if surface.is_empty():
+		return
+	var surface_normal: Vector3 = surface.get("normal", body_up_ps2)
+	if surface_normal.length_squared() <= 0.000001:
+		return
+	surface_normal = surface_normal.normalized()
+	var denom := surface_normal.dot(body_up_ps2)
+	if denom <= SUSPENSION_DENOM_EPSILON:
+		return
+	var surface_point: Vector3 = surface.get("point", pivot_world_ps2)
+	var plane_t: float = surface_normal.dot(surface_point - pivot_world_ps2) / denom
+	var raw_length: float = plane_t + float(wheel.wheel_radius)
+	var clamped_length: float = clampf(raw_length, length_min, length_max)
+	var travel_velocity: float = (clamped_length - previous_length) / maxf(delta, 0.0001)
+	wheel.raw_length = raw_length
+	wheel.current_length = clamped_length
+	wheel.previous_length = clamped_length
+	wheel.travel_velocity = travel_velocity
+	wheel.overtravel = maxf(raw_length - length_max, 0.0)
+	wheel.grounded = raw_length >= length_min
+	wheel.normal_ps2 = surface_normal
+	wheel.contact_point_ps2 = pivot_world_ps2 + body_up_ps2 * plane_t
+	wheel.world_wheel_center_ps2 = pivot_world_ps2 + body_up_ps2 * clamped_length
+	wheel.visual_suspension_offset = clamped_length
+	if not wheel.grounded:
+		return
+
+	var spring_progress: float = maxf(clamped_length, 0.0)
+	var spring_force: float = clamped_length * float(wheel.spring_coefficient) * SUSPENSION_PARAM_FORCE_SCALE * (1.0 + float(wheel.progressive_spring_scale) * spring_progress)
+	var damping: float = (float(wheel.bump_damping) if travel_velocity > 0.0 else float(wheel.rebound_damping)) * SUSPENSION_PARAM_FORCE_SCALE
+	var damper_force: float = damping * travel_velocity
+	var anti_roll_force := 0.0
+	var pair = _paired_axle_wheel(slot_id)
+	if pair != null:
+		anti_roll_force = float(wheel.anti_roll_coefficient) * SUSPENSION_PARAM_FORCE_SCALE * (clamped_length - float(pair.current_length))
+	var reference_force: float = float(wheel.bump_stop_coefficient) * SUSPENSION_PARAM_FORCE_SCALE * (clamped_length - float(wheel.reference_length))
+	var overtravel_force: float = float(wheel.bump_stop_coefficient) * SUSPENSION_PARAM_FORCE_SCALE * float(wheel.overtravel)
+	var force: float = float(wheel.preload_force) + spring_force + damper_force + anti_roll_force + reference_force + overtravel_force
+	wheel.spring_force = spring_force
+	wheel.damper_force = damper_force
+	wheel.suspension_force = maxf(force, 0.0)
+	wheel.normal_load = wheel.suspension_force
+	_apply_impulse_ps2(state, body_up_ps2 * wheel.suspension_force * delta, pivot_world_ps2)
+
+
+func _apply_physical_tire_forces(
+	state: PhysicsDirectBodyState3D,
+	body_transform: Transform3D,
+	body_up_ps2: Vector3,
+	delta: float,
+	reverse_active: bool
+) -> void:
+	for slot_id in SLOT_IDS:
+		var wheel = wheels.get(slot_id, null)
+		if wheel == null:
+			continue
+		if not wheel.grounded or wheel.normal_load <= 0.0:
+			wheel.compute_contact_forces(0.0, 0.0)
+			wheel.update_airborne_angular_velocity(delta)
+			continue
+		var normal_ps2: Vector3 = wheel.normal_ps2.normalized()
+		var heading_ps2 := _wheel_heading_ps2(body_transform.basis, body_up_ps2, wheel)
+		heading_ps2 = (heading_ps2 - normal_ps2 * heading_ps2.dot(normal_ps2))
+		if heading_ps2.length_squared() <= 0.0001:
+			heading_ps2 = _basis_axis_ps2(body_transform.basis, Vector3(1.0, 0.0, 0.0))
+		heading_ps2 = heading_ps2.normalized()
+		var right_ps2 := normal_ps2.cross(heading_ps2).normalized()
+		var contact_global := _ps2_to_godot(wheel.contact_point_ps2)
+		var contact_local := body_transform.affine_inverse() * contact_global
+		var contact_velocity_ps2 := _godot_to_ps2(state.get_velocity_at_local_position(contact_local))
+		var v_long := contact_velocity_ps2.dot(heading_ps2)
+		var v_lat := contact_velocity_ps2.dot(right_ps2)
 		var brake_direction := signf(v_long)
 		if brake_direction == 0.0:
 			brake_direction = signf(wheel.angular_velocity)
-
-		# Engine braking (negative drive_torque) acts like additional brake: opposes
-		# current motion via brake_direction. Prevents static backwards creep at idle.
 		var raw_drive: float = wheel.drive_torque / maxf(wheel.wheel_radius, 0.0001)
 		var engine_brake := 0.0
 		var drive_force_request := raw_drive
@@ -547,85 +875,104 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 			engine_brake = -raw_drive
 			drive_force_request = 0.0
 		var brake_force_request: float = (wheel.brake_torque / maxf(wheel.wheel_radius, 0.0001) + engine_brake) * brake_direction
-
 		wheel.compute_contact_forces(
 			drive_force_request - brake_force_request - v_long * longitudinal_stiffness * longitudinal_speed_damping,
 			v_lat * lateral_stiffness
 		)
 		wheel.update_angular_velocity(delta, v_long)
-
-		var force_world: Vector2 = wheel_forward * wheel.force_long + wheel_right * wheel.force_lat
-		total_force += force_world
-		yaw_torque += world_pos.y * force_world.x - world_pos.x * force_world.y
-
-	if speed_ms > 0.01:
-		var drag_magnitude := aero_drag * speed_ms * speed_ms + rolling_resistance * vehicle_mass_kg * GRAVITY
-		total_force -= Vector2(_vx, _vz).normalized() * drag_magnitude
-
-	var acceleration := total_force / maxf(vehicle_mass_kg, 1.0)
-	_vx += acceleration.x * delta
-	_vz += acceleration.y * delta
-	_yaw_rate += (yaw_torque / maxf(inertia_yaw, 1.0)) * delta
-	_heading = wrapf(_heading + _yaw_rate * delta, -PI, PI)
-	_pos_x += _vx * delta
-	_pos_z += _vz * delta
-	_update_display_height_from_drive_area()
-
-	var new_forward_speed := Vector2(_vx, _vz).dot(_forward_vector(_heading))
-	accel_long = (new_forward_speed - _last_forward_speed) / maxf(delta, 0.0001)
-	_last_forward_speed = new_forward_speed
-	_update_derived_state()
+		var tire_force_ps2: Vector3 = heading_ps2 * float(wheel.force_long) + right_ps2 * float(wheel.force_lat)
+		_apply_impulse_ps2(state, tire_force_ps2 * delta, wheel.contact_point_ps2)
 
 
-func _airborne_substep(delta: float, throttle: float, brake: float, steer: float) -> void:
-	surface_mu = base_mu * float(SURFACE_TABLE.get(surface_type, 1.0))
-	var steer_angle := steering_system.update(steer, delta, speed_kmh)
-	var steer_angles := _ackermann_angles(steer_angle)
-	engine.update(delta, _average_rear_wheel_angular_velocity(), drivetrain.effective_ratio())
-	_update_auto_shift(delta)
-	var drive_torques := drivetrain.calculate_rear_wheel_torques(throttle, 1.0, 1.0) if throttle > 0.001 else {
-		"FL": 0.0,
-		"FR": 0.0,
-		"RL": 0.0,
-		"RR": 0.0,
-	}
-	for slot_id in SLOT_IDS:
-		var wheel = wheels[slot_id]
-		wheel.normal_load = 0.0
-		wheel.surface_mu = surface_mu
-		wheel.grip_scale = _wheel_grip_scale(slot_id)
-		wheel.drive_torque = float(drive_torques[slot_id])
-		wheel.brake_torque = _brake_torque_for_slot(slot_id, brake)
-		wheel.steer_angle = float(steer_angles.get(slot_id, 0.0))
-		wheel.compute_contact_forces(0.0, 0.0)
-		wheel.update_airborne_angular_velocity(delta)
-	_apply_vertical_gravity(delta)
-
-
-func _drive_area_wheel_surface_scale(slot_id: String, heading: float, position_x: float, position_z: float) -> float:
-	if not drive_area_surface_filter_enabled or surface_sampler == null:
-		return 1.0
-	var offset := _drive_area_planar_wheel_offset(slot_id, heading)
-	var sample_ps2 := Vector3(position_x + offset.x, -position_z - offset.y, _display_y)
-	return 1.0 if surface_sampler.has_driveable_surface(sample_ps2) else 0.0
-
-
-func _drive_area_planar_wheel_offset(slot_id: String, heading: float) -> Vector2:
-	var wheel = wheels.get(slot_id, null)
-	if wheel == null:
-		return Vector2.ZERO
-	var forward := _forward_vector(heading)
-	var right := _right_vector(heading)
-	var local_pos: Vector2 = wheel.local_position
-	return right * local_pos.x + forward * local_pos.y
-
-
-func _update_display_height_from_drive_area() -> void:
-	if surface_sampler == null:
+func _apply_drag_impulse(
+	state: PhysicsDirectBodyState3D,
+	flat_velocity_ps2: Vector3,
+	current_speed: float,
+	body_origin_ps2: Vector3,
+	delta: float
+) -> void:
+	if current_speed <= 0.01:
 		return
-	var surface: Dictionary = surface_sampler.sample_surface(Vector3(_pos_x, -_pos_z, _display_y))
-	if not surface.is_empty():
-		_display_y = float(surface.get("height_z", _display_y)) + ride_height
+	var drag_magnitude := aero_drag * current_speed * current_speed + rolling_resistance * vehicle_mass_kg * GRAVITY
+	_apply_impulse_ps2(state, -flat_velocity_ps2.normalized() * drag_magnitude * delta, body_origin_ps2)
+
+
+func _apply_grounded_chassis_damping(
+	state: PhysicsDirectBodyState3D,
+	body_origin_ps2: Vector3,
+	body_up_ps2: Vector3,
+	body_forward_ps2: Vector3,
+	body_right_ps2: Vector3,
+	delta: float
+) -> void:
+	var grounded_count := 0
+	for wheel in wheels.values():
+		if wheel.grounded:
+			grounded_count += 1
+	if grounded_count == 0:
+		return
+	var grounded_alpha := float(grounded_count) / float(maxi(wheels.size(), 1))
+	var linear_velocity_ps2 := _godot_to_ps2(state.linear_velocity)
+	var vertical_speed := linear_velocity_ps2.dot(body_up_ps2)
+	_apply_impulse_ps2(state, body_up_ps2 * (-vertical_speed * vehicle_mass_kg * GROUNDED_HEAVE_DAMPING * grounded_alpha) * delta, body_origin_ps2)
+	var angular_velocity_ps2 := _godot_to_ps2(state.angular_velocity)
+	var pitch_rate := angular_velocity_ps2.dot(body_right_ps2)
+	var roll_rate := angular_velocity_ps2.dot(body_forward_ps2)
+	var attitude_torque_ps2 := body_right_ps2 * (-pitch_rate * GROUNDED_PITCH_DAMPING * grounded_alpha)
+	attitude_torque_ps2 += body_forward_ps2 * (-roll_rate * GROUNDED_ROLL_DAMPING * grounded_alpha)
+	var average_normal := Vector3.ZERO
+	for wheel in wheels.values():
+		if wheel.grounded:
+			average_normal += wheel.normal_ps2.normalized()
+	if average_normal.length_squared() > 0.0001:
+		average_normal = average_normal.normalized()
+		var upright_axis := body_up_ps2.cross(average_normal)
+		attitude_torque_ps2 += upright_axis * GROUNDED_UPRIGHT_STIFFNESS * grounded_alpha
+	_apply_torque_impulse_ps2(state, attitude_torque_ps2 * delta)
+	if state.angular_velocity.length() > GROUNDED_MAX_ANGULAR_SPEED:
+		state.angular_velocity = state.angular_velocity.normalized() * GROUNDED_MAX_ANGULAR_SPEED
+
+
+func _apply_rest_settle(state: PhysicsDirectBodyState3D, delta: float) -> void:
+	if absf(float(_last_inputs.get("throttle", 0.0))) > 0.01:
+		return
+	if absf(float(_last_inputs.get("brake", 0.0))) > 0.01:
+		return
+	if absf(float(_last_inputs.get("steer", 0.0))) > 0.01:
+		return
+	if state.linear_velocity.length() > REST_SETTLE_LINEAR_SPEED:
+		return
+	if state.angular_velocity.length() > REST_SETTLE_ANGULAR_SPEED:
+		return
+	for wheel in wheels.values():
+		if not wheel.grounded or absf(wheel.travel_velocity) > 0.05:
+			return
+	state.linear_velocity = state.linear_velocity.move_toward(Vector3.ZERO, REST_SETTLE_LINEAR_DAMP * delta)
+	state.angular_velocity = state.angular_velocity.move_toward(Vector3.ZERO, REST_SETTLE_ANGULAR_DAMP * delta)
+
+
+func _sample_surface_for_suspension(sample_point_ps2: Vector3) -> Dictionary:
+	if surface_sampler == null:
+		return {
+			"height_z": 0.0,
+			"point": Vector3(sample_point_ps2.x, sample_point_ps2.y, 0.0),
+			"normal": Vector3(0.0, 0.0, 1.0),
+			"material_id": 0,
+		}
+	return surface_sampler.sample_surface(sample_point_ps2)
+
+
+func _paired_axle_wheel(slot_id: String):
+	match slot_id:
+		"FL":
+			return wheels.get("FR", null)
+		"FR":
+			return wheels.get("FL", null)
+		"RL":
+			return wheels.get("RR", null)
+		"RR":
+			return wheels.get("RL", null)
+	return null
 
 
 func _rebuild_wheels() -> void:
@@ -638,11 +985,29 @@ func _rebuild_wheels() -> void:
 		"RL": Vector2(-track_rear * 0.5, rear_z),
 		"RR": Vector2(track_rear * 0.5, rear_z),
 	}
+	if config != null:
+		var configured_positions = config.get("wheel_local_positions_ps2")
+		if configured_positions != null and configured_positions.size() >= SLOT_IDS.size():
+			for index in range(SLOT_IDS.size()):
+				var slot_id: String = SLOT_IDS[index]
+				var ps2_position: Vector3 = configured_positions[index]
+				positions[slot_id] = Vector2(-ps2_position.y, ps2_position.x)
 	for slot_id in SLOT_IDS:
 		var wheel = HP2WheelScript.new()
 		wheel.slot_id = slot_id
 		wheel.local_position = positions[slot_id]
 		wheel.wheel_radius = wheel_radius
+		if config != null:
+			var slot_index := SLOT_IDS.find(slot_id)
+			var wheel_positions = config.get("wheel_local_positions_ps2")
+			if wheel_positions != null and slot_index >= 0 and slot_index < wheel_positions.size():
+				wheel.pivot_local_z = float(wheel_positions[slot_index].z)
+			var wheel_radii = config.get("wheel_radii")
+			if wheel_radii != null and slot_index >= 0 and slot_index < wheel_radii.size():
+				wheel.wheel_radius = float(wheel_radii[slot_index])
+		wheel.previous_length = clampf(wheel.wheel_radius - (_display_y + wheel.pivot_local_z), wheel.min_travel, wheel.max_travel)
+		wheel.current_length = wheel.previous_length
+		wheel.preload_force = _default_preload_for_slot(slot_id)
 		wheels[slot_id] = wheel
 		_wheel_spin_angles[slot_id] = 0.0
 
@@ -674,26 +1039,32 @@ func _ackermann_angles(center_angle: float) -> Dictionary:
 	}
 
 
-func _compute_normal_loads(longitudinal_acceleration: float, lateral_acceleration: float = 0.0) -> Dictionary:
-	var base_front := vehicle_mass_kg * GRAVITY * front_weight_bias
-	var base_rear := vehicle_mass_kg * GRAVITY * (1.0 - front_weight_bias)
-	var avg_track := (track_front + track_rear) * 0.5
-	var long_transfer := vehicle_mass_kg * longitudinal_acceleration * cg_height / maxf(wheelbase, 0.0001) * weight_transfer_coeff
-	var lat_transfer := vehicle_mass_kg * lateral_acceleration * cg_height / maxf(avg_track, 0.0001) * weight_transfer_coeff
-	var front := maxf(base_front - long_transfer, 0.0)
-	var rear := maxf(base_rear + long_transfer, 0.0)
-	return {
-		"FL": maxf(front * 0.5 - lat_transfer, 0.0),
-		"FR": maxf(front * 0.5 + lat_transfer, 0.0),
-		"RL": maxf(rear  * 0.5 - lat_transfer, 0.0),
-		"RR": maxf(rear  * 0.5 + lat_transfer, 0.0),
-	}
+func _configured_ride_height(source_config) -> float:
+	if source_config == null:
+		return ride_height
+	var configured_positions = source_config.get("wheel_local_positions_ps2")
+	var configured_radii = source_config.get("wheel_radii")
+	if configured_positions == null or configured_radii == null:
+		return ride_height
+	var count = mini(configured_positions.size(), configured_radii.size())
+	if count <= 0:
+		return ride_height
+	var target_height := 0.0
+	for index in range(count):
+		var pivot_local_z: float = configured_positions[index].z
+		target_height = maxf(target_height, float(configured_radii[index]) - pivot_local_z)
+	return target_height + 0.02
 
 
 func _brake_torque_for_slot(slot_id: String, brake: float) -> float:
 	if slot_id in ["FL", "FR"]:
 		return brake * brake_torque_total * brake_bias_front * 0.5
 	return brake * brake_torque_total * (1.0 - brake_bias_front) * 0.5
+
+
+func _default_preload_for_slot(slot_id: String) -> float:
+	var axle_bias := front_weight_bias if slot_id in ["FL", "FR"] else (1.0 - front_weight_bias)
+	return vehicle_mass_kg * GRAVITY * axle_bias * 0.5
 
 
 func _wheel_grip_scale(slot_id: String) -> float:
@@ -739,6 +1110,22 @@ func _can_auto_upshift() -> bool:
 
 
 func _update_derived_state() -> void:
+	_sync_state_from_transform(global_transform)
+	_vx = linear_velocity.x
+	_vz = linear_velocity.z
+	_yaw_rate = angular_velocity.y
+	speed_ms = Vector2(_vx, _vz).length()
+	speed_kmh = speed_ms * 3.6
+	sideslip_deg = _compute_sideslip()
+	current_gear = drivetrain.current_gear
+	shift_cut_active = engine.shift_cut_active
+
+
+func _update_derived_state_from_state(state: PhysicsDirectBodyState3D) -> void:
+	_sync_state_from_transform(state.transform)
+	_vx = state.linear_velocity.x
+	_vz = state.linear_velocity.z
+	_yaw_rate = state.angular_velocity.y
 	speed_ms = Vector2(_vx, _vz).length()
 	speed_kmh = speed_ms * 3.6
 	sideslip_deg = _compute_sideslip()
@@ -768,41 +1155,59 @@ func _wheel_value(slot_id: String, property_name: String) -> float:
 	return float(wheel.get(property_name))
 
 
-func _forward_vector(angle: float) -> Vector2:
-	return Vector2(sin(angle), cos(angle))
-
-
-func _right_vector(angle: float) -> Vector2:
-	return Vector2(cos(angle), -sin(angle))
-
-
 func _sync_state_from_transform(source_transform: Transform3D) -> void:
 	var origin := source_transform.origin
 	_pos_x = origin.x
 	_pos_z = origin.z
 	_display_y = origin.y
 	_vertical_velocity = 0.0
-	_heading = source_transform.basis.get_euler().y
+	var forward := source_transform.basis.z.normalized()
+	_heading = atan2(forward.x, forward.z)
 
 
-func _apply_state_to_body() -> void:
-	global_position = Vector3(_pos_x, _display_y, _pos_z)
-	global_rotation = Vector3(0.0, _heading, 0.0)
-	linear_velocity = Vector3(_vx, 0.0, _vz)
-	angular_velocity = Vector3(0.0, _yaw_rate, 0.0)
+func _wheel_heading_ps2(basis: Basis, body_up_ps2: Vector3, wheel) -> Vector3:
+	var base_forward_ps2 := _basis_axis_ps2(basis, Vector3(1.0, 0.0, 0.0))
+	if String(wheel.slot_id).begins_with("F"):
+		return base_forward_ps2.rotated(body_up_ps2, float(wheel.steer_angle)).normalized()
+	return base_forward_ps2.normalized()
 
 
-func _is_airborne() -> bool:
-	return _display_y > ride_height + 0.001
+func _transform_wheel_point_ps2(body_transform: Transform3D, wheel, include_pivot_z: bool) -> Vector3:
+	var local_z_ps2 := float(wheel.pivot_local_z) if include_pivot_z else 0.0
+	var local_point_ps2 := Vector3(float(wheel.local_position.y), -float(wheel.local_position.x), local_z_ps2)
+	return _godot_to_ps2(body_transform * VehicleBodyConfigAdapter.vehicle_space_from_ps2(local_point_ps2))
 
 
-func _apply_vertical_gravity(delta: float) -> void:
-	var gravity := float(ProjectSettings.get_setting("physics/3d/default_gravity", GRAVITY))
-	_vertical_velocity -= gravity * delta
-	_display_y += _vertical_velocity * delta
-	if _display_y <= ride_height:
-		_display_y = ride_height
-		_vertical_velocity = 0.0
+func _basis_axis_ps2(basis: Basis, local_axis_ps2: Vector3) -> Vector3:
+	return _godot_to_ps2(basis * VehicleBodyConfigAdapter.vehicle_space_from_ps2(local_axis_ps2)).normalized()
+
+
+func _apply_impulse_ps2(state: PhysicsDirectBodyState3D, impulse_ps2: Vector3, world_position_ps2: Vector3) -> void:
+	if impulse_ps2.length_squared() <= 0.000001:
+		return
+	var impulse_godot := _ps2_to_godot(impulse_ps2)
+	var world_position_godot := _ps2_to_godot(world_position_ps2)
+	var offset := world_position_godot - state.transform.origin
+	state.apply_impulse(impulse_godot)
+	state.apply_torque_impulse(offset.cross(impulse_godot))
+
+
+func _apply_torque_impulse_ps2(state: PhysicsDirectBodyState3D, torque_ps2: Vector3) -> void:
+	if torque_ps2.length_squared() <= 0.000001:
+		return
+	state.apply_torque_impulse(_ps2_to_godot(torque_ps2))
+
+
+func _ps2_to_godot(value: Vector3) -> Vector3:
+	return MathUtils.ps2_to_godot_vec3(value)
+
+
+func _godot_to_ps2(value: Vector3) -> Vector3:
+	return Vector3(value.x, -value.z, value.y)
+
+
+func _horizontal_ps2(value: Vector3) -> Vector3:
+	return Vector3(value.x, value.y, 0.0)
 
 
 func _refresh_visual_bindings() -> void:
@@ -837,6 +1242,11 @@ func _update_visuals(delta: float) -> void:
 		var wheel = wheels.get(slot_id, null)
 		if wheel == null:
 			continue
+		var suspension_node := _wheel_suspension_nodes.get(slot_id, null) as Node3D
+		if suspension_node != null:
+			var suspension_position := suspension_node.position
+			suspension_position.y = wheel.visual_suspension_offset * visual_suspension_travel_scale
+			suspension_node.position = suspension_position
 		var steer_node := _wheel_steer_nodes.get(slot_id, null) as Node3D
 		if steer_node != null:
 			var steer_rotation := steer_node.rotation
@@ -849,6 +1259,111 @@ func _update_visuals(delta: float) -> void:
 			var spin_rotation := spin_node.rotation
 			spin_rotation.x = float(_wheel_spin_angles[slot_id]) * float(spin_node.get_meta("eagl_spin_direction", 1.0))
 			spin_node.rotation = spin_rotation
+
+
+func _ensure_debug_mesh() -> void:
+	_debug_mesh_instance = get_node_or_null("DebugLines") as MeshInstance3D
+	if _debug_mesh_instance == null:
+		return
+	if _debug_material == null:
+		_debug_material = StandardMaterial3D.new()
+		_debug_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_debug_material.vertex_color_use_as_albedo = true
+		_debug_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_debug_material.no_depth_test = true
+	_debug_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_debug_mesh_instance.material_override = _debug_material
+	_debug_mesh_instance.mesh = _debug_mesh
+
+
+func _rebuild_debug_mesh() -> void:
+	if _debug_mesh_instance == null:
+		_ensure_debug_mesh()
+	if _debug_mesh_instance == null:
+		return
+	_debug_mesh.clear_surfaces()
+	_debug_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	for slot_id in SLOT_IDS:
+		var wheel = wheels.get(slot_id, null)
+		if wheel == null:
+			continue
+		var pivot := _debug_local_from_ps2(wheel.world_pivot_ps2)
+		var center := _debug_local_from_ps2(wheel.world_wheel_center_ps2)
+		var contact := _debug_local_from_ps2(wheel.contact_point_ps2)
+		_debug_mesh.surface_set_color(Color(0.0, 0.85, 1.0, 1.0))
+		_debug_mesh.surface_add_vertex(pivot)
+		_debug_mesh.surface_add_vertex(center)
+		_debug_mesh.surface_set_color(Color(1.0, 0.75, 0.2, 0.95))
+		_add_debug_cross(center, 0.07)
+		_add_debug_wheel_outline(center, wheel, Color(0.15, 0.65, 1.0, 0.9))
+		if wheel.grounded:
+			var normal_end := _debug_local_from_ps2(wheel.contact_point_ps2 + wheel.normal_ps2 * 0.45)
+			_debug_mesh.surface_set_color(Color(0.25, 1.0, 0.3, 0.95))
+			_debug_mesh.surface_add_vertex(center)
+			_debug_mesh.surface_add_vertex(contact)
+			_add_debug_cross(contact, 0.05)
+			_debug_mesh.surface_add_vertex(contact)
+			_debug_mesh.surface_add_vertex(normal_end)
+			_add_suspension_force_markers(pivot, wheel)
+			_add_tire_force_markers(contact, wheel)
+	_debug_mesh.surface_end()
+
+
+func _add_debug_cross(center: Vector3, radius: float) -> void:
+	_debug_mesh.surface_add_vertex(center + Vector3.LEFT * radius)
+	_debug_mesh.surface_add_vertex(center + Vector3.RIGHT * radius)
+	_debug_mesh.surface_add_vertex(center + Vector3.UP * radius)
+	_debug_mesh.surface_add_vertex(center + Vector3.DOWN * radius)
+	_debug_mesh.surface_add_vertex(center + Vector3.FORWARD * radius)
+	_debug_mesh.surface_add_vertex(center + Vector3.BACK * radius)
+
+
+func _add_debug_wheel_outline(center: Vector3, wheel, color: Color) -> void:
+	var radius: float = maxf(wheel.wheel_radius, 0.01)
+	_debug_mesh.surface_set_color(color)
+	for index in range(DEBUG_WHEEL_PHYSICS_SEGMENTS):
+		var angle_0 := TAU * float(index) / float(DEBUG_WHEEL_PHYSICS_SEGMENTS)
+		var angle_1 := TAU * float(index + 1) / float(DEBUG_WHEEL_PHYSICS_SEGMENTS)
+		var point_0 := center + (Vector3.UP * cos(angle_0) + Vector3.FORWARD * sin(angle_0)) * radius
+		var point_1 := center + (Vector3.UP * cos(angle_1) + Vector3.FORWARD * sin(angle_1)) * radius
+		_debug_mesh.surface_add_vertex(point_0)
+		_debug_mesh.surface_add_vertex(point_1)
+
+
+func _add_suspension_force_markers(pivot: Vector3, wheel) -> void:
+	var reference_force: float = maxf(maxf(absf(wheel.spring_force), absf(wheel.damper_force)), absf(wheel.suspension_force))
+	reference_force = maxf(reference_force, maxf(wheel.preload_force, 1.0))
+	_add_force_component(pivot + Vector3.LEFT * 0.10, Vector3.UP, wheel.spring_force, reference_force, Color(0.1, 1.0, 0.35, 0.9))
+	_add_force_component(pivot, Vector3.UP, wheel.damper_force, reference_force, Color(0.25, 0.55, 1.0, 0.9))
+	_add_force_component(pivot + Vector3.RIGHT * 0.10, Vector3.UP, wheel.suspension_force, reference_force, Color(1.0, 0.08, 0.08, 0.9))
+
+
+func _add_force_component(origin: Vector3, axis: Vector3, force: float, reference_force: float, color: Color) -> void:
+	if absf(force) <= 0.5:
+		return
+	var direction := 1.0 if force >= 0.0 else -1.0
+	var alpha := clampf(absf(force) / maxf(reference_force, 1.0), 0.0, 1.0)
+	_debug_mesh.surface_set_color(color)
+	_debug_mesh.surface_add_vertex(origin)
+	_debug_mesh.surface_add_vertex(origin + axis * direction * lerpf(0.05, 0.6, alpha))
+
+
+func _add_tire_force_markers(contact: Vector3, wheel) -> void:
+	var heading := Vector3(sin(_heading + wheel.steer_angle), 0.0, cos(_heading + wheel.steer_angle))
+	var right := Vector3(cos(_heading + wheel.steer_angle), 0.0, -sin(_heading + wheel.steer_angle))
+	var heading_local := (global_transform.basis.inverse() * heading).normalized()
+	var right_local := (global_transform.basis.inverse() * right).normalized()
+	var scale := 0.00008
+	_debug_mesh.surface_set_color(Color(1.0, 0.55, 0.1, 0.9))
+	_debug_mesh.surface_add_vertex(contact)
+	_debug_mesh.surface_add_vertex(contact + heading_local * wheel.force_long * scale)
+	_debug_mesh.surface_set_color(Color(0.4, 0.8, 1.0, 0.9))
+	_debug_mesh.surface_add_vertex(contact)
+	_debug_mesh.surface_add_vertex(contact + right_local * wheel.force_lat * scale)
+
+
+func _debug_local_from_ps2(point_ps2: Vector3) -> Vector3:
+	return to_local(Vector3(point_ps2.x, point_ps2.z, -point_ps2.y))
 
 
 func _visual_wheel_angular_velocity(slot_id: String, wheel) -> float:

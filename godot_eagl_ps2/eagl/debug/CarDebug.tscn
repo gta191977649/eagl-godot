@@ -45,6 +45,7 @@ mesh = SubResource("4")
 
 [node name="Car" parent="." instance=ExtResource("2")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.35, 0)
+draw_debug = true
 surface_type = "asphalt"
 
 [node name="FollowCamera" type="Camera3D" parent="." unique_id=1739694075]
@@ -75,10 +76,13 @@ offset_top = 16.0
 offset_right = 316.0
 offset_bottom = 206.0
 
-[node name="Telemetry" type="Label" parent="HUD/TelemetryPanel" unique_id=1945975048]
+[node name="Telemetry" type="RichTextLabel" parent="HUD/TelemetryPanel" unique_id=1945975048]
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
+bbcode_enabled = true
 text = "Loading telemetry..."
+fit_content = true
+scroll_active = false
 
 [node name="ControlsPanel" type="PanelContainer" parent="HUD" unique_id=1055469108]
 offset_left = 1016.0

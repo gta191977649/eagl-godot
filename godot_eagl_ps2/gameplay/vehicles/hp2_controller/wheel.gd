@@ -5,6 +5,7 @@ extends RefCounted
 var slot_id := ""
 var local_position := Vector2.ZERO
 var wheel_radius := 0.32
+var pivot_local_z := 0.03
 
 var steer_angle := 0.0
 var normal_load := 0.0
@@ -17,8 +18,30 @@ var angular_velocity := 0.0
 
 # Suspension spring/damper params (loaded from CarConfig)
 var spring_coefficient := 55.0
+var progressive_spring_scale := 0.0
 var bump_damping := 5.0
 var rebound_damping := 5.3
+var bump_stop_coefficient := 32.0
+var anti_roll_coefficient := 0.0
+var min_travel := -0.13
+var max_travel := 0.125
+var reference_length := 0.0
+var preload_force := 0.0
+
+var raw_length := 0.0
+var current_length := 0.0
+var previous_length := 0.0
+var travel_velocity := 0.0
+var overtravel := 0.0
+var spring_force := 0.0
+var damper_force := 0.0
+var suspension_force := 0.0
+var grounded := true
+var world_pivot_ps2 := Vector3.ZERO
+var world_wheel_center_ps2 := Vector3.ZERO
+var contact_point_ps2 := Vector3.ZERO
+var normal_ps2 := Vector3(0.0, 0.0, 1.0)
+var visual_suspension_offset := 0.0
 
 var slip_long := 0.0
 var slip_lat := 0.0
@@ -38,6 +61,20 @@ func reset_runtime() -> void:
 	drive_torque = 0.0
 	brake_torque = 0.0
 	angular_velocity = 0.0
+	raw_length = 0.0
+	current_length = 0.0
+	previous_length = 0.0
+	travel_velocity = 0.0
+	overtravel = 0.0
+	spring_force = 0.0
+	damper_force = 0.0
+	suspension_force = 0.0
+	grounded = true
+	world_pivot_ps2 = Vector3.ZERO
+	world_wheel_center_ps2 = Vector3.ZERO
+	contact_point_ps2 = Vector3.ZERO
+	normal_ps2 = Vector3(0.0, 0.0, 1.0)
+	visual_suspension_offset = 0.0
 	slip_long = 0.0
 	slip_lat = 0.0
 	force_long = 0.0

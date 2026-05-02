@@ -141,7 +141,7 @@ class EngineCurvePlot:
 
 @onready var car = $Car
 @onready var camera: Camera3D = $FollowCamera
-@onready var telemetry: Label = $HUD/TelemetryPanel/Telemetry
+@onready var telemetry: RichTextLabel = $HUD/TelemetryPanel/Telemetry
 @onready var speedometer: Control = $HUD/Speedometer
 @onready var car_list: ItemList = $HUD/ControlsPanel/MarginContainer/ControlsLayout/CarList
 @onready var overlay_toggle: CheckBox = $HUD/ControlsPanel/MarginContainer/ControlsLayout/ControlsRow/OverlayToggle
@@ -249,47 +249,66 @@ func _update_telemetry() -> void:
 	_update_speedometer(snapshot)
 
 	var lines: Array[String] = []
+	var bb_lines: Array[String] = []
 	if _status_message != "":
 		lines.append(_status_message)
+		bb_lines.append(_bbcode_escape(_status_message))
 	lines.append("")
+	bb_lines.append("")
 	lines.append("Car:   %s" % _current_car_display_name())
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	if car != null and car.config != null:
 		lines.append("Type:  %d   Class: %d   Profile: %d" % [
 			int(car.config.globalb_vehicle_type_id),
 			int(car.config.globalb_vehicle_class_id),
 			int(car.config.globalb_handling_profile_id),
 		])
+		bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 		if car.config.globalb_handling_profile_count > 0:
 			lines.append("PSeq:  %s" % _format_profile_sequence(car.config.globalb_handling_profile_sequence))
+			bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Speed: %5.1f km/h" % float(snapshot.get("speed_kmh", 0.0)))
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("RPM:   %5.0f" % float(snapshot.get("rpm", 0.0)))
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Gear:  %d" % int(snapshot.get("gear", 1)))
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Slip:  %+5.1f deg" % float(snapshot.get("slip_angle_deg", 0.0)))
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Mass:  %5.0f kg %s" % [
 		float(snapshot.get("mass_kg", 0.0)),
 		"(est)" if bool(snapshot.get("mass_is_estimate", false)) else "",
 	])
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Drv:   %d  Gain: %.6f" % [
 		int(snapshot.get("driven_wheel_count", 0)),
 		float(snapshot.get("engine_force_gain", 0.0)),
 	])
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("LAcc:  %5.2f  Drag: %6.1f" % [
 		float(snapshot.get("hp2_launch_accel_reference", 0.0)),
 		float(snapshot.get("drag_force", 0.0)),
 	])
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("EngT:  %6.1f" % float(snapshot.get("engine_force_total", 0.0)))
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Mouse: %s" % ("orbit" if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED else "click to capture"))
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Air:   %s" % ("frozen" if _airborne_debug_enabled else "normal"))
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("HP2 Asst: %s  mu=%.2f" % [
 		String(snapshot.get("assist_wheel", "")),
 		float(snapshot.get("surface_mu", 1.0)),
 	])
+	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("")
+	bb_lines.append("")
 	for wheel in snapshot.get("wheels", []):
-		lines.append(
+		var grounded := bool(wheel.get("grounded", false))
+		var wheel_line := (
 			"%s  %s rpm=%6.0f skid=%4.2f steer=%+5.1f eng=%5.1f brk=%5.1f" % [
 				String(wheel.get("slot", "--")),
-				"GRD" if bool(wheel.get("grounded", false)) else "AIR",
+				"GND=YES" if grounded else "GND=NO ",
 				float(wheel.get("rpm", 0.0)),
 				float(wheel.get("skid", 0.0)),
 				float(wheel.get("steering_deg", 0.0)),
@@ -297,7 +316,27 @@ func _update_telemetry() -> void:
 				float(wheel.get("brake_force", 0.0)),
 			]
 		)
+		lines.append(wheel_line)
+		bb_lines.append(_bbcode_wheel_grounded_line(wheel, grounded))
 	telemetry.text = "\n".join(lines)
+	telemetry.text = "\n".join(bb_lines)
+
+
+func _bbcode_wheel_grounded_line(wheel: Dictionary, grounded: bool) -> String:
+	var status := "[color=#31d158]YES[/color]" if grounded else "[color=#ff453a]NO[/color] "
+	return "%s  GND=%s rpm=%6.0f skid=%4.2f steer=%+5.1f eng=%5.1f brk=%5.1f" % [
+		_bbcode_escape(String(wheel.get("slot", "--"))),
+		status,
+		float(wheel.get("rpm", 0.0)),
+		float(wheel.get("skid", 0.0)),
+		float(wheel.get("steering_deg", 0.0)),
+		float(wheel.get("engine_force", 0.0)),
+		float(wheel.get("brake_force", 0.0)),
+	]
+
+
+func _bbcode_escape(value: String) -> String:
+	return value.replace("[", "[lb]")
 
 
 func _update_speedometer(snapshot: Dictionary) -> void:

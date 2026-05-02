@@ -1,18 +1,94 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene format=3 uid="uid://di06y7vyxe1d0"]
 
-[ext_resource type="Script" path="res://gameplay/vehicles/hp2_controller/physics_controller.gd" id="1"]
-[ext_resource type="Script" path="res://gameplay/vehicles/hp2_controller/telemetry_exporter.gd" id="2"]
+[ext_resource type="Script" uid="uid://cjd6x3xsyfsxp" path="res://gameplay/vehicles/hp2_controller/physics_controller.gd" id="1"]
+[ext_resource type="Script" uid="uid://cjk8hxb055qei" path="res://gameplay/vehicles/hp2_controller/telemetry_exporter.gd" id="2"]
 
 [sub_resource type="BoxShape3D" id="1"]
 size = Vector3(1.85, 0.7, 4.35)
 
-[node name="HP2Car" type="RigidBody3D"]
+[node name="HP2Car" type="RigidBody3D" unique_id=1575149025]
+gravity_scale = 0.0
+custom_integrator = true
+continuous_cd = true
+contact_monitor = true
+max_contacts_reported = 8
+can_sleep = false
 script = ExtResource("1")
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=1218565921]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.45, 0)
 shape = SubResource("1")
 
-[node name="VisualRoot" type="Node3D" parent="."]
+[node name="VisualRoot" type="Node3D" parent="." unique_id=268462300]
 
-[node name="TelemetryExporter" type="Node" parent="."]
+[node name="CarVisual" type="Node3D" parent="VisualRoot"]
+
+[node name="Body" type="Node3D" parent="VisualRoot/CarVisual"]
+
+[node name="WheelPivots" type="Node3D" parent="VisualRoot/CarVisual"]
+
+[node name="FL" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, -0.72)
+
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL"]
+
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension"]
+
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension/Steer"]
+
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension/Steer/Roll"]
+
+[node name="FR" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, 0.72)
+
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR"]
+
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension"]
+
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension/Steer"]
+
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension/Steer/Roll"]
+
+[node name="RL" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, -0.72)
+
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL"]
+
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension"]
+
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension/Steer"]
+
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension/Steer/Roll"]
+
+[node name="RR" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, 0.72)
+
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR"]
+
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension"]
+
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension/Steer"]
+
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension/Steer/Roll"]
+
+[node name="Dummies" type="Node3D" parent="VisualRoot/CarVisual"]
+
+[node name="FL_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, -0.72)
+
+[node name="FR_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, 0.72)
+
+[node name="RL_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, -0.72)
+
+[node name="RR_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, 0.72)
+
+[node name="BODY_CENTER" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+
+[node name="DebugLines" type="MeshInstance3D" parent="." unique_id=1160913193]
+cast_shadow = 0
+
+[node name="TelemetryExporter" type="Node" parent="." unique_id=1019412686]
 script = ExtResource("2")

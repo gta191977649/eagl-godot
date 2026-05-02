@@ -35,6 +35,7 @@ var normal_ps2 = Vector3(0.0, 0.0, 1.0)
 var material_id = -1
 var suspension_distance = 0.0
 var center_offset = 0.0
+var raw_length = 0.0
 var overtravel = 0.0
 var reference_length = 0.0
 var current_length = 0.0
@@ -45,12 +46,22 @@ var over_limit = 0.0
 var compression = 0.0
 var prev_compression = 0.0
 var compression_velocity = 0.0
+var spring_force = 0.0
+var damper_force = 0.0
 var suspension_force = 0.0
 var grounded = false
 
 var forward_speed = 0.0
 var lateral_speed = 0.0
 var angular_speed = 0.0
+var normal_load = 0.0
+var drive_force = 0.0
+var brake_force = 0.0
+var force_long = 0.0
+var force_lat = 0.0
+var slip_long = 0.0
+var slip_lat = 0.0
+var grip_utilization = 0.0
 var load_ratio = 0.0
 
 
@@ -63,6 +74,7 @@ func reset_runtime() -> void:
 	material_id = -1
 	suspension_distance = 0.0
 	center_offset = 0.0
+	raw_length = 0.0
 	overtravel = 0.0
 	current_length = 0.0
 	previous_length = 0.0
@@ -72,11 +84,21 @@ func reset_runtime() -> void:
 	compression = 0.0
 	prev_compression = 0.0
 	compression_velocity = 0.0
+	spring_force = 0.0
+	damper_force = 0.0
 	suspension_force = 0.0
 	grounded = false
 	forward_speed = 0.0
 	lateral_speed = 0.0
 	angular_speed = 0.0
+	normal_load = 0.0
+	drive_force = 0.0
+	brake_force = 0.0
+	force_long = 0.0
+	force_lat = 0.0
+	slip_long = 0.0
+	slip_lat = 0.0
+	grip_utilization = 0.0
 	load_ratio = 0.0
 
 

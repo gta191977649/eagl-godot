@@ -7,6 +7,38 @@
 
 ---
 
+## 2026-05-03 Full Suspension Implementation Update
+
+`gameplay/vehicles/hp2_controller/physics_controller.gd` no longer uses the frozen planar body as the runtime authority. `HP2PhysicsController` now runs as a custom-integrated `RigidBody3D`: gravity, HP2 line-plane suspension, tire forces, drag, drivetrain torque, and grounded chassis damping are applied as impulses in `_integrate_forces()`.
+
+Ghidra alignment used for this pass:
+
+| Function | Confirmed behavior | Godot implementation |
+|----------|--------------------|----------------------|
+| `FUN_00152070` | Active road polygon query; point-in-polygon test; plane height/material/normal return. | `RoadSurfaceSampler.sample_surface()` is used as the suspension surface source. |
+| `FUN_001209f8` | Rejects unsupported candidate points; requires surface hit and rejects large height/lateral misses. | Suspension rejects missing/invalid samples and uses `has_driveable_surface()` when filtering wheel contact. |
+| `FUN_001375f0` | Splits supported load by GLOBALB wheel X positions and physics origin offset. | `front_weight_bias` and per-wheel preload are loaded from `CarConfig.build_wheel_states()`, with a mass/bias fallback for default scenes. |
+| `FUN_001a5f88` | Stores per-wheel preload/load and updates wheel-relative offset state. | `HP2Wheel.preload_force`, force components, wheel center, contact point, and visual offset are updated per wheel. |
+| `FUN_00120ef8` | Vehicle path samples multiple support/contact points against the road query. | Current implementation uses the four GLOBALB wheel hardpoints as the first support set; extra footprint samples are still a future fidelity pass. |
+
+Important implementation note: GLOBALB spring, damper, anti-roll, and bump-stop values are kept in HP2 form but scaled by `SUSPENSION_PARAM_FORCE_SCALE` before applying Godot meter/Newton impulses. Preload is not scaled because it already represents the wheel load split derived from the HP2 handling row.
+
+Validation probes after this change:
+
+- Headless `CarDebug.tscn` opens and loads the Corvette visual/config without script errors.
+- Default flat-plane probe: 4 grounded wheels, total suspension force near vehicle weight.
+- GLOBALB Corvette static probe: 4 grounded wheels, total suspension force near `mass * 9.81`.
+- GLOBALB Corvette throttle probe with manual input: accelerates from rest with all 4 wheels grounded.
+- `rg "VehicleBody3D|VehicleWheel3D" gameplay/vehicles/hp2_controller eagl/debug` returns no matches.
+
+Remaining fidelity gaps:
+
+- `FUN_00120ef8` appears to use additional support-grid/contact samples beyond the four wheel hardpoints. The current Godot controller should add those as chassis support probes if bridge/crest behavior still differs from PS2.
+- The grounded attitude spring is an explicit stabilizer for Godot 6DOF integration. It approximates HP2's multi-point support behavior but should be tuned against track replay/benchmark data.
+- The previous planar benchmark tolerances are no longer directly comparable because body heave, pitch, roll, and tire impulses now affect motion.
+
+---
+
 ## 1. Benchmark Scorecard
 
 Results from `benchmark_summary.csv` measured against the Python reference model.
