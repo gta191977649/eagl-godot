@@ -11,10 +11,12 @@ var _pending_render_route_apply := false
 var _pending_render_drive_area_apply := false
 
 @onready var _debug_label: Label = $DebugInfoLabel
+@onready var _speedometer: Control = $Speedometer
 
 
 func _ready() -> void:
 	set_debug_info("", "")
+	set_vehicle_telemetry({})
 
 
 func _process(_delta: float) -> void:
@@ -34,6 +36,15 @@ func set_debug_info(track_name: String, camera_mode_name: String) -> void:
 		track_name,
 		camera_mode_name,
 	]
+
+
+func set_vehicle_telemetry(snapshot: Dictionary, redline_rpm: float = 0.0) -> void:
+	if _speedometer == null or not _speedometer.has_method("set_values"):
+		return
+	var speed := float(snapshot.get("speed_kmh", snapshot.get("speed_kph", 0.0)))
+	var engine_rpm := float(snapshot.get("rpm", 0.0))
+	var gear := int(snapshot.get("gear", 1))
+	_speedometer.call("set_values", speed, engine_rpm, gear, redline_rpm)
 
 
 func _draw_imgui() -> void:

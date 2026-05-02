@@ -1,7 +1,8 @@
-[gd_scene load_steps=8 format=3 uid="uid://ccsn403ygawdo"]
+[gd_scene load_steps=9 format=3 uid="uid://ccsn403ygawdo"]
 
 [ext_resource type="Script" uid="uid://bp3rlrj7y2s3l" path="res://eagl/debug/car_debug.gd" id="1"]
 [ext_resource type="PackedScene" path="res://gameplay/vehicles/hp2_controller/hp2_car.tscn" id="2"]
+[ext_resource type="Script" path="res://gameplay/debug/debug_speedometer.gd" id="3_w642t"]
 
 [sub_resource type="Environment" id="1"]
 background_mode = 2
@@ -52,6 +53,21 @@ current = true
 fov = 70.0
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=1810195261]
+
+[node name="Speedometer" type="Control" parent="HUD"]
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -276.0
+offset_top = -252.0
+offset_right = -20.0
+offset_bottom = -20.0
+grow_horizontal = 0
+grow_vertical = 0
+mouse_filter = 2
+script = ExtResource("3_w642t")
 
 [node name="TelemetryPanel" type="PanelContainer" parent="HUD" unique_id=450501903]
 offset_left = 16.0

@@ -183,7 +183,7 @@ TRACKB31 validation after the primary `0x34132` filter:
 
 Remaining gap:
 
-The implementation still does not fully reproduce `DrivingChoice::IsDriveable()`. The correct model is a drive-target collision query:
+The implementation still does not fully reproduce the AI `DrivingChoice::IsDriveable()` / DriveTarget path. That path appears to be a drive-target collision query:
 
 1. Build the `DriveTarget` / OBB query volume.
 2. Query the collision world against track polygon and dynamic collision bodies.
@@ -200,3 +200,42 @@ Current DriveTarget query reconstruction:
 5. `0x00245b00` and `0x00245ba0` call a virtual function at object-vtable `+0x2c` with type/key `0x2bebe0`, the query buffer, and size `0x114e0`. This is the current best anchor for the missing OBB/broadphase-body construction.
 6. The wrappers then call a collision-world virtual at vtable `+0xb4` with a mode id (`1`, `2`, `3`, `5`, or `7`) and a callback.
 7. The callback body is effectively `sw zero, 8(a0); jr ra`, so any accepted collision hit makes the wrapper return false/not-driveable.
+
+## Player Car DriveArea Detection
+
+For player car movement, do not use the AI DriveTarget / OBB path above as the primary DriveArea rule. The current Ghidra evidence points to point/surface queries against active track collision polygons:
+
+- `0x00152070` is the active track-polygon surface query. It tests X/Y inside decoded `0x34132` polygons, computes height from the polygon plane, returns material id from decoded polygon `+0x0b`, returns the polygon normal from decoded polygon `+0x70`, and clears the caller hit flag when no polygon is found.
+- `0x00151d30` gathers nearby decoded polygons and groups them by flags. The primary player-drivable group is `(flags & 0x02) == 0 && (flags & 0x08) == 0`, equivalent to the Godot filter `(flags & 0x0a) == 0`.
+- `0x00120ef8` calls `0x00152070` repeatedly from the vehicle/player physics path, including multiple car/contact sample points and grid/support samples.
+- `0x001209f8` rejects candidate player/vehicle points when `0x00152070` reports no surface hit. It also applies a height tolerance of about `4.0` and a lateral projection threshold around `1.5`.
+- These player-side queries invalidate support/contact points and generated road/ground samples. They are not evidence for a horizontal hard wall, teleport clamp, or pinball-style velocity reflection at the DriveArea boundary.
+- `0x001ebad8` is another cached segment/area lookup used by controller-style movement. It returns true on segment hit and can output height/material, but it is separate from the AI DriveTarget OBB wrapper.
+
+Current Godot player DriveArea behavior:
+
+- `RoadSurfaceSampler.build_from_track_asset()` builds from primary decoded `0x34132` polygons first, using `(flags & 0x0a) == 0`.
+- `RoadSurfaceSampler.sample_surface()` is the local equivalent of the player-side `0x00152070` surface hit query. It now returns the surface **closest to the query Z** rather than the highest, matching the PS2 behavior where the vehicle's current height disambiguates between road levels.
+- `RoadSurfaceSampler.has_driveable_surface()` adds a 4.0-unit height tolerance check (mirroring `FUN_001209f8`) so that bridge decks or tunnel floors more than 4 m from the query height are rejected. This prevents a bridge polygon above a road from being treated as driveable while the car is at road level.
+- `EAGLSceneBuilder` stores the built sampler on `TrackRoot` metadata as `eagl_drive_area_sampler`.
+- `scene/Gamelevel/gamelevel.gd` binds that sampler to the player car after track load.
+- `EAGLCar` does not use a horizontal hard DriveArea clamp. Each wheel samples the primary `0x34132` DriveArea under its current position; if that wheel has no DriveArea surface, engine force is removed for that wheel and wheel friction slip is reduced. The rigid body remains free to slide, scrape, and collide with real track/scenery physics.
+- `HP2PhysicsController` follows the same direction for the planar controller: DriveArea misses scale the affected wheel normal load to zero instead of clamping the whole body position.
+
+Validation on TRACKB31:
+
+- `TrackRoot` metadata reports `eagl_drive_area_sampler_triangle_count = 19312`.
+- Parser-only sampler probe reports a valid sample at a primary polygon centroid.
+- Full scene-builder probe reports `sampler_exists=true`, `triangles=19312`, and `collision_tris=23656`.
+
+## Ghidra Decompilation Verification (2026-05-02)
+
+Decompiled against SLUS_203.62 (.text segment 0x00100000–0x002a5903).
+
+Key confirmations from fresh decompilation:
+
+- `FUN_00152070` (`0x00152070`): The active surface query matches the sampler design. Uses accumulating-minimum cross-product test on XY edges (`fVar9 ≤ 0.0` for each edge means inside), consistent with the Godot `_barycentric_xy` approach. Height computed as `plane_d − (nx·x + ny·y)`, which is an accurate approximation for near-horizontal polygons (nz ≈ 1). Caches last-hit polygon at `param_1[0xac]` for fast repeated calls; the Godot sampler skips this optimisation without loss of correctness.
+- `FUN_00151d30` (`0x00151d30`): Primary driveable group confirmed as `(flags & 0x02) == 0 && (flags & 0x08) == 0`, secondary groups stored at `param_2[0xaa]` and `param_2[0xab]`. Godot filter `(flags & 0x0a) == 0` is equivalent. ✓
+- `FUN_001514a8` (`0x001514a8`): XY decode `(s16 << 13) × (1/65536) = s16/8` confirmed ✓. Z decode `z_base + z_offset/256` with `×4` if `flags & 0x04` confirmed ✓.
+- `FUN_001209f8` (`0x001209f8`): Calls `FUN_00152070` per candidate contact point and rejects if: no surface hit; `abs(surface_height − car_center_height) > 4.0`; lateral distance from road direction > 1.5. The 4.0-unit height tolerance is now enforced in `RoadSurfaceSampler.has_driveable_surface()`.
+- `FUN_00120ef8` (`0x00120ef8`): Vehicle physics path. Calls `FUN_00152070` for car-centre height reference, calls `FUN_001209f8` to filter contact points. Uses multiple grid/support sample points around the car footprint, not just wheel positions.

@@ -13,10 +13,13 @@ const WHEEL_NODE_ANCHOR_EPSILON := 0.08
 @export var config = null
 @export var draw_debug := true
 @export var auto_fit_collision_from_visual := true
+@export var drive_area_surface_filter_enabled := true
+@export_range(0.0, 1.0) var drive_area_off_surface_friction_scale := 0.25
 
 var current_gear := 1
 var engine_rpm := 900.0
 var signed_slip_angle := 0.0
+var surface_sampler = null
 
 var _throttle_input := 0.0
 var _brake_input := 0.0
@@ -176,6 +179,10 @@ func replace_visual(visual: Node3D) -> void:
 func sync_wheel_slots_from_visual() -> void:
 	_update_visuals(0.0)
 	_update_debug_snapshot()
+
+
+func set_surface_sampler(sampler) -> void:
+	surface_sampler = sampler
 
 
 func _cache_wheel_nodes() -> void:
@@ -396,6 +403,7 @@ func _apply_wheel_forces() -> void:
 			brake_force += handbrake_total * 0.5 * _handbrake_input
 		wheel.brake = brake_force
 		_apply_dynamic_wheel_slip(slot_id, wheel, brake_alpha, rear_lock_alpha)
+		_apply_drive_area_wheel_surface_filter(slot_id, wheel)
 
 
 func _apply_drag_forces() -> void:
@@ -420,6 +428,19 @@ func _apply_yaw_assist() -> void:
 		torque += -signf(signed_slip_angle) * config.yaw_assist * slip_alpha * 0.35
 		torque += _steering_state * config.steering_yaw_assist * clampf(speed_mps / 30.0, 0.0, 1.0) * 0.25
 	apply_torque(Vector3.UP * torque)
+
+
+func _apply_drive_area_wheel_surface_filter(slot_id: String, wheel: VehicleWheel3D) -> void:
+	if not drive_area_surface_filter_enabled or surface_sampler == null:
+		return
+	var sample_ps2 := _godot_to_ps2(wheel.global_position)
+	if surface_sampler.has_driveable_surface(sample_ps2):
+		return
+	wheel.engine_force = 0.0
+	if slot_id.begins_with("R") and current_gear < 0:
+		wheel.brake = 0.0
+	var base_slip := float(_wheel_base_slip.get(slot_id, wheel.wheel_friction_slip))
+	wheel.wheel_friction_slip = minf(wheel.wheel_friction_slip, base_slip * drive_area_off_surface_friction_scale)
 
 
 func _update_steering_state(speed_mps: float, delta: float) -> void:
@@ -536,7 +557,7 @@ func _drag_force_vector(flat_velocity: Vector3) -> Vector3:
 	var direction := flat_velocity.normalized()
 	var rolling_coeff := float(_vehicle_setup.get("rolling_resistance", config.rolling_resistance))
 	var aero_coeff := float(_vehicle_setup.get("aero_drag", config.aero_drag))
-	var rolling_force: Vector3 = -direction * rolling_coeff * mass * 9.8
+	var rolling_force: Vector3 = -direction * rolling_coeff * mass * 9.81
 	var aero_force: Vector3 = -direction * aero_coeff * speed_mps * speed_mps * mass
 	return rolling_force + aero_force
 
@@ -955,3 +976,7 @@ func _fit_collision_shape_to_visual_bounds() -> void:
 		return
 	box_shape.size = (max_point - min_point).abs()
 	collision_shape.position = (min_point + max_point) * 0.5
+
+
+func _godot_to_ps2(value: Vector3) -> Vector3:
+	return Vector3(value.x, -value.z, value.y)

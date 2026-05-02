@@ -142,6 +142,7 @@ class EngineCurvePlot:
 @onready var car = $Car
 @onready var camera: Camera3D = $FollowCamera
 @onready var telemetry: Label = $HUD/TelemetryPanel/Telemetry
+@onready var speedometer: Control = $HUD/Speedometer
 @onready var car_list: ItemList = $HUD/ControlsPanel/MarginContainer/ControlsLayout/CarList
 @onready var overlay_toggle: CheckBox = $HUD/ControlsPanel/MarginContainer/ControlsLayout/ControlsRow/OverlayToggle
 @onready var airborne_toggle: CheckBox = $HUD/ControlsPanel/MarginContainer/ControlsLayout/DebugOptionsRow/AirborneToggle
@@ -245,6 +246,7 @@ func _update_telemetry() -> void:
 	var snapshot = car.get_debug_snapshot()
 	if snapshot.is_empty() and _status_message == "":
 		return
+	_update_speedometer(snapshot)
 
 	var lines: Array[String] = []
 	if _status_message != "":
@@ -296,6 +298,18 @@ func _update_telemetry() -> void:
 			]
 		)
 	telemetry.text = "\n".join(lines)
+
+
+func _update_speedometer(snapshot: Dictionary) -> void:
+	if speedometer == null or not speedometer.has_method("set_values"):
+		return
+	var speed := float(snapshot.get("speed_kmh", snapshot.get("speed_kph", 0.0)))
+	var engine_rpm := float(snapshot.get("rpm", 0.0))
+	var gear := int(snapshot.get("gear", 1))
+	var redline := 0.0
+	if car != null and car.config != null:
+		redline = float(car.config.engine_redline_rpm)
+	speedometer.call("set_values", speed, engine_rpm, gear, redline)
 
 
 func _ensure_debug_parameter_panels() -> void:

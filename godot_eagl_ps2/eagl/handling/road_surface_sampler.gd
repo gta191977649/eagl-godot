@@ -105,7 +105,7 @@ func sample_surface(sample_point_ps2: Vector3) -> Dictionary:
 	var cell_x = int(floor(sample_point_ps2.x / cell_size))
 	var cell_y = int(floor(sample_point_ps2.y / cell_size))
 	var best = {}
-	var best_height = -INF
+	var best_dist = INF
 
 	for offset_x in range(-1, 2):
 		for offset_y in range(-1, 2):
@@ -132,10 +132,11 @@ func sample_surface(sample_point_ps2: Vector3) -> Dictionary:
 					continue
 
 				var height_z = float(bary["u"]) * triangle["a"].z + float(bary["v"]) * triangle["b"].z + float(bary["w"]) * triangle["c"].z
-				if height_z <= best_height:
+				var dist = absf(height_z - sample_point_ps2.z)
+				if dist >= best_dist:
 					continue
 
-				best_height = height_z
+				best_dist = dist
 				best = {
 					"height_z": height_z,
 					"point": Vector3(sample_point_ps2.x, sample_point_ps2.y, height_z),
@@ -144,6 +145,19 @@ func sample_surface(sample_point_ps2: Vector3) -> Dictionary:
 				}
 
 	return best
+
+
+func has_driveable_surface(sample_point_ps2: Vector3) -> bool:
+	var result := sample_surface(sample_point_ps2)
+	if result.is_empty():
+		return false
+	# Mirror PS2 FUN_001209f8: reject surfaces more than 4 units from the query height.
+	# Prevents locking onto a bridge deck above or a tunnel floor below the actual road.
+	return absf(float(result.get("height_z", sample_point_ps2.z)) - sample_point_ps2.z) <= 4.0
+
+
+func triangle_count() -> int:
+	return _triangles.size()
 
 
 func _add_triangle(a: Vector3, b: Vector3, c: Vector3, material_id: int) -> void:

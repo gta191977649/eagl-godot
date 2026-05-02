@@ -5,6 +5,7 @@ const MeshBuilderScript := preload("res://eagl/rendering/mesh_builder.gd")
 const EnvironmentBuilderScript := preload("res://eagl/rendering/environment_builder.gd")
 const TrackCollisionBuilderScript := preload("res://eagl/rendering/track_collision_builder.gd")
 const TrackRouteBuilderScript := preload("res://eagl/rendering/track_route_builder.gd")
+const RoadSurfaceSamplerScript := preload("res://eagl/handling/road_surface_sampler.gd")
 const MathUtils := preload("res://eagl/utils/math_utils.gd")
 
 const SUN_LIGHT_CULL_MASK := 1 << 1
@@ -103,6 +104,7 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	var bounds := _node_bounds(root)
 	asset.bounds = bounds
 	asset.has_bounds = bounds.size != Vector3.ZERO
+	var drive_area_sampler = _build_drive_area_sampler(asset)
 	var collision_stats := collision_builder.add_track_collision(root, asset, options)
 	var route_stats := route_builder.add_track_route(root, asset, options)
 	root.set_meta("eagl_object_count", asset.objects.size())
@@ -134,6 +136,8 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_collision_shape_count", int(collision_stats.get("shape_count", 0)))
 	root.set_meta("eagl_collision_surface_count", int(collision_stats.get("surface_count", 0)))
 	root.set_meta("eagl_collision_triangle_count", int(collision_stats.get("triangle_count", 0)))
+	root.set_meta("eagl_drive_area_sampler", drive_area_sampler)
+	root.set_meta("eagl_drive_area_sampler_triangle_count", drive_area_sampler.triangle_count() if drive_area_sampler != null else 0)
 	root.set_meta("eagl_route_stats", route_stats.duplicate(true))
 	root.set_meta("eagl_route_point_count", int(route_stats.get("point_count", 0)))
 	return root
@@ -539,6 +543,14 @@ func _merge_builder_diagnostics() -> void:
 	for message in mesh_builder.warnings:
 		warnings.append(message)
 	mesh_builder.warnings.clear()
+
+
+func _build_drive_area_sampler(asset):
+	var sampler = RoadSurfaceSamplerScript.new()
+	sampler.build_from_track_asset(asset)
+	if sampler.triangle_count() <= 0:
+		return null
+	return sampler
 
 
 func _count_skip(reason: String) -> void:

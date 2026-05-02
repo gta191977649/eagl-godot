@@ -20,6 +20,8 @@ const SURFACE_TABLE := {
 }
 const GRAVITY := 9.81
 const MIN_SIDESLIP_SPEED_MS := 5.0 / 3.6
+const AUTO_SHIFT_SLIP_LIMIT := 4.0
+const AUTO_SHIFT_REDLIMIT_MARGIN_RPM := 100.0
 
 @export_group("Planar Body")
 @export var vehicle_mass_kg := 1450.0
@@ -56,6 +58,7 @@ const MIN_SIDESLIP_SPEED_MS := 5.0 / 3.6
 
 @export var config = null
 @export var draw_debug := false
+@export var drive_area_surface_filter_enabled := true
 
 var input_source = null
 var engine = HP2EngineScript.new()
@@ -73,6 +76,7 @@ var current_gear := 1
 var shift_cut_active := false
 var surface_mu := 1.0
 var airborne_debug_enabled := false
+var surface_sampler = null
 
 var _pos_x := 0.0
 var _pos_z := 0.0
@@ -113,6 +117,10 @@ func _ready() -> void:
 	_sync_state_from_transform(global_transform)
 	_apply_state_to_body()
 	_refresh_visual_bindings()
+
+
+func set_surface_sampler(sampler) -> void:
+	surface_sampler = sampler
 
 
 func _process(delta: float) -> void:
@@ -162,9 +170,10 @@ func _apply_handling_profile_params(source_config) -> void:
 	drivetrain.upshift_rpm = clampf(
 		float(source_config.shift_up_rpm),
 		float(source_config.engine_peak_rpm) * 0.75,
-		float(source_config.engine_redline_rpm) - 100.0
+		float(source_config.engine_redline_rpm) - AUTO_SHIFT_REDLIMIT_MARGIN_RPM
 	)
 	drivetrain.downshift_rpm = float(source_config.shift_down_rpm)
+	drivetrain.build_shift_tables(engine.torque_curve, engine.idle_rpm, engine.max_rpm)
 	# HP2-style speed-dependent steering: response_rate × lerp(low_scale, high_scale, (v/v_max)²)
 	steering_system.steering_response_rate = maxf(float(source_config.steering_response), 0.1)
 	steering_system.max_steer_degrees = float(source_config.steering_max_degrees) * float(source_config.steering_lock_scale)
@@ -239,6 +248,8 @@ func get_reference_params() -> Dictionary:
 		"gear_ratios": Array(drivetrain.gear_ratios),
 		"upshift_rpm": drivetrain.upshift_rpm,
 		"downshift_rpm": drivetrain.downshift_rpm,
+		"upshift_rpm_per_gear": Array(drivetrain.upshift_rpm_per_gear),
+		"downshift_rpm_per_gear": Array(drivetrain.downshift_rpm_per_gear),
 		"idle_rpm": engine.idle_rpm,
 		"peak_rpm": engine.peak_rpm,
 		"max_rpm": engine.max_rpm,
@@ -495,6 +506,7 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
 		var target := float(target_loads[slot_id]) + aero_load_per_wheel
+		target *= _drive_area_wheel_surface_scale(slot_id, _heading, _pos_x, _pos_z)
 		loads[slot_id] = wheel.update_filtered_load(target, delta)
 	var drive_torques := drivetrain.calculate_rear_wheel_torques(drive_input, float(loads["RL"]), float(loads["RR"]))
 	for slot_id in SLOT_IDS:
@@ -557,6 +569,7 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 	_heading = wrapf(_heading + _yaw_rate * delta, -PI, PI)
 	_pos_x += _vx * delta
 	_pos_z += _vz * delta
+	_update_display_height_from_drive_area()
 
 	var new_forward_speed := Vector2(_vx, _vz).dot(_forward_vector(_heading))
 	accel_long = (new_forward_speed - _last_forward_speed) / maxf(delta, 0.0001)
@@ -587,6 +600,32 @@ func _airborne_substep(delta: float, throttle: float, brake: float, steer: float
 		wheel.compute_contact_forces(0.0, 0.0)
 		wheel.update_airborne_angular_velocity(delta)
 	_apply_vertical_gravity(delta)
+
+
+func _drive_area_wheel_surface_scale(slot_id: String, heading: float, position_x: float, position_z: float) -> float:
+	if not drive_area_surface_filter_enabled or surface_sampler == null:
+		return 1.0
+	var offset := _drive_area_planar_wheel_offset(slot_id, heading)
+	var sample_ps2 := Vector3(position_x + offset.x, -position_z - offset.y, _display_y)
+	return 1.0 if surface_sampler.has_driveable_surface(sample_ps2) else 0.0
+
+
+func _drive_area_planar_wheel_offset(slot_id: String, heading: float) -> Vector2:
+	var wheel = wheels.get(slot_id, null)
+	if wheel == null:
+		return Vector2.ZERO
+	var forward := _forward_vector(heading)
+	var right := _right_vector(heading)
+	var local_pos: Vector2 = wheel.local_position
+	return right * local_pos.x + forward * local_pos.y
+
+
+func _update_display_height_from_drive_area() -> void:
+	if surface_sampler == null:
+		return
+	var surface: Dictionary = surface_sampler.sample_surface(Vector3(_pos_x, -_pos_z, _display_y))
+	if not surface.is_empty():
+		_display_y = float(surface.get("height_z", _display_y)) + ride_height
 
 
 func _rebuild_wheels() -> void:
@@ -666,16 +705,37 @@ func _wheel_lat_grip_scale(slot_id: String) -> float:
 
 
 func _update_auto_shift(delta: float) -> void:
-	drivetrain.auto_shift_timer += delta
+	drivetrain.update_shift_timers(delta)
 	if drivetrain.auto_shift_timer < drivetrain.min_shift_interval:
 		return
-	if engine.rpm > drivetrain.upshift_rpm and drivetrain.current_gear < drivetrain.gear_ratios.size() - 1:
-		drivetrain.current_gear += 1
+	var shift_rpm := minf(engine.rpm, _road_speed_engine_rpm())
+	if (
+		shift_rpm > drivetrain.upshift_rpm_for_current_gear()
+		and drivetrain.current_gear < drivetrain.gear_ratios.size() - 1
+		and _can_auto_upshift()
+		and not drivetrain.blocks_hunt_upshift(shift_rpm, engine.max_rpm)
+	):
+		drivetrain.record_auto_shift(drivetrain.current_gear, drivetrain.current_gear + 1)
 		engine.trigger_shift_cut()
-		drivetrain.auto_shift_timer = 0.0
-	elif engine.rpm < drivetrain.downshift_rpm and drivetrain.current_gear > 1 and speed_kmh < 25.0:
-		drivetrain.current_gear -= 1
-		drivetrain.auto_shift_timer = 0.0
+	elif shift_rpm < drivetrain.downshift_rpm_for_current_gear() and drivetrain.current_gear > 1:
+		drivetrain.record_auto_shift(drivetrain.current_gear, drivetrain.current_gear - 1)
+
+
+func _road_speed_engine_rpm() -> float:
+	var ratio := absf(drivetrain.effective_ratio())
+	return speed_ms / maxf(wheel_radius, 0.0001) * ratio * 60.0 / TAU
+
+
+func _can_auto_upshift() -> bool:
+	for slot_id in SLOT_IDS:
+		var wheel = wheels.get(slot_id, null)
+		if wheel == null:
+			continue
+		if float(wheel.normal_load) <= 0.001:
+			return false
+		if absf(float(wheel.grip_utilization)) >= AUTO_SHIFT_SLIP_LIMIT:
+			return false
+	return true
 
 
 func _update_derived_state() -> void:

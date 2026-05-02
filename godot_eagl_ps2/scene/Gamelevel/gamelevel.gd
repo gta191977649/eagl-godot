@@ -136,6 +136,7 @@ func _on_track_loaded(_loaded_track_id: String, track_node: Node3D, _stats: Dict
 	_load_car_visual()
 	_set_shadow_casting_recursive(track_node, false)
 	_set_shadow_casting_recursive(car, true)
+	_bind_car_drive_area_sampler(track_node)
 	_spawn_transform = _start_line_spawn_transform(track_node)
 	car.reset_runtime_state(_spawn_transform)
 	car.sync_wheel_slots_from_visual()
@@ -158,6 +159,8 @@ func _update_debug_label() -> void:
 		_debug_track_name(),
 		_debug_camera_mode_name()
 	)
+	if debug_ui.has_method("set_vehicle_telemetry"):
+		debug_ui.set_vehicle_telemetry(_debug_car_snapshot(), _debug_car_redline_rpm())
 
 
 func _debug_track_name() -> String:
@@ -171,6 +174,18 @@ func _debug_camera_mode_name() -> String:
 	if camera != null and camera.has_method("get_camera_mode_name"):
 		return String(camera.get_camera_mode_name())
 	return "UNKNOWN"
+
+
+func _debug_car_snapshot() -> Dictionary:
+	if car != null and car.has_method("get_debug_snapshot"):
+		return car.get_debug_snapshot()
+	return {}
+
+
+func _debug_car_redline_rpm() -> float:
+	if car == null or car.config == null:
+		return 0.0
+	return float(car.config.engine_redline_rpm)
 
 
 func _ensure_track_collision_enabled(track_node: Node3D) -> void:
@@ -204,6 +219,17 @@ func _ensure_track_route_enabled(track_node: Node3D) -> void:
 		push_warning("Gamelevel track loaded without route points; fall respawn will be disabled")
 		return
 	print("Gamelevel route enabled: points=%s" % route_count)
+
+
+func _bind_car_drive_area_sampler(track_node: Node3D) -> void:
+	if car == null or not car.has_method("set_surface_sampler"):
+		return
+	var sampler = track_node.get_meta("eagl_drive_area_sampler", null)
+	if sampler == null:
+		push_warning("Gamelevel track loaded without DriveArea sampler; player boundary limiting is disabled")
+		return
+	car.set_surface_sampler(sampler)
+	print("Gamelevel DriveArea sampler enabled: triangles=%s" % int(track_node.get_meta("eagl_drive_area_sampler_triangle_count", 0)))
 
 
 func _load_car_visual() -> void:
