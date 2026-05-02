@@ -17,6 +17,8 @@ const GODOT_ROLLING_RESISTANCE_SCALE := 0.08
 const GODOT_ROLLING_RESISTANCE_MIN := 0.002
 const GODOT_ROLLING_RESISTANCE_MAX := 0.01
 const GODOT_AERO_DRAG_SCALE := 1.0
+const GODOT_DAMPING_SCALE := 0.1
+const GODOT_SUSPENSION_MAX_FORCE_MULTIPLIER := 3.5
 const LOW_SPEED_TORQUE_BOOST := 1.45
 const LOW_SPEED_TORQUE_FADE_KPH := 90.0
 const ENGINE_BRAKE_GAIN := 0.035
@@ -55,6 +57,7 @@ static func build_vehicle_setup(config) -> Dictionary:
 	var resolved_mass := physics_mass_kg(config)
 	var axle_masses := _axle_supported_masses(config)
 	var driven_wheel_count := _driven_wheel_count(config)
+	var wheel_states := _wheel_states_by_slot(config)
 	var mass_ratio := resolved_mass / 1000.0
 	var hp2_idle_launch_force_total := _hp2_drive_force_total(config, 0.0, config.idle_rpm, 1)
 	var hp2_launch_force_total := _hp2_drive_force_total(config, 0.0, config.engine_peak_rpm, 1)
@@ -70,9 +73,10 @@ static func build_vehicle_setup(config) -> Dictionary:
 			break
 		var slot_id: String = SLOT_IDS[index]
 		var is_front := slot_id.begins_with("F")
-		var suspension_travel := _suspension_travel_for_axle(config, is_front)
-		var rest_length := _rest_length_for_axle(config, is_front)
-		var static_ride_height := _static_ride_height_for_axle(config, is_front)
+		var wheel_state = wheel_states.get(slot_id, null)
+		var suspension_travel := _suspension_travel_for_wheel(config, wheel_state, is_front)
+		var rest_length := _rest_length_for_wheel(config, wheel_state, is_front)
+		var static_ride_height := _static_ride_height_for_wheel(config, wheel_state, is_front)
 		var wheel_center := vehicle_space_from_ps2(config.wheel_local_positions_ps2[index])
 		wheels[slot_id] = {
 			"slot_id": slot_id,
@@ -82,10 +86,10 @@ static func build_vehicle_setup(config) -> Dictionary:
 			"wheel_rest_length": rest_length,
 			"static_ride_height": static_ride_height,
 			"suspension_travel": suspension_travel,
-			"suspension_stiffness": _spring_for_axle(config, is_front),
-			"damping_compression": _damping_compression_for_axle(config, is_front),
-			"damping_relaxation": _damping_relaxation_for_axle(config, is_front),
-			"suspension_max_force": _suspension_max_force_for_axle(axle_masses, is_front),
+			"suspension_stiffness": _spring_for_wheel(config, wheel_state, is_front),
+			"damping_compression": _damping_compression_for_wheel(config, wheel_state, is_front),
+			"damping_relaxation": _damping_relaxation_for_wheel(config, wheel_state, is_front),
+			"suspension_max_force": _suspension_max_force_for_wheel(config, wheel_state, axle_masses, is_front),
 			"wheel_friction_slip": _friction_slip_for_axle(config, is_front),
 			"wheel_roll_influence": _roll_influence_for_axle(config, is_front),
 			"base_wheel_friction_slip": _friction_slip_for_axle(config, is_front),
@@ -131,15 +135,30 @@ static func _spring_for_axle(config, is_front: bool) -> float:
 	return float(config.front_spring_coefficient if is_front else config.rear_spring_coefficient)
 
 
+static func _spring_for_wheel(config, wheel_state, is_front: bool) -> float:
+	return maxf(float(wheel_state.spring_coefficient) if wheel_state != null else _spring_for_axle(config, is_front), 0.001)
+
+
 static func _damping_compression_for_axle(config, is_front: bool) -> float:
 	var bump: float = config.front_bump_damping if is_front else config.rear_bump_damping
-	return clampf(bump * 0.06, 0.2, 0.8)
+	return clampf(bump * GODOT_DAMPING_SCALE, 0.0, 1.0)
+
+
+static func _damping_compression_for_wheel(config, wheel_state, is_front: bool) -> float:
+	var bump: float = float(wheel_state.bump_damping) if wheel_state != null else (config.front_bump_damping if is_front else config.rear_bump_damping)
+	return clampf(bump * GODOT_DAMPING_SCALE, 0.0, 1.0)
 
 
 static func _damping_relaxation_for_axle(config, is_front: bool) -> float:
 	var rebound: float = config.front_rebound_damping if is_front else config.rear_rebound_damping
 	var compression := _damping_compression_for_axle(config, is_front)
-	return clampf(maxf(rebound * 0.09, compression + 0.05), 0.3, 1.0)
+	return maxf(clampf(rebound * GODOT_DAMPING_SCALE, 0.0, 1.0), compression)
+
+
+static func _damping_relaxation_for_wheel(config, wheel_state, is_front: bool) -> float:
+	var rebound: float = float(wheel_state.rebound_damping) if wheel_state != null else (config.front_rebound_damping if is_front else config.rear_rebound_damping)
+	var compression := _damping_compression_for_wheel(config, wheel_state, is_front)
+	return maxf(clampf(rebound * GODOT_DAMPING_SCALE, 0.0, 1.0), compression)
 
 
 static func _friction_slip_for_axle(config, is_front: bool) -> float:
@@ -161,9 +180,21 @@ static func _suspension_travel_for_axle(config, is_front: bool) -> float:
 	return clampf(absf(max_compression - min_compression), SAFE_SUSPENSION_TRAVEL_MIN, SAFE_SUSPENSION_TRAVEL_MAX)
 
 
+static func _suspension_travel_for_wheel(config, wheel_state, is_front: bool) -> float:
+	if wheel_state == null:
+		return _suspension_travel_for_axle(config, is_front)
+	return clampf(absf(float(wheel_state.max_travel) - float(wheel_state.min_travel)), SAFE_SUSPENSION_TRAVEL_MIN, SAFE_SUSPENSION_TRAVEL_MAX)
+
+
 static func _rest_length_for_axle(config, is_front: bool) -> float:
 	var min_compression: float = config.front_min_compression if is_front else config.rear_min_compression
 	return clampf(absf(min_compression), SAFE_REST_LENGTH_MIN, SAFE_REST_LENGTH_MAX)
+
+
+static func _rest_length_for_wheel(config, wheel_state, is_front: bool) -> float:
+	if wheel_state == null:
+		return _rest_length_for_axle(config, is_front)
+	return clampf(absf(float(wheel_state.min_travel)), SAFE_REST_LENGTH_MIN, SAFE_REST_LENGTH_MAX)
 
 
 static func _static_ride_height_for_axle(config, is_front: bool) -> float:
@@ -175,6 +206,12 @@ static func _static_ride_height_for_axle(config, is_front: bool) -> float:
 	# At rest the spring/preload equilibrium is centered on the neutral length, so the
 	# Godot-side visual bias should stay at 0 and let the live contact solve move it.
 	return clampf(0.0, min_compression, max_compression)
+
+
+static func _static_ride_height_for_wheel(config, wheel_state, is_front: bool) -> float:
+	if wheel_state == null:
+		return _static_ride_height_for_axle(config, is_front)
+	return clampf(0.0, float(wheel_state.min_travel), float(wheel_state.max_travel))
 
 
 static func _axle_load_fraction(config, is_front: bool) -> float:
@@ -196,7 +233,31 @@ static func _axle_load_fraction(config, is_front: bool) -> float:
 
 static func _suspension_max_force_for_axle(axle_masses: Dictionary, is_front: bool) -> float:
 	var axle_mass: float = axle_masses.get("front", 0.0) if is_front else axle_masses.get("rear", 0.0)
-	return maxf((axle_mass * 9.8) * 3.5 / 2.0, 3000.0)
+	return (axle_mass * 9.8) * GODOT_SUSPENSION_MAX_FORCE_MULTIPLIER / 2.0
+
+
+static func _suspension_max_force_for_wheel(config, wheel_state, axle_masses: Dictionary, is_front: bool) -> float:
+	var godot_force := _suspension_max_force_for_axle(axle_masses, is_front)
+	if wheel_state == null:
+		return godot_force
+	var hp2_limit_force := _hp2_suspension_force_for_length(wheel_state, float(wheel_state.max_travel))
+	return maxf(godot_force, hp2_limit_force)
+
+
+static func _hp2_suspension_force_for_length(wheel_state, length: float) -> float:
+	var spring_progress := maxf(length, 0.0)
+	var spring_force := length * float(wheel_state.spring_coefficient) * (1.0 + float(wheel_state.progressive_spring_scale) * spring_progress)
+	var reference_force := float(wheel_state.bump_stop_coefficient) * (length - float(wheel_state.reference_length))
+	return maxf(float(wheel_state.preload_force) + spring_force + reference_force, 0.0)
+
+
+static func _wheel_states_by_slot(config) -> Dictionary:
+	var out := {}
+	if not config.has_method("build_wheel_states"):
+		return out
+	for wheel_state in config.build_wheel_states():
+		out[String(wheel_state.slot_id)] = wheel_state
+	return out
 
 
 static func _axle_supported_masses(config) -> Dictionary:

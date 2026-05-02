@@ -472,10 +472,15 @@ func _update_parameter_debug_ui() -> void:
 	if _engine_curve_plot != null:
 		var torque_curve: Array = []
 		var friction_curve: Array = []
-		if car.engine != null:
-			torque_curve = car.engine.torque_curve
-			friction_curve = car.engine.friction_curve
-			_engine_curve_plot.set_runtime_rpm(float(car.engine.rpm), float(car.engine.max_rpm))
+		var engine = car.get("engine")
+		if engine != null:
+			torque_curve = engine.torque_curve
+			friction_curve = engine.friction_curve
+			_engine_curve_plot.set_runtime_rpm(float(engine.rpm), float(engine.max_rpm))
+		elif car.config != null:
+			torque_curve = _profile_samples_to_curve(car.config.engine_torque_samples, car.config.idle_rpm, car.config.engine_redline_rpm)
+			friction_curve = _profile_samples_to_curve(car.config.engine_friction_samples, car.config.idle_rpm, car.config.engine_redline_rpm)
+			_engine_curve_plot.set_runtime_rpm(float(snapshot.get("rpm", car.config.idle_rpm)), float(car.config.engine_redline_rpm))
 		_engine_curve_plot.set_curves(torque_curve, friction_curve)
 	if _parameter_summary_label != null:
 		_parameter_summary_label.text = _build_parameter_summary(snapshot)
@@ -495,46 +500,63 @@ func _build_parameter_summary(snapshot: Dictionary) -> String:
 	])
 	lines.append("Mass %.0f kg  WB %.3f m  Radius %.3f m" % [
 		float(cfg.mass_kg),
-		float(car.wheelbase),
-		float(car.wheel_radius),
+		float(cfg.wheelbase_meters() if cfg.has_method("wheelbase_meters") else 0.0),
+		_average_config_wheel_radius(cfg),
 	])
 	lines.append("Gear %d  RPM %.0f  Shift %.0f/%.0f" % [
 		int(snapshot.get("gear", 1)),
 		float(snapshot.get("rpm", 0.0)),
-		float(car.drivetrain.downshift_rpm),
-		float(car.drivetrain.upshift_rpm),
+		float(cfg.shift_down_rpm),
+		float(cfg.shift_up_rpm),
 	])
 	lines.append("Final %.3f  Gears %s" % [
-		float(car.drivetrain.final_drive),
-		_format_float_array(Array(car.drivetrain.gear_ratios), "%.2f", 7),
+		float(cfg.final_drive_ratio),
+		_format_float_array(Array(cfg.forward_gears), "%.2f", 7),
 	])
 	lines.append("Grip long F/R %.2f %.2f  lat F/R %.2f %.2f" % [
-		float(car.front_wheel_grip_scale),
-		float(car.rear_wheel_grip_scale),
-		float(car.front_wheel_lat_grip_scale),
-		float(car.rear_wheel_lat_grip_scale),
+		float(cfg.front_longitudinal_grip),
+		float(cfg.rear_longitudinal_grip),
+		float(cfg.front_lateral_grip),
+		float(cfg.rear_lateral_grip),
 	])
-	lines.append("Surface %s  mu %.3f  brake %.0f  bias %.2f" % [
-		String(snapshot.get("surface_type", "")),
-		float(snapshot.get("surface_mu", 0.0)),
-		float(car.brake_torque_total),
-		float(car.brake_bias_front),
+	lines.append("VehicleBody3D suspension  brake %.0f  handbrake %.0f" % [
+		float(cfg.brake_force),
+		float(cfg.handbrake_force),
 	])
 	lines.append("Steer max %.1f deg  response %.2f  hi-scale %.2f@%.0f" % [
-		float(car.steering_system.max_steer_degrees),
-		float(car.steering_system.steering_response_rate),
-		float(car.steering_system.high_speed_steer_scale),
-		float(car.steering_system.high_speed_steer_kph),
+		float(cfg.steering_max_degrees * cfg.steering_lock_scale),
+		float(cfg.steering_response),
+		float(cfg.high_speed_steer_scale),
+		float(cfg.high_speed_steer_kph),
 	])
-	lines.append("Aero %.4f  roll %.4f  WT %.2f  CG %.2f" % [
-		float(car.aero_drag),
-		float(car.rolling_resistance),
-		float(car.weight_transfer_coeff),
-		float(car.cg_height),
+	lines.append("Aero %.4f  rolling %.4f  COM %s" % [
+		float(cfg.aero_drag),
+		float(cfg.rolling_resistance),
+		str(cfg.center_of_mass_ps2),
 	])
 	lines.append("Torque samples %s" % _format_float_array(Array(cfg.engine_torque_samples), "%.3f", 9))
 	lines.append("Friction samples %s" % _format_float_array(Array(cfg.engine_friction_samples), "%.3f", 3))
 	return "\n".join(lines)
+
+
+func _profile_samples_to_curve(samples: PackedFloat32Array, min_rpm: float, max_rpm: float) -> Array[Vector2]:
+	var out: Array[Vector2] = []
+	if samples.is_empty():
+		return out
+	var denom := maxf(float(samples.size() - 1), 1.0)
+	for index in range(samples.size()):
+		var rpm := lerpf(min_rpm, max_rpm, float(index) / denom)
+		out.append(Vector2(rpm, float(samples[index])))
+	return out
+
+
+func _average_config_wheel_radius(cfg) -> float:
+	if cfg == null or cfg.wheel_radii.is_empty():
+		return 0.0
+	var total := 0.0
+	for radius in cfg.wheel_radii:
+		total += float(radius)
+	return total / float(cfg.wheel_radii.size())
 
 
 func _format_float_array(values: Array, pattern: String, max_items: int) -> String:

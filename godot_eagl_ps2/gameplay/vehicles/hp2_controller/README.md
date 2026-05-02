@@ -57,4 +57,4 @@ Columns are comma-separated in the file.
 
 ## Scope
 
-This is a measurement system, not final gameplay handling. It intentionally ignores roll, pitch, suspension geometry, and terrain following so the benchmark output stays deterministic and easy to compare.
+This is a measurement system, not final gameplay handling. It keeps roll and pitch out of the planar body solve so the benchmark output stays deterministic, but wheel load now passes through the HP2 profile-driven suspension spring/damper/travel model.

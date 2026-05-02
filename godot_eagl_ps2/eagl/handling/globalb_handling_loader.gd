@@ -205,13 +205,15 @@ func _config_from_row(row: Dictionary, drive_type: String, globalb_path: String)
 	config.front_spring_coefficient = _row_float(globalb_row, 0x234, config.front_spring_coefficient)
 	config.front_rebound_damping = _row_float(globalb_row, 0x238, config.front_rebound_damping)
 	config.front_bump_damping = _row_float(globalb_row, 0x23c, config.front_bump_damping)
-	config.front_anti_roll_coefficient = _row_float(globalb_row, 0x240, config.front_anti_roll_coefficient)
+	config.front_bump_stop_coefficient = _row_float(globalb_row, 0x240, config.front_bump_stop_coefficient)
+	config.front_anti_roll_coefficient = config.front_bump_stop_coefficient
 
 	config.rear_progressive_spring_scale = _row_float(globalb_row, 0x250, config.rear_progressive_spring_scale)
 	config.rear_spring_coefficient = _row_float(globalb_row, 0x254, config.rear_spring_coefficient)
 	config.rear_rebound_damping = _row_float(globalb_row, 0x258, config.rear_rebound_damping)
 	config.rear_bump_damping = _row_float(globalb_row, 0x25c, config.rear_bump_damping)
-	config.rear_anti_roll_coefficient = _row_float(globalb_row, 0x260, config.rear_anti_roll_coefficient)
+	config.rear_bump_stop_coefficient = _row_float(globalb_row, 0x260, config.rear_bump_stop_coefficient)
+	config.rear_anti_roll_coefficient = config.rear_bump_stop_coefficient
 
 	config.front_drive_scale = _row_float(globalb_row, 0x278, _field_value_any(floats, ["front_drive_scale", "steering_response"], config.front_drive_scale))
 	config.rear_drive_scale = _row_float(globalb_row, 0x27C, _field_value_any(floats, ["rear_drive_scale", "steering_return"], config.rear_drive_scale))

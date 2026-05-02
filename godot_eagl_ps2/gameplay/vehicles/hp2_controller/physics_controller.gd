@@ -98,12 +98,15 @@ var _wheel_suspension_nodes: Dictionary = {}
 var _wheel_steer_nodes: Dictionary = {}
 var _wheel_spin_nodes: Dictionary = {}
 var _wheel_spin_angles: Dictionary = {}
+var _visual_heave := 0.0
+var _visual_pitch := 0.0
+var _visual_roll := 0.0
 
 
 func _ready() -> void:
 	_visual_root = get_node_or_null("VisualRoot") as Node3D
 	if _visual_root != null:
-		_visual_root.transform = Transform3D(VehicleBodyConfigAdapter.visual_anchor_basis(), Vector3.ZERO)
+		_apply_visual_body_attitude()
 	freeze = true
 	if config != null:
 		apply_config(config)
@@ -196,23 +199,23 @@ func _apply_handling_profile_params(source_config) -> void:
 	rolling_resistance = maxf(float(source_config.rolling_resistance), 0.0)
 	aero_drag = maxf(float(source_config.aero_drag) * vehicle_mass_kg, 0.0)
 	assist.sideslip_threshold_deg = float(source_config.stabilization_slip_deg)
-	# Push suspension params into wheels so the spring filter uses per-car stiffness
+	# Push profile suspension params into wheels; HP2Wheel solves load from those fields.
 	_apply_suspension_params_to_wheels(source_config)
 
 
 func _apply_suspension_params_to_wheels(source_config) -> void:
+	if not source_config.has_method("build_wheel_states"):
+		return
+	var states_by_slot := {}
+	for state in source_config.build_wheel_states():
+		states_by_slot[String(state.slot_id)] = state
 	for slot_id in SLOT_IDS:
 		var wheel = wheels.get(slot_id, null)
 		if wheel == null:
 			continue
-		if slot_id in ["FL", "FR"]:
-			wheel.spring_coefficient = maxf(float(source_config.front_spring_coefficient), 0.5)
-			wheel.bump_damping = maxf(float(source_config.front_bump_damping), 0.0)
-			wheel.rebound_damping = maxf(float(source_config.front_rebound_damping), 0.0)
-		else:
-			wheel.spring_coefficient = maxf(float(source_config.rear_spring_coefficient), 0.5)
-			wheel.bump_damping = maxf(float(source_config.rear_bump_damping), 0.0)
-			wheel.rebound_damping = maxf(float(source_config.rear_rebound_damping), 0.0)
+		var state = states_by_slot.get(slot_id, null)
+		if state != null:
+			wheel.configure_suspension_from_state(state)
 
 
 func get_reference_params() -> Dictionary:
@@ -258,6 +261,7 @@ func get_reference_params() -> Dictionary:
 		"steering_response_rate": steering_system.steering_response_rate,
 		"max_steer_degrees": steering_system.max_steer_degrees,
 		"assist_sideslip_threshold_deg": assist.sideslip_threshold_deg,
+		"suspension": _suspension_reference_params(),
 	}
 
 
@@ -279,6 +283,26 @@ func _curve_to_array(curve: Array[Vector2]) -> Array:
 	var out: Array = []
 	for point in curve:
 		out.append([point.x, point.y])
+	return out
+
+
+func _suspension_reference_params() -> Dictionary:
+	var out := {}
+	for slot_id in SLOT_IDS:
+		var wheel = wheels.get(slot_id, null)
+		if wheel == null:
+			continue
+		out[slot_id] = {
+			"preload_force": wheel.preload_force,
+			"progressive_spring_scale": wheel.progressive_spring_scale,
+			"spring_coefficient": wheel.spring_coefficient,
+			"rebound_damping": wheel.rebound_damping,
+			"bump_damping": wheel.bump_damping,
+			"bump_stop_coefficient": wheel.bump_stop_coefficient,
+			"min_travel": wheel.min_travel,
+			"max_travel": wheel.max_travel,
+			"reference_length": wheel.reference_length,
+		}
 	return out
 
 
@@ -388,6 +412,10 @@ func reset_runtime_state(target_transform: Transform3D = Transform3D.IDENTITY) -
 	assist.reset_runtime()
 	for wheel in wheels.values():
 		wheel.reset_runtime()
+	_visual_heave = 0.0
+	_visual_pitch = 0.0
+	_visual_roll = 0.0
+	_apply_visual_body_attitude()
 	_update_derived_state()
 	_apply_state_to_body()
 
@@ -400,13 +428,16 @@ func get_debug_snapshot() -> Dictionary:
 			continue
 		wheel_rows.append({
 			"slot": slot_id,
-			"grounded": true,
+			"grounded": wheel.grounded,
 			"rpm": wheel.angular_velocity * 60.0 / TAU,
 			"skid": wheel.grip_utilization,
 			"steering_deg": rad_to_deg(wheel.steer_angle),
 			"engine_force": wheel.force_long,
 			"brake_force": wheel.brake_torque,
 			"load": wheel.normal_load,
+			"suspension_force": wheel.suspension_force,
+			"suspension_length": wheel.current_length,
+			"suspension_velocity": wheel.travel_velocity,
 			"grip": wheel.grip_utilization,
 			"slip_long": wheel.slip_long,
 			"slip_lat": wheel.slip_lat,
@@ -432,6 +463,8 @@ func get_debug_snapshot() -> Dictionary:
 		"engine_force_total": wheels["RL"].force_long + wheels["RR"].force_long,
 		"engine_brake_total": wheels["FL"].brake_torque + wheels["FR"].brake_torque + wheels["RL"].brake_torque + wheels["RR"].brake_torque,
 		"yaw_rate": rad_to_deg(_yaw_rate),
+		"visual_pitch_deg": rad_to_deg(_visual_pitch),
+		"visual_roll_deg": rad_to_deg(_visual_roll),
 		"sideslip": sideslip_deg,
 		"heading": rad_to_deg(_heading),
 		"accel_long": accel_long,
@@ -501,13 +534,13 @@ func _substep(delta: float, throttle: float, brake: float, steer: float) -> void
 	var target_loads := _compute_normal_loads(accel_long, lateral_accel)
 	# Aero downforce: speed² × drag coefficient × downforce ratio, split evenly per wheel
 	var aero_load_per_wheel := aero_drag * speed_ms * speed_ms * aero_downforce_ratio * 0.25
-	# Apply spring-filtered loads and push into wheels
+	# Solve HP2-style suspension force from profile spring/damper/travel fields.
 	var loads := {}
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
 		var target := float(target_loads[slot_id]) + aero_load_per_wheel
-		target *= _drive_area_wheel_surface_scale(slot_id, _heading, _pos_x, _pos_z)
-		loads[slot_id] = wheel.update_filtered_load(target, delta)
+		var surface_scale := _drive_area_wheel_surface_scale(slot_id, _heading, _pos_x, _pos_z)
+		loads[slot_id] = wheel.update_suspension_load(target, surface_scale, delta)
 	var drive_torques := drivetrain.calculate_rear_wheel_torques(drive_input, float(loads["RL"]), float(loads["RR"]))
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
@@ -592,6 +625,9 @@ func _airborne_substep(delta: float, throttle: float, brake: float, steer: float
 	for slot_id in SLOT_IDS:
 		var wheel = wheels[slot_id]
 		wheel.normal_load = 0.0
+		wheel.grounded = false
+		wheel.suspension_force = 0.0
+		wheel.travel_velocity = 0.0
 		wheel.surface_mu = surface_mu
 		wheel.grip_scale = _wheel_grip_scale(slot_id)
 		wheel.drive_torque = float(drive_torques[slot_id])
@@ -645,6 +681,8 @@ func _rebuild_wheels() -> void:
 		wheel.wheel_radius = wheel_radius
 		wheels[slot_id] = wheel
 		_wheel_spin_angles[slot_id] = 0.0
+	if config != null:
+		_apply_suspension_params_to_wheels(config)
 
 
 func _ackermann_angles(center_angle: float) -> Dictionary:
@@ -675,8 +713,11 @@ func _ackermann_angles(center_angle: float) -> Dictionary:
 
 
 func _compute_normal_loads(longitudinal_acceleration: float, lateral_acceleration: float = 0.0) -> Dictionary:
-	var base_front := vehicle_mass_kg * GRAVITY * front_weight_bias
-	var base_rear := vehicle_mass_kg * GRAVITY * (1.0 - front_weight_bias)
+	var base_front := _wheel_preload("FL") + _wheel_preload("FR")
+	var base_rear := _wheel_preload("RL") + _wheel_preload("RR")
+	if base_front + base_rear <= 0.0:
+		base_front = vehicle_mass_kg * GRAVITY * front_weight_bias
+		base_rear = vehicle_mass_kg * GRAVITY * (1.0 - front_weight_bias)
 	var avg_track := (track_front + track_rear) * 0.5
 	var long_transfer := vehicle_mass_kg * longitudinal_acceleration * cg_height / maxf(wheelbase, 0.0001) * weight_transfer_coeff
 	var lat_transfer := vehicle_mass_kg * lateral_acceleration * cg_height / maxf(avg_track, 0.0001) * weight_transfer_coeff
@@ -688,6 +729,11 @@ func _compute_normal_loads(longitudinal_acceleration: float, lateral_acceleratio
 		"RL": maxf(rear  * 0.5 - lat_transfer, 0.0),
 		"RR": maxf(rear  * 0.5 + lat_transfer, 0.0),
 	}
+
+
+func _wheel_preload(slot_id: String) -> float:
+	var wheel = wheels.get(slot_id, null)
+	return float(wheel.preload_force) if wheel != null else 0.0
 
 
 func _brake_torque_for_slot(slot_id: String, brake: float) -> float:
@@ -833,10 +879,16 @@ func _refresh_visual_bindings() -> void:
 
 
 func _update_visuals(delta: float) -> void:
+	_update_visual_body_attitude()
 	for slot_id in SLOT_IDS:
 		var wheel = wheels.get(slot_id, null)
 		if wheel == null:
 			continue
+		var suspension_node := _wheel_suspension_nodes.get(slot_id, null) as Node3D
+		if suspension_node != null:
+			var suspension_position := suspension_node.position
+			suspension_position.y = wheel.center_offset - _visual_suspension_plane_offset(wheel)
+			suspension_node.position = suspension_position
 		var steer_node := _wheel_steer_nodes.get(slot_id, null) as Node3D
 		if steer_node != null:
 			var steer_rotation := steer_node.rotation
@@ -863,3 +915,45 @@ func _visual_wheel_angular_velocity(slot_id: String, wheel) -> float:
 			var lock_alpha := maxf(brake_lock * 0.92, hard_lock)
 			visual_angular_velocity = lerpf(visual_angular_velocity, 0.0, lock_alpha)
 	return visual_angular_velocity
+
+
+func _update_visual_body_attitude() -> void:
+	if _visual_root == null:
+		return
+	var front_avg := _average_wheel_center_offset(["FL", "FR"])
+	var rear_avg := _average_wheel_center_offset(["RL", "RR"])
+	var left_avg := _average_wheel_center_offset(["FL", "RL"])
+	var right_avg := _average_wheel_center_offset(["FR", "RR"])
+	_visual_heave = _average_wheel_center_offset(SLOT_IDS)
+	_visual_pitch = atan2(front_avg - rear_avg, maxf(wheelbase, 0.0001))
+	_visual_roll = atan2(left_avg - right_avg, maxf((track_front + track_rear) * 0.5, 0.0001))
+	_apply_visual_body_attitude()
+
+
+func _apply_visual_body_attitude() -> void:
+	if _visual_root == null:
+		return
+	var pitch_basis := Basis(Vector3.RIGHT, _visual_pitch)
+	var roll_basis := Basis(Vector3.FORWARD, _visual_roll)
+	var attitude_basis := pitch_basis * roll_basis
+	_visual_root.transform = Transform3D(
+		attitude_basis * VehicleBodyConfigAdapter.visual_anchor_basis(),
+		Vector3(0.0, _visual_heave, 0.0)
+	)
+
+
+func _visual_suspension_plane_offset(wheel) -> float:
+	var local_pos: Vector2 = wheel.local_position
+	return _visual_heave - local_pos.y * _visual_pitch + local_pos.x * _visual_roll
+
+
+func _average_wheel_center_offset(slot_ids: Array) -> float:
+	var total := 0.0
+	var count := 0
+	for slot_id in slot_ids:
+		var wheel = wheels.get(String(slot_id), null)
+		if wheel == null:
+			continue
+		total += float(wheel.center_offset)
+		count += 1
+	return total / float(count) if count > 0 else 0.0
