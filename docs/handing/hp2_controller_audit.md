@@ -297,3 +297,22 @@ Projected outcomes after P1-A + P1-B are applied (P2 / P3 have smaller impact):
 | `braking` | ⚠️ WARN | ✅ PASS | slip dt fix |
 | `drift_init` | ❌ FAIL | ✅ PASS | yaw_damping removal restores sideslip amplitude |
 | `steady_circle` | ✅ PASS | ✅ PASS | Unaffected; monitor for oscillation regression |
+
+---
+
+## 6. Burnout Release Investigation
+
+Repro: hold throttle + steer left for about 3 seconds in `CarDebug.tscn`, then release both inputs.
+
+Ghidra check:
+
+- `FUN_00120ea8` reads the absolute per-wheel value at vehicle state offset `0x2f0 + wheel * 4`, scales it, and clamps it to `0..1`. The callers in `FUN_00120ef8` multiply this by `90.0` and compare it against per-wheel thresholds before emitting skid/burnout effects.
+- `FUN_00120ef8` does contain extra 4x4 support-grid road samples through `FUN_00152070`, with height and lateral rejection checks. In this repro all four custom wheels remain grounded, so that support-grid path is not the direct cause of the continued burnout symptom.
+- The HP2 behavior visible in the decompile is thresholded skid/effect output, not a persistent low-speed tire-force request after input release.
+
+Godot controller fix:
+
+- A longer repro showed the loop was low-speed yaw/contact energy, not drivetrain force: `eng=0`, `brk=0`, all wheels grounded, but lateral slip stayed saturated at `skid=1.00`.
+- The guessed low-speed coast/yaw damping constants were removed. They are not supported by the decompile.
+- The Godot tire path now follows the `FUN_001a4930` contact-impulse shape more closely: lateral slip request is derived from the force needed to cancel lateral contact velocity over the current substep (`lateral_velocity * normal_load / gravity / delta`) and is then clipped by the existing friction ellipse. This uses runtime load and timestep data rather than hardcoded stabilizer rates.
+- The no-input yaw stop is now budgeted from available contact friction torque: each grounded wheel contributes `surface_mu * lateral_grip * normal_load * lever_arm`, and yaw is moved toward zero only by the angular impulse this torque can physically provide for the current substep.

@@ -866,22 +866,25 @@ func _apply_physical_tire_forces(
 		var v_long := contact_velocity_ps2.dot(heading_ps2)
 		var v_lat := contact_velocity_ps2.dot(right_ps2)
 		var brake_direction := signf(v_long)
-		if brake_direction == 0.0:
-			brake_direction = signf(wheel.angular_velocity)
+		if is_zero_approx(v_long):
+			brake_direction = 0.0 if is_zero_approx(wheel.angular_velocity) else signf(wheel.angular_velocity)
 		var raw_drive: float = wheel.drive_torque / maxf(wheel.wheel_radius, 0.0001)
 		var engine_brake := 0.0
 		var drive_force_request := raw_drive
 		if raw_drive < 0.0 and not reverse_active:
-			engine_brake = -raw_drive
+			var wheel_effective_mass := maxf(float(wheel.normal_load) / GRAVITY, 0.0)
+			var stop_force := wheel_effective_mass * absf(v_long) / maxf(delta, 0.0001)
+			engine_brake = minf(-raw_drive, stop_force)
 			drive_force_request = 0.0
 		var brake_force_request: float = (wheel.brake_torque / maxf(wheel.wheel_radius, 0.0001) + engine_brake) * brake_direction
 		wheel.compute_contact_forces(
 			drive_force_request - brake_force_request - v_long * longitudinal_stiffness * longitudinal_speed_damping,
-			v_lat * lateral_stiffness
+			_lateral_contact_force_request(wheel, v_lat, delta)
 		)
 		wheel.update_angular_velocity(delta, v_long)
 		var tire_force_ps2: Vector3 = heading_ps2 * float(wheel.force_long) + right_ps2 * float(wheel.force_lat)
 		_apply_impulse_ps2(state, tire_force_ps2 * delta, wheel.contact_point_ps2)
+	_apply_coast_yaw_friction_limit(state, _godot_to_ps2(body_transform.origin), body_up_ps2, delta)
 
 
 func _apply_drag_impulse(
@@ -931,6 +934,47 @@ func _apply_grounded_chassis_damping(
 	_apply_torque_impulse_ps2(state, attitude_torque_ps2 * delta)
 	if state.angular_velocity.length() > GROUNDED_MAX_ANGULAR_SPEED:
 		state.angular_velocity = state.angular_velocity.normalized() * GROUNDED_MAX_ANGULAR_SPEED
+
+
+func _lateral_contact_force_request(wheel, lateral_velocity: float, delta: float) -> float:
+	# HP2 FUN_001a4930 solves wheel contact as an impulse (lambda) clipped by friction.
+	# This is the force equivalent of cancelling lateral contact velocity this substep.
+	var wheel_effective_mass := maxf(float(wheel.normal_load) / GRAVITY, 0.0)
+	return lateral_velocity * wheel_effective_mass / maxf(delta, 0.0001)
+
+
+func _apply_coast_yaw_friction_limit(
+	state: PhysicsDirectBodyState3D,
+	body_origin_ps2: Vector3,
+	body_up_ps2: Vector3,
+	delta: float
+) -> void:
+	if not is_zero_approx(float(_last_inputs.get("throttle", 0.0))):
+		return
+	if not is_zero_approx(float(_last_inputs.get("brake", 0.0))):
+		return
+	if not is_zero_approx(float(_last_inputs.get("steer", 0.0))):
+		return
+	var angular_velocity_ps2 := _godot_to_ps2(state.angular_velocity)
+	var yaw_rate := angular_velocity_ps2.dot(body_up_ps2)
+	if is_zero_approx(yaw_rate):
+		return
+	var yaw_axis_ps2 := body_up_ps2 * yaw_rate
+	var max_yaw_torque := 0.0
+	for wheel in wheels.values():
+		if not wheel.grounded or wheel.normal_load <= 0.0:
+			continue
+		var r_ps2: Vector3 = wheel.contact_point_ps2 - body_origin_ps2
+		var yaw_contact_velocity := yaw_axis_ps2.cross(r_ps2)
+		if yaw_contact_velocity.length_squared() <= 0.000001:
+			continue
+		var friction_direction := -yaw_contact_velocity.normalized()
+		var max_force := float(wheel.surface_mu) * float(wheel.lat_grip_scale) * float(wheel.normal_load)
+		max_yaw_torque += absf(r_ps2.cross(friction_direction * max_force).dot(body_up_ps2))
+	if max_yaw_torque <= 0.0:
+		return
+	var new_yaw_rate := move_toward(yaw_rate, 0.0, max_yaw_torque / maxf(inertia_yaw, 1.0) * delta)
+	state.angular_velocity = _ps2_to_godot(angular_velocity_ps2 - yaw_axis_ps2 + body_up_ps2 * new_yaw_rate)
 
 
 func _apply_rest_settle(state: PhysicsDirectBodyState3D, delta: float) -> void:
