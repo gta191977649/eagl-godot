@@ -306,11 +306,12 @@ func _update_telemetry() -> void:
 	for wheel in snapshot.get("wheels", []):
 		var grounded := bool(wheel.get("grounded", false))
 		var wheel_line := (
-			"%s  %s rpm=%6.0f skid=%4.2f steer=%+5.1f eng=%5.1f brk=%5.1f" % [
+			"%s  %s rpm=%6.0f skid=%4.2f lock=%s steer=%+5.1f eng=%5.1f brk=%5.1f" % [
 				String(wheel.get("slot", "--")),
 				"GND=YES" if grounded else "GND=NO ",
 				float(wheel.get("rpm", 0.0)),
 				float(wheel.get("skid", 0.0)),
+				"Y" if bool(wheel.get("slip_locked", false)) else "N",
 				float(wheel.get("steering_deg", 0.0)),
 				float(wheel.get("engine_force", 0.0)),
 				float(wheel.get("brake_force", 0.0)),
@@ -324,11 +325,12 @@ func _update_telemetry() -> void:
 
 func _bbcode_wheel_grounded_line(wheel: Dictionary, grounded: bool) -> String:
 	var status := "[color=#31d158]YES[/color]" if grounded else "[color=#ff453a]NO[/color] "
-	return "%s  GND=%s rpm=%6.0f skid=%4.2f steer=%+5.1f eng=%5.1f brk=%5.1f" % [
+	return "%s  GND=%s rpm=%6.0f skid=%4.2f lock=%s steer=%+5.1f eng=%5.1f brk=%5.1f" % [
 		_bbcode_escape(String(wheel.get("slot", "--"))),
 		status,
 		float(wheel.get("rpm", 0.0)),
 		float(wheel.get("skid", 0.0)),
+		_bbcode_escape("Y" if bool(wheel.get("slip_locked", false)) else "N"),
 		float(wheel.get("steering_deg", 0.0)),
 		float(wheel.get("engine_force", 0.0)),
 		float(wheel.get("brake_force", 0.0)),
@@ -559,11 +561,9 @@ func _build_parameter_summary(snapshot: Dictionary) -> String:
 		float(car.brake_torque_total),
 		float(car.brake_bias_front),
 	])
-	lines.append("Steer max %.1f deg  response %.2f  hi-scale %.2f@%.0f" % [
+	lines.append("Steer max %.1f deg  response %.2f" % [
 		float(car.steering_system.max_steer_degrees),
 		float(car.steering_system.steering_response_rate),
-		float(car.steering_system.high_speed_steer_scale),
-		float(car.steering_system.high_speed_steer_kph),
 	])
 	lines.append("Aero %.4f  roll %.4f  WT %.2f  CG %.2f" % [
 		float(car.aero_drag),

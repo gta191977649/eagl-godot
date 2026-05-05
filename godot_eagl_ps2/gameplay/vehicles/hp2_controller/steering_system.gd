@@ -4,23 +4,32 @@ extends RefCounted
 
 var steering_response_rate := 5.5
 var max_steer_degrees := 30.0
-var low_speed_steer_scale := 1.0
-var high_speed_steer_scale := 0.28
-var high_speed_steer_kph := 240.0
-var current_steer := 0.0
+var steer_state := 0.0
+var current_steer_input := 0.0
 
 
 func reset_runtime() -> void:
-	current_steer = 0.0
+	steer_state = 0.0
+	current_steer_input = 0.0
 
 
 func update(target_steer: float, delta: float, speed_kmh: float = 0.0) -> float:
+	var _unused_speed_kmh := speed_kmh
 	var target := clampf(target_steer, -1.0, 1.0)
-	var t := clampf(speed_kmh / maxf(high_speed_steer_kph, 1.0), 0.0, 1.0)
-	var speed_scale := lerpf(low_speed_steer_scale, high_speed_steer_scale, t * t)
-	current_steer = move_toward(current_steer, target, steering_response_rate * speed_scale * delta)
+	current_steer_input = target
+	var max_angle := deg_to_rad(max_steer_degrees)
+	var target_angle := max_angle * current_steer_input
+	if steering_response_rate <= 0.0:
+		steer_state = target_angle
+		return current_angle()
+	var angle_rate := max_angle * steering_response_rate
+	steer_state = move_toward(steer_state, target_angle, angle_rate * delta)
 	return current_angle()
 
 
 func current_angle() -> float:
-	return deg_to_rad(max_steer_degrees) * current_steer
+	return steer_state
+
+
+func current_input() -> float:
+	return current_steer_input

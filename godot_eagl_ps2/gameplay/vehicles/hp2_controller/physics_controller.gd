@@ -212,13 +212,8 @@ func _apply_handling_profile_params(source_config) -> void:
 	)
 	drivetrain.downshift_rpm = float(source_config.shift_down_rpm)
 	drivetrain.build_shift_tables(engine.torque_curve, engine.idle_rpm, engine.max_rpm)
-	# HP2-style speed-dependent steering: response_rate × lerp(low_scale, high_scale, (v/v_max)²)
-	steering_system.steering_response_rate = maxf(float(source_config.steering_response), 0.1)
+	steering_system.steering_response_rate = maxf(float(source_config.steering_response), 0.0)
 	steering_system.max_steer_degrees = float(source_config.steering_max_degrees) * float(source_config.steering_lock_scale)
-	steering_system.low_speed_steer_scale = maxf(float(source_config.low_speed_steer_scale), 0.1)
-	steering_system.high_speed_steer_scale = maxf(float(source_config.high_speed_steer_scale), 0.05)
-	steering_system.high_speed_steer_kph = maxf(float(source_config.high_speed_steer_kph), 50.0)
-	# Grip: separate longitudinal and lateral per axle (front/rear differ in HP2)
 	front_wheel_grip_scale = maxf(float(source_config.front_longitudinal_grip), 0.1)
 	rear_wheel_grip_scale = maxf(float(source_config.rear_longitudinal_grip), 0.1)
 	front_wheel_lat_grip_scale = maxf(float(source_config.front_lateral_grip), 0.1)
@@ -234,7 +229,6 @@ func _apply_handling_profile_params(source_config) -> void:
 	rolling_resistance = maxf(float(source_config.rolling_resistance), 0.0)
 	aero_drag = maxf(float(source_config.aero_drag) * vehicle_mass_kg, 0.0)
 	assist.sideslip_threshold_deg = float(source_config.stabilization_slip_deg)
-	# Push suspension params into wheels so the spring filter uses per-car stiffness
 	_apply_suspension_params_to_wheels(source_config)
 
 
@@ -615,8 +609,16 @@ func get_debug_snapshot() -> Dictionary:
 			"grip": wheel.grip_utilization,
 			"slip_long": wheel.slip_long,
 			"slip_lat": wheel.slip_lat,
+			"slip_speed_long": wheel.slip_speed_long,
+			"slip_speed_lat": wheel.slip_speed_lat,
+			"slip_speed": wheel.slip_speed,
+			"slip_angle_deg": wheel.slip_angle_deg,
+			"combined_slip_ratio": wheel.combined_slip_ratio,
+			"lambda_long": wheel.lambda_long,
+			"lambda_lat": wheel.lambda_lat,
 			"force_long": wheel.force_long,
 			"force_lat": wheel.force_lat,
+			"slip_locked": wheel.slip_locked,
 			"drive_torque": wheel.drive_torque,
 			"brake_torque": wheel.brake_torque,
 			"angular_velocity": wheel.angular_velocity,
@@ -850,6 +852,7 @@ func _apply_physical_tire_forces(
 		if wheel == null:
 			continue
 		if not wheel.grounded or wheel.normal_load <= 0.0:
+			wheel.set_contact_slip_velocity(0.0, 0.0)
 			wheel.compute_contact_forces(0.0, 0.0)
 			wheel.update_airborne_angular_velocity(delta)
 			continue
@@ -865,6 +868,7 @@ func _apply_physical_tire_forces(
 		var contact_velocity_ps2 := _godot_to_ps2(state.get_velocity_at_local_position(contact_local))
 		var v_long := contact_velocity_ps2.dot(heading_ps2)
 		var v_lat := contact_velocity_ps2.dot(right_ps2)
+		wheel.set_contact_slip_velocity(wheel.angular_velocity * wheel.wheel_radius - v_long, v_lat)
 		var brake_direction := signf(v_long)
 		if is_zero_approx(v_long):
 			brake_direction = 0.0 if is_zero_approx(wheel.angular_velocity) else signf(wheel.angular_velocity)
@@ -1148,7 +1152,9 @@ func _can_auto_upshift() -> bool:
 			continue
 		if float(wheel.normal_load) <= 0.001:
 			return false
-		if absf(float(wheel.grip_utilization)) >= AUTO_SHIFT_SLIP_LIMIT:
+		if bool(wheel.slip_locked):
+			return false
+		if float(wheel.slip_speed) >= AUTO_SHIFT_SLIP_LIMIT:
 			return false
 	return true
 

@@ -45,9 +45,17 @@ var visual_suspension_offset := 0.0
 
 var slip_long := 0.0
 var slip_lat := 0.0
+var slip_speed_long := 0.0
+var slip_speed_lat := 0.0
+var slip_speed := 0.0
+var slip_angle_deg := 0.0
+var combined_slip_ratio := 0.0
+var lambda_long := 0.0
+var lambda_lat := 0.0
 var force_long := 0.0
 var force_lat := 0.0
 var grip_utilization := 0.0
+var slip_locked := false
 
 var _filtered_load := -1.0  # negative = uninitialized, snaps on first frame
 
@@ -77,14 +85,21 @@ func reset_runtime() -> void:
 	visual_suspension_offset = 0.0
 	slip_long = 0.0
 	slip_lat = 0.0
+	slip_speed_long = 0.0
+	slip_speed_lat = 0.0
+	slip_speed = 0.0
+	slip_angle_deg = 0.0
+	combined_slip_ratio = 0.0
+	lambda_long = 0.0
+	lambda_lat = 0.0
 	force_long = 0.0
 	force_lat = 0.0
 	grip_utilization = 0.0
+	slip_locked = false
 	_filtered_load = -1.0
 
 
-# Elliptical friction model: separate longitudinal and lateral grip limits.
-# slip_long/lat are force requests in Newtons; normal_load * grip_scale sets the limit.
+# Requests are force-equivalents in Newtons; lambda_* stores the accepted contact result after grip clamp.
 func compute_contact_forces(new_slip_long: float, new_slip_lat: float) -> void:
 	slip_long = new_slip_long
 	slip_lat = new_slip_lat
@@ -98,9 +113,20 @@ func compute_contact_forces(new_slip_long: float, new_slip_lat: float) -> void:
 	var combined := sqrt(nx * nx + ny * ny)
 	var scale := minf(1.0, 1.0 / maxf(combined, 0.0001))
 
-	force_long = nx * scale * max_long
-	force_lat = -(ny * scale * max_lat)
+	lambda_long = nx * scale * max_long
+	lambda_lat = -(ny * scale * max_lat)
+	force_long = lambda_long
+	force_lat = lambda_lat
+	combined_slip_ratio = combined
 	grip_utilization = clampf(combined, 0.0, 1.0)
+	slip_locked = combined > 1.0
+
+
+func set_contact_slip_velocity(longitudinal_velocity: float, lateral_velocity: float) -> void:
+	slip_speed_long = longitudinal_velocity
+	slip_speed_lat = lateral_velocity
+	slip_speed = sqrt(longitudinal_velocity * longitudinal_velocity + lateral_velocity * lateral_velocity)
+	slip_angle_deg = rad_to_deg(atan2(lateral_velocity, maxf(absf(longitudinal_velocity), 0.0001)))
 
 
 # Spring-filtered normal load: smooths weight transfer at a rate proportional
@@ -122,8 +148,6 @@ func update_angular_velocity(delta: float, longitudinal_velocity: float) -> void
 	var target := longitudinal_velocity / maxf(wheel_radius, 0.0001)
 	if brake_torque > 0.0:
 		target = lerpf(target, 0.0, clampf(brake_torque / 2200.0, 0.0, 0.85))
-	if absf(drive_torque) > 0.0 and grip_utilization > 0.98:
-		target += drive_torque * 0.015
 	angular_velocity = lerpf(angular_velocity, target, clampf(delta * 18.0, 0.0, 1.0))
 	angular_velocity = clampf(angular_velocity, -450.0, 450.0)
 

@@ -23,10 +23,12 @@ HEADER = [
 ]
 
 SCENARIOS = {
+    "low_speed_turn_radius": [(0.35, 0.0, 0.0, 1.75), (0.18, 0.0, 1.0, 9.0)],
     "step_steer": [(0.6, 0.0, 0.0, 5.0), (0.3, 0.0, 0.5, 4.0)],
     "acceleration": [(1.0, 0.0, 0.0, 15.0)],
     "braking": [(1.0, 0.0, 0.0, 8.0), (0.0, 1.0, 0.0, 8.0)],
     "drift_init": [(0.8, 0.0, 0.0, 4.0), (1.0, 0.0, 0.7, 5.0)],
+    "drift_recovery": [(0.8, 0.0, 0.0, 4.0), (1.0, 0.0, 0.7, 3.0), (0.2, 0.0, 0.0, 4.0)],
     "steady_circle": [(0.8, 0.0, 0.0, 3.0), (0.45, 0.0, 0.4, 12.0)],
 }
 
@@ -87,7 +89,6 @@ class ReferenceCar:
         self.rolling_resistance = float(p.get("rolling_resistance", 0.035))
         self.aero_drag = float(p.get("aero_drag", 0.42))
         self.weight_transfer_coeff = float(p.get("weight_transfer_coeff", 0.64))
-        self.yaw_damping = float(p.get("yaw_damping", 95.0))
         self.steering_response_rate = float(p.get("steering_response_rate", 5.5))
         self.max_steer_degrees = float(p.get("max_steer_degrees", 30.0))
         self.rpm = self.idle_rpm
@@ -202,7 +203,7 @@ class ReferenceCar:
             total_fy -= self.vy / speed * drag
         self.vx += total_fx / self.mass * dt
         self.vy += total_fy / self.mass * dt
-        self.yaw_rate += (yaw_torque - self.yaw_damping * self.yaw_rate) / self.izz * dt
+        self.yaw_rate += yaw_torque / self.izz * dt
         self.heading = wrap_pi(self.heading + self.yaw_rate * dt)
         self.x += self.vx * dt
         self.y += self.vy * dt
@@ -283,6 +284,140 @@ def rmse(a_rows: list[dict[str, float | str]], b_rows: list[dict[str, float | st
         return 0.0
     errors = [(float(row[key]) - interp(b_rows, t, key)) ** 2 for t, row in zip(times, a_rows)]
     return math.sqrt(sum(errors) / len(errors))
+
+
+def average(rows: list[dict[str, float | str]], key: str, start_t: float | None = None, end_t: float | None = None) -> float:
+    filtered = [
+        float(row[key])
+        for row in rows
+        if (start_t is None or float(row["t"]) >= start_t) and (end_t is None or float(row["t"]) <= end_t)
+    ]
+    if not filtered:
+        return 0.0
+    return sum(filtered) / len(filtered)
+
+
+def first_crossing_time(
+    rows: list[dict[str, float | str]],
+    key: str,
+    threshold: float,
+    start_t: float = 0.0,
+    use_abs: bool = False,
+) -> float | None:
+    for row in rows:
+        t = float(row["t"])
+        if t < start_t:
+            continue
+        value = float(row[key])
+        if use_abs:
+            value = abs(value)
+        if value >= threshold:
+            return t
+    return None
+
+
+def settling_time(rows: list[dict[str, float | str]], key: str, target: float, start_t: float, tolerance_ratio: float = 0.05) -> float | None:
+    if not rows:
+        return None
+    tolerance = max(abs(target) * tolerance_ratio, 0.25)
+    for index, row in enumerate(rows):
+        t = float(row["t"])
+        if t < start_t:
+            continue
+        window = rows[index:]
+        if all(abs(float(sample[key]) - target) <= tolerance for sample in window):
+            return t
+    return None
+
+
+def peak_abs(rows: list[dict[str, float | str]], key: str, start_t: float = 0.0) -> float:
+    values = [abs(float(row[key])) for row in rows if float(row["t"]) >= start_t]
+    return max(values) if values else 0.0
+
+
+def peak_value(rows: list[dict[str, float | str]], key: str, start_t: float = 0.0) -> float:
+    values = [float(row[key]) for row in rows if float(row["t"]) >= start_t]
+    return max(values) if values else 0.0
+
+
+def grip_balance(rows: list[dict[str, float | str]], start_t: float | None = None, end_t: float | None = None) -> float:
+    front = average(rows, "grip_FL", start_t, end_t) + average(rows, "grip_FR", start_t, end_t)
+    rear = average(rows, "grip_RL", start_t, end_t) + average(rows, "grip_RR", start_t, end_t)
+    return rear * 0.5 - front * 0.5
+
+
+def rows_after(rows: list[dict[str, float | str]], start_t: float) -> list[dict[str, float | str]]:
+    return [row for row in rows if float(row["t"]) >= start_t]
+
+
+def turn_radius_metric(rows: list[dict[str, float | str]], start_t: float = 3.5) -> float:
+    radii: list[float] = []
+    for row in rows:
+        t = float(row["t"])
+        if t < start_t:
+            continue
+        speed = float(row["speed_ms"])
+        yaw_rate_deg = abs(float(row["yaw_rate"]))
+        if speed < 1.0 or yaw_rate_deg < 1.0:
+            continue
+        yaw_rate_rad = math.radians(yaw_rate_deg)
+        radii.append(speed / max(yaw_rate_rad, 1e-6))
+    return sum(radii) / len(radii) if radii else 0.0
+
+
+def response_metrics(rows: list[dict[str, float | str]], onset_t: float) -> dict[str, float]:
+    steady_yaw = average(rows, "yaw_rate", onset_t + 2.0, None)
+    peak_yaw = peak_value(rows, "yaw_rate", onset_t)
+    low = abs(steady_yaw) * 0.1
+    high = abs(steady_yaw) * 0.9
+    rise_start = first_crossing_time(rows, "yaw_rate", low, onset_t, use_abs=True)
+    rise_end = first_crossing_time(rows, "yaw_rate", high, onset_t, use_abs=True)
+    settle = settling_time(rows, "yaw_rate", steady_yaw, onset_t)
+    overshoot = 0.0
+    if abs(steady_yaw) > 1e-6:
+        overshoot = (peak_yaw - steady_yaw) / abs(steady_yaw) * 100.0
+    return {
+        "rise_time_10_90": 0.0 if rise_start is None or rise_end is None else rise_end - rise_start,
+        "peak_yaw_rate": peak_yaw,
+        "steady_yaw_rate": steady_yaw,
+        "overshoot_pct": overshoot,
+        "settling_time": 0.0 if settle is None else settle - onset_t,
+        "peak_sideslip": peak_abs(rows, "sideslip", onset_t),
+    }
+
+
+def scenario_metrics(name: str, rows: list[dict[str, float | str]]) -> dict[str, float]:
+    if name == "step_steer":
+        return response_metrics(rows, 5.0)
+    if name == "steady_circle":
+        return {
+            "steady_yaw_rate": average(rows, "yaw_rate", 8.0, None),
+            "steady_sideslip": average(rows, "sideslip", 8.0, None),
+            "rear_front_grip_balance": grip_balance(rows, 8.0, None),
+        }
+    if name == "drift_init":
+        onset = first_crossing_time(rows, "sideslip", 15.0, 4.0, use_abs=True)
+        return {
+            "drift_onset_time": 0.0 if onset is None else onset - 4.0,
+            "peak_sideslip": peak_abs(rows, "sideslip", 4.0),
+            "rear_front_grip_balance": grip_balance(rows, 4.0, None),
+        }
+    if name == "drift_recovery":
+        recovery_time = None
+        for row in rows_after(rows, 7.0):
+            if abs(float(row["sideslip"])) <= 5.0:
+                recovery_time = float(row["t"]) - 7.0
+                break
+        return {
+            "recovery_time_to_5deg": 0.0 if recovery_time is None else recovery_time,
+            "peak_sideslip": peak_abs(rows, "sideslip", 4.0),
+        }
+    if name == "low_speed_turn_radius":
+        return {
+            "turn_radius_m": turn_radius_metric(rows),
+            "steady_speed_kmh": average(rows, "speed_kmh", 4.0, None),
+        }
+    return {}
 
 
 def path_from_env() -> Path:
@@ -368,9 +503,13 @@ def main() -> None:
             "reference_max_speed": max(float(row["speed_kmh"]) for row in reference_rows),
             "godot_peak_abs_sideslip": max(abs(float(row["sideslip"])) for row in godot_rows),
             "reference_peak_abs_sideslip": max(abs(float(row["sideslip"])) for row in reference_rows),
-        })
+        } | scenario_metrics(name, godot_rows))
     with (results / "benchmark_summary.csv").open("w", newline="") as handle:
-        fieldnames = list(summary[0].keys())
+        fieldnames: list[str] = []
+        for row in summary:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(summary)

@@ -30,10 +30,12 @@ func _ready() -> void:
 func run_all_tests() -> Array[String]:
 	_ensure_car()
 	exported_files.clear()
+	await _run("low_speed_turn_radius", _phases_low_speed_turn_radius())
 	await _run("step_steer", _phases_step_steer())
 	await _run("acceleration", _phases_acceleration())
 	await _run("braking", _phases_braking())
 	await _run("drift_init", _phases_drift_init())
+	await _run("drift_recovery", _phases_drift_recovery())
 	await _run("steady_circle", _phases_steady_circle())
 	if run_surface_validation:
 		await _run_surface_validation("asphalt")
@@ -211,8 +213,23 @@ func _phases_drift_init() -> Array[Dictionary]:
 	]
 
 
+func _phases_drift_recovery() -> Array[Dictionary]:
+	return [
+		{"throttle": 0.8, "brake": 0.0, "steer": 0.0, "duration": 4.0},
+		{"throttle": 1.0, "brake": 0.0, "steer": 0.7, "duration": 3.0},
+		{"throttle": 0.2, "brake": 0.0, "steer": 0.0, "duration": 4.0},
+	]
+
+
 func _phases_steady_circle() -> Array[Dictionary]:
 	return [
 		{"throttle": 0.8, "brake": 0.0, "steer": 0.0, "duration": 3.0},
 		{"throttle": 0.45, "brake": 0.0, "steer": 0.4, "duration": 12.0},
+	]
+
+
+func _phases_low_speed_turn_radius() -> Array[Dictionary]:
+	return [
+		{"throttle": 0.35, "brake": 0.0, "steer": 0.0, "duration": 1.75},
+		{"throttle": 0.18, "brake": 0.0, "steer": 1.0, "duration": 9.0},
 	]
