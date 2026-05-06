@@ -1,6 +1,6 @@
-[gd_scene format=3 uid="uid://di06y7vyxe1d0"]
+[gd_scene format=3 uid="uid://dqtvs4j1abco1"]
 
-[ext_resource type="Script" uid="uid://cjd6x3xsyfsxp" path="res://gameplay/vehicles/hp2_controller/physics_controller.gd" id="1"]
+[ext_resource type="Script" path="res://gameplay/vehicles/hp2_controller/physics_controller.gd" id="1"]
 [ext_resource type="Script" uid="uid://cjk8hxb055qei" path="res://gameplay/vehicles/hp2_controller/telemetry_exporter.gd" id="2"]
 
 [sub_resource type="BoxShape3D" id="1"]
@@ -8,11 +8,11 @@ size = Vector3(1.85, 0.7, 4.35)
 
 [node name="HP2Car" type="RigidBody3D" unique_id=1575149025]
 gravity_scale = 0.0
+can_sleep = false
 custom_integrator = true
 continuous_cd = true
 contact_monitor = true
 max_contacts_reported = 8
-can_sleep = false
 script = ExtResource("1")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=1218565921]
@@ -21,71 +21,71 @@ shape = SubResource("1")
 
 [node name="VisualRoot" type="Node3D" parent="." unique_id=268462300]
 
-[node name="CarVisual" type="Node3D" parent="VisualRoot"]
+[node name="CarVisual" type="Node3D" parent="VisualRoot" unique_id=1176526]
 
-[node name="Body" type="Node3D" parent="VisualRoot/CarVisual"]
+[node name="Body" type="Node3D" parent="VisualRoot/CarVisual" unique_id=1402043337]
 
-[node name="WheelPivots" type="Node3D" parent="VisualRoot/CarVisual"]
+[node name="WheelPivots" type="Node3D" parent="VisualRoot/CarVisual" unique_id=586708165]
 
-[node name="FL" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+[node name="FL" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots" unique_id=638486851]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, -0.72)
 
-[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL"]
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL" unique_id=990222075]
 
-[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension"]
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension" unique_id=741650165]
 
-[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension/Steer"]
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension/Steer" unique_id=178578187]
 
-[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension/Steer/Roll"]
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FL/Suspension/Steer/Roll" unique_id=1719690928]
 
-[node name="FR" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+[node name="FR" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots" unique_id=1818421894]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, 0.72)
 
-[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR"]
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR" unique_id=909851285]
 
-[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension"]
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension" unique_id=1353548609]
 
-[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension/Steer"]
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension/Steer" unique_id=919249514]
 
-[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension/Steer/Roll"]
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/FR/Suspension/Steer/Roll" unique_id=829924840]
 
-[node name="RL" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+[node name="RL" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots" unique_id=1488765180]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, -0.72)
 
-[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL"]
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL" unique_id=1985397220]
 
-[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension"]
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension" unique_id=820043255]
 
-[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension/Steer"]
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension/Steer" unique_id=611148926]
 
-[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension/Steer/Roll"]
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RL/Suspension/Steer/Roll" unique_id=1599998075]
 
-[node name="RR" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots"]
+[node name="RR" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots" unique_id=591476962]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, 0.72)
 
-[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR"]
+[node name="Suspension" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR" unique_id=1353907944]
 
-[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension"]
+[node name="Steer" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension" unique_id=1642233472]
 
-[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension/Steer"]
+[node name="Roll" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension/Steer" unique_id=12305303]
 
-[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension/Steer/Roll"]
+[node name="Spin" type="Node3D" parent="VisualRoot/CarVisual/WheelPivots/RR/Suspension/Steer/Roll" unique_id=1414890728]
 
-[node name="Dummies" type="Node3D" parent="VisualRoot/CarVisual"]
+[node name="Dummies" type="Node3D" parent="VisualRoot/CarVisual" unique_id=1210481405]
 
-[node name="FL_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+[node name="FL_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies" unique_id=351137268]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, -0.72)
 
-[node name="FR_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+[node name="FR_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies" unique_id=2120696502]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0.2, 0.72)
 
-[node name="RL_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+[node name="RL_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies" unique_id=304952561]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, -0.72)
 
-[node name="RR_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+[node name="RR_PIVOT" type="Node3D" parent="VisualRoot/CarVisual/Dummies" unique_id=806921145]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.36, 0.2, 0.72)
 
-[node name="BODY_CENTER" type="Node3D" parent="VisualRoot/CarVisual/Dummies"]
+[node name="BODY_CENTER" type="Node3D" parent="VisualRoot/CarVisual/Dummies" unique_id=1891392714]
 
 [node name="DebugLines" type="MeshInstance3D" parent="." unique_id=1160913193]
 cast_shadow = 0
