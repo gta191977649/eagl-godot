@@ -1,0 +1,74 @@
+[gd_scene format=3 uid="uid://d2xf4wuh2u4t6"]
+
+[ext_resource type="PackedScene" uid="uid://c3ixqkc6k13yi" path="res://addons/gevp/scenes/vehicle_controller.tscn" id="1_lup1j"]
+[ext_resource type="PackedScene" uid="uid://fo6kt54q87tf" path="res://addons/gevp/scenes/arcade_car.tscn" id="2_oiv4q"]
+[ext_resource type="PackedScene" uid="uid://b2hlchrj4h2b7" path="res://addons/gevp/scenes/engine_sound.tscn" id="4_r1tsm"]
+[ext_resource type="Script" uid="uid://dxnabmi22xmhe" path="res://addons/gevp/scripts/gui.gd" id="5_haswc"]
+[ext_resource type="PackedScene" uid="uid://dxnvsoi1pvfeu" path="res://addons/gevp/scenes/track.tscn" id="6_3l0qk"]
+[ext_resource type="Script" uid="uid://p7r1v031jiv3" path="res://addons/gevp/scripts/camera.gd" id="6_vitqy"]
+[ext_resource type="Script" uid="uid://bxvay8l14bkoe" path="res://addons/gevp/scripts/debug.gd" id="7_vstgd"]
+[ext_resource type="Script" uid="uid://h1aqo5uvmmxv" path="res://addons/gevp/scripts/debug_ui.gd" id="8_1up8y"]
+
+[node name="ArcadeDemo" type="Node3D" unique_id=2075128491]
+
+[node name="VehicleController" parent="." unique_id=1864353133 node_paths=PackedStringArray("vehicle_node") instance=ExtResource("1_lup1j")]
+vehicle_node = NodePath("VehicleRigidBody")
+
+[node name="VehicleRigidBody" parent="VehicleController" unique_id=1775507233 instance=ExtResource("2_oiv4q")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.926611, 0)
+center_of_mass_mode = 1
+linear_damp_mode = 1
+angular_damp_mode = 1
+
+[node name="EngineSound" parent="VehicleController/VehicleRigidBody" unique_id=1781357451 node_paths=PackedStringArray("vehicle") instance=ExtResource("4_r1tsm")]
+max_db = -24.0
+vehicle = NodePath("..")
+
+[node name="GUI" type="Control" parent="." unique_id=1049565858 node_paths=PackedStringArray("vehicle")]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("5_haswc")
+vehicle = NodePath("../VehicleController/VehicleRigidBody")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="GUI" unique_id=1269299060]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Speed" type="Label" parent="GUI/VBoxContainer" unique_id=234317026]
+layout_mode = 2
+
+[node name="RPM" type="Label" parent="GUI/VBoxContainer" unique_id=1805762661]
+layout_mode = 2
+
+[node name="Gear" type="Label" parent="GUI/VBoxContainer" unique_id=494521271]
+layout_mode = 2
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=895017536 node_paths=PackedStringArray("follow_this")]
+transform = Transform3D(1, 0, 0, 0, 0.989776, 0.142629, 0, -0.142629, 0.989776, 4.05282, 1.58316, 5.80061)
+script = ExtResource("6_vitqy")
+follow_distance = 3
+follow_this = NodePath("../VehicleController/VehicleRigidBody")
+
+[node name="Demo" parent="." unique_id=132822321 instance=ExtResource("6_3l0qk")]
+
+[node name="Debug" type="Node" parent="." unique_id=2053563510 node_paths=PackedStringArray("vehicle")]
+script = ExtResource("7_vstgd")
+vehicle = NodePath("../VehicleController/VehicleRigidBody")
+
+[node name="DebugUI" type="Control" parent="Debug" unique_id=1937929659]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("8_1up8y")
+metadata/_edit_use_anchors_ = true
