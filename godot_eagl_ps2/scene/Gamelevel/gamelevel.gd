@@ -48,7 +48,7 @@ const DEFAULT_PLATFORM := "EAGL_HOTPUSUIT2_PS2"
 @export var camera_far_bounds_scale := 2.5
 
 @onready var track: EAGLTrack = $Track
-@onready var car: EAGLCar = $Car
+@onready var car = $Car
 @onready var camera = $CarCamera
 @onready var debug_ui = $DebugUi
 
@@ -508,7 +508,7 @@ func _resolved_initial_car_id() -> String:
 	return "CORVETTE"
 
 
-func _seat_car_from_config(car_node: EAGLCar) -> void:
+func _seat_car_from_config(car_node) -> void:
 	var target_height := _spawn_height_for_config(car_node.config)
 	if is_nan(target_height):
 		return

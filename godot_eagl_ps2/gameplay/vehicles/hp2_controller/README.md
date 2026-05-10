@@ -1,16 +1,20 @@
-# HP2 Controller Validation Harness
+# HP2 Vehicle Harness
 
-Minimal planar HP2-style validation controller for deterministic telemetry, benchmark captures, and comparison with the Python/PS2 reference work.
+`hp2_car.tscn` now uses the GEVP vehicle controller through `gevp_vehicle_adapter.gd`, while preserving the PS2 vehicle visual loading path and handling config adaptation.
+
+The legacy planar HP2 validation controller is still kept in this folder for reference and older benchmark work, but it is not the controller used by `hp2_car.tscn`, `CarDebug.tscn`, or `Gamelevel.tscn`.
 
 ## Files
 
-- `hp2_car.tscn` - `RigidBody3D` scene with manual planar X/Z + yaw integration.
-- `physics_controller.gd` - tire forces, weight transfer, steering, sideslip, substepping, and oversteer assist.
+- `hp2_car.tscn` - `RigidBody3D` vehicle scene wired to the GEVP adapter and PS2 visual skeleton.
+- `gevp_vehicle_adapter.gd` - GEVP-based vehicle controller adapter used by `hp2_car.tscn`.
+- `gevp_wheel_adapter.gd` - GEVP wheel adapter with EAGL surface mapping and drive-area fallback handling.
 - `engine.gd` / `drivetrain.gd` - simplified torque curve, shift cut, automatic gears, and RWD torque split.
 - `input_source.gd`, `player_input.gd`, `scripted_input.gd` - deterministic input abstraction.
 - `telemetry_exporter.gd` - strict CSV schema writer.
 - `benchmark_runner.gd` - automated step steer, acceleration, braking, drift init, and steady circle runner.
 - `benchmark_compare.py` - dependency-free Python reference comparison that writes an SVG graph and summary CSV.
+- `physics_controller.gd` - legacy planar HP2 controller kept as a reference implementation; not used by `hp2_car.tscn`.
 
 ## Run Benchmarks Headless
 
@@ -57,4 +61,6 @@ Columns are comma-separated in the file.
 
 ## Scope
 
-This is a measurement system, not final gameplay handling. It intentionally ignores roll, pitch, suspension geometry, and terrain following so the benchmark output stays deterministic and easy to compare.
+The legacy planar benchmark path is a measurement system, not final gameplay handling. It intentionally ignores roll, pitch, suspension geometry, and terrain following so the benchmark output stays deterministic and easy to compare.
+
+The active gameplay/debug vehicle path is the GEVP-backed `hp2_car.tscn` scene.

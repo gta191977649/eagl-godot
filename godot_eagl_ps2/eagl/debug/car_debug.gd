@@ -22,6 +22,7 @@ const HUD_GAP = 8
 const HUD_WIDE_MIN_WIDTH = 1180.0
 const HUD_LEFT_WIDTH = 360.0
 const HUD_RIGHT_WIDTH = 400.0
+const DEBUG_SURFACES := ["Road", "Dirt", "Grass"]
 
 
 class EngineCurvePlot:
@@ -153,6 +154,7 @@ class EngineCurvePlot:
 @onready var flat_track = $FlatTrack
 @onready var flat_track_shape: CollisionShape3D = $FlatTrack/CollisionShape3D
 @onready var flat_track_mesh: MeshInstance3D = $FlatTrack/MeshInstance3D
+@onready var controls_layout: VBoxContainer = $HUD/ControlsPanel/MarginContainer/ControlsLayout
 
 var _car_loader = null
 var _status_message := ""
@@ -168,6 +170,9 @@ var _airborne_debug_enabled := false
 var _engine_curve_plot: EngineCurvePlot
 var _parameter_summary_label: Label
 var _debug_grid: GridContainer
+var _surface_selector: OptionButton
+var _surface_row: HBoxContainer
+var _current_debug_surface := "Road"
 
 
 func _enter_tree() -> void:
@@ -207,6 +212,7 @@ func _ready() -> void:
 	_setup_lighting()
 	_ensure_debug_parameter_panels()
 	_ensure_debug_hud_layout()
+	_ensure_surface_debug_ui()
 	_bind_ui()
 	_seed_camera_from_car()
 	_spawn_transform = _spawn_transform_for_config(car.config)
@@ -215,6 +221,7 @@ func _ready() -> void:
 	_load_car_visual()
 	car.reset_runtime_state(_spawn_transform)
 	_apply_airborne_debug_state()
+	_apply_debug_surface_type(_current_debug_surface, false)
 	car.sync_wheel_slots_from_visual()
 	_rebuild_car_entries()
 	_sync_ui_from_car()
@@ -267,7 +274,7 @@ func _update_telemetry() -> void:
 		if car.config.globalb_handling_profile_count > 0:
 			lines.append("PSeq:  %s" % _format_profile_sequence(car.config.globalb_handling_profile_sequence))
 			bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
-	lines.append("Speed: %5.1f km/h" % float(snapshot.get("speed_kmh", 0.0)))
+	lines.append("Speed: %5.1f km/h" % float(snapshot.get("speed_kmh", snapshot.get("speed_kph", 0.0))))
 	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("RPM:   %5.0f" % float(snapshot.get("rpm", 0.0)))
 	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
@@ -296,9 +303,12 @@ func _update_telemetry() -> void:
 	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("Air:   %s" % ("frozen" if _airborne_debug_enabled else "normal"))
 	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
-	lines.append("HP2 Asst: %s  mu=%.2f" % [
-		String(snapshot.get("assist_wheel", "")),
+	lines.append("Surface: %s  mu=%.2f  solver=%s  TCS=%s  STAB=%s" % [
+		String(snapshot.get("surface_type", "")),
 		float(snapshot.get("surface_mu", 1.0)),
+		String(snapshot.get("grip_solver", "")),
+		"ON" if bool(snapshot.get("traction_control_active", false)) else "OFF",
+		"ON" if bool(snapshot.get("stability_active", false)) else "OFF",
 	])
 	bb_lines.append(_bbcode_escape(lines[lines.size() - 1]))
 	lines.append("")
@@ -306,34 +316,33 @@ func _update_telemetry() -> void:
 	for wheel in snapshot.get("wheels", []):
 		var grounded := bool(wheel.get("grounded", false))
 		var wheel_line := (
-			"%s  %s rpm=%6.0f skid=%4.2f lock=%s steer=%+5.1f eng=%5.1f brk=%5.1f" % [
+			"%s  %s surf=%s reg=%s lam=%+6.1f/%+6.1f skid=%4.2f lock=%s" % [
 				String(wheel.get("slot", "--")),
 				"GND=YES" if grounded else "GND=NO ",
-				float(wheel.get("rpm", 0.0)),
+				String(wheel.get("surface_type", "")),
+				String(wheel.get("force_regime", "")),
+				float(wheel.get("lambda_long", 0.0)),
+				float(wheel.get("lambda_lat", 0.0)),
 				float(wheel.get("skid", 0.0)),
 				"Y" if bool(wheel.get("slip_locked", false)) else "N",
-				float(wheel.get("steering_deg", 0.0)),
-				float(wheel.get("engine_force", 0.0)),
-				float(wheel.get("brake_force", 0.0)),
 			]
 		)
 		lines.append(wheel_line)
 		bb_lines.append(_bbcode_wheel_grounded_line(wheel, grounded))
-	telemetry.text = "\n".join(lines)
 	telemetry.text = "\n".join(bb_lines)
 
 
 func _bbcode_wheel_grounded_line(wheel: Dictionary, grounded: bool) -> String:
 	var status := "[color=#31d158]YES[/color]" if grounded else "[color=#ff453a]NO[/color] "
-	return "%s  GND=%s rpm=%6.0f skid=%4.2f lock=%s steer=%+5.1f eng=%5.1f brk=%5.1f" % [
+	return "%s  GND=%s surf=%s reg=%s lam=%+6.1f/%+6.1f skid=%4.2f lock=%s" % [
 		_bbcode_escape(String(wheel.get("slot", "--"))),
 		status,
-		float(wheel.get("rpm", 0.0)),
+		_bbcode_escape(String(wheel.get("surface_type", ""))),
+		_bbcode_escape(String(wheel.get("force_regime", ""))),
+		float(wheel.get("lambda_long", 0.0)),
+		float(wheel.get("lambda_lat", 0.0)),
 		float(wheel.get("skid", 0.0)),
 		_bbcode_escape("Y" if bool(wheel.get("slip_locked", false)) else "N"),
-		float(wheel.get("steering_deg", 0.0)),
-		float(wheel.get("engine_force", 0.0)),
-		float(wheel.get("brake_force", 0.0)),
 	]
 
 
@@ -510,13 +519,14 @@ func _update_parameter_debug_ui() -> void:
 	if car == null:
 		return
 	var snapshot: Dictionary = car.get_debug_snapshot() if car.has_method("get_debug_snapshot") else {}
+	var runtime: Dictionary = snapshot.get("runtime", {})
 	if _engine_curve_plot != null:
 		var torque_curve: Array = []
 		var friction_curve: Array = []
-		if car.engine != null:
-			torque_curve = car.engine.torque_curve
-			friction_curve = car.engine.friction_curve
-			_engine_curve_plot.set_runtime_rpm(float(car.engine.rpm), float(car.engine.max_rpm))
+		if not runtime.is_empty():
+			torque_curve = runtime.get("torque_curve", [])
+			friction_curve = runtime.get("friction_curve", [])
+			_engine_curve_plot.set_runtime_rpm(float(snapshot.get("rpm", 0.0)), float(runtime.get("max_rpm", 1.0)))
 		_engine_curve_plot.set_curves(torque_curve, friction_curve)
 	if _parameter_summary_label != null:
 		_parameter_summary_label.text = _build_parameter_summary(snapshot)
@@ -526,6 +536,7 @@ func _build_parameter_summary(snapshot: Dictionary) -> String:
 	if car == null or car.config == null:
 		return "No handling config loaded."
 	var cfg = car.config
+	var runtime: Dictionary = snapshot.get("runtime", {})
 	var lines: Array[String] = []
 	lines.append("Loaded Handling Parameters")
 	lines.append("Car %s  row %d  dup %d  %s" % [
@@ -536,40 +547,44 @@ func _build_parameter_summary(snapshot: Dictionary) -> String:
 	])
 	lines.append("Mass %.0f kg  WB %.3f m  Radius %.3f m" % [
 		float(cfg.mass_kg),
-		float(car.wheelbase),
-		float(car.wheel_radius),
+		float(runtime.get("wheelbase", cfg.wheelbase_meters())),
+		float(runtime.get("wheel_radius", cfg.driven_average_radius())),
 	])
 	lines.append("Gear %d  RPM %.0f  Shift %.0f/%.0f" % [
 		int(snapshot.get("gear", 1)),
 		float(snapshot.get("rpm", 0.0)),
-		float(car.drivetrain.downshift_rpm),
-		float(car.drivetrain.upshift_rpm),
+		float(runtime.get("downshift_rpm", 0.0)),
+		float(runtime.get("upshift_rpm", 0.0)),
 	])
 	lines.append("Final %.3f  Gears %s" % [
-		float(car.drivetrain.final_drive),
-		_format_float_array(Array(car.drivetrain.gear_ratios), "%.2f", 7),
+		float(runtime.get("final_drive", cfg.final_drive_ratio)),
+		_format_float_array(Array(runtime.get("gear_ratios", Array(cfg.forward_gears))), "%.2f", 7),
 	])
 	lines.append("Grip long F/R %.2f %.2f  lat F/R %.2f %.2f" % [
-		float(car.front_wheel_grip_scale),
-		float(car.rear_wheel_grip_scale),
-		float(car.front_wheel_lat_grip_scale),
-		float(car.rear_wheel_lat_grip_scale),
+		float(runtime.get("front_longitudinal_grip", cfg.front_longitudinal_grip)),
+		float(runtime.get("rear_longitudinal_grip", cfg.rear_longitudinal_grip)),
+		float(runtime.get("front_lateral_grip", cfg.front_lateral_grip)),
+		float(runtime.get("rear_lateral_grip", cfg.rear_lateral_grip)),
 	])
-	lines.append("Surface %s  mu %.3f  brake %.0f  bias %.2f" % [
+	lines.append("Surface %s  mu %.3f  solver %s  drag %.3f" % [
 		String(snapshot.get("surface_type", "")),
 		float(snapshot.get("surface_mu", 0.0)),
-		float(car.brake_torque_total),
-		float(car.brake_bias_front),
+		String(snapshot.get("grip_solver", runtime.get("grip_solver", ""))),
+		float(runtime.get("coefficient_of_drag", 0.0)),
+	])
+	lines.append("Torque %.1f  RoadScale %.2f  RoadStiff %.2f" % [
+		float(runtime.get("max_torque", 0.0)),
+		float(runtime.get("road_cof", 0.0)),
+		float(runtime.get("road_tire_stiffness", 0.0)),
 	])
 	lines.append("Steer max %.1f deg  response %.2f" % [
-		float(car.steering_system.max_steer_degrees),
-		float(car.steering_system.steering_response_rate),
+		float(runtime.get("max_steer_degrees", cfg.steering_max_degrees * cfg.steering_lock_scale)),
+		float(runtime.get("steering_speed", cfg.steering_response)),
 	])
-	lines.append("Aero %.4f  roll %.4f  WT %.2f  CG %.2f" % [
-		float(car.aero_drag),
-		float(car.rolling_resistance),
-		float(car.weight_transfer_coeff),
-		float(car.cg_height),
+	lines.append("Motor drag %.4f  motor brake %.2f  front wt %.2f" % [
+		float(runtime.get("motor_drag", 0.0)),
+		float(runtime.get("motor_brake", 0.0)),
+		float(runtime.get("front_weight_distribution", 0.0)),
 	])
 	lines.append("Torque samples %s" % _format_float_array(Array(cfg.engine_torque_samples), "%.3f", 9))
 	lines.append("Friction samples %s" % _format_float_array(Array(cfg.engine_friction_samples), "%.3f", 3))
@@ -741,6 +756,8 @@ func _bind_ui() -> void:
 		airborne_toggle.toggled.connect(_on_airborne_toggled)
 	if car_list != null and not car_list.item_selected.is_connected(_on_car_selected):
 		car_list.item_selected.connect(_on_car_selected)
+	if _surface_selector != null and not _surface_selector.item_selected.is_connected(_on_surface_selected):
+		_surface_selector.item_selected.connect(_on_surface_selected)
 
 
 func _rebuild_car_entries() -> void:
@@ -889,6 +906,9 @@ func _sync_ui_from_car() -> void:
 			car_list.select(target_index)
 			_selected_car_index = target_index
 			_syncing_ui = false
+	if car != null:
+		_current_debug_surface = _normalized_debug_surface(String(car.get("surface_type")))
+	_sync_surface_selector_ui()
 	_set_status(_status_message)
 
 
@@ -975,6 +995,7 @@ func _switch_to_car_index(index: int) -> void:
 	_load_car_visual()
 	car.reset_runtime_state(_spawn_transform)
 	_apply_airborne_debug_state()
+	_apply_debug_surface_type(_current_debug_surface, false)
 	car.sync_wheel_slots_from_visual()
 	_seed_camera_from_car()
 	_rebuild_car_entries()
@@ -993,6 +1014,7 @@ func _on_reset_pressed() -> void:
 	_spawn_transform = _spawn_transform_for_config(car.config)
 	car.reset_runtime_state(_spawn_transform)
 	_apply_airborne_debug_state()
+	_apply_debug_surface_type(_current_debug_surface, false)
 	_seed_camera_from_car()
 	_set_status("Reset %s" % _current_car_display_name())
 
@@ -1031,6 +1053,92 @@ func _apply_airborne_debug_state() -> void:
 		car.reset_runtime_state(airborne_transform)
 	else:
 		car.reset_runtime_state(_spawn_transform)
+
+
+func _ensure_surface_debug_ui() -> void:
+	if controls_layout == null:
+		return
+	_surface_row = controls_layout.get_node_or_null("SurfaceRow") as HBoxContainer
+	if _surface_row == null:
+		_surface_row = HBoxContainer.new()
+		_surface_row.name = "SurfaceRow"
+		_surface_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_surface_row.add_theme_constant_override("separation", 8)
+		var title := Label.new()
+		title.name = "SurfaceLabel"
+		title.text = "Surface"
+		title.custom_minimum_size = Vector2(84.0, 0.0)
+		_surface_row.add_child(title)
+		_surface_selector = OptionButton.new()
+		_surface_selector.name = "SurfaceSelector"
+		_surface_selector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_surface_row.add_child(_surface_selector)
+		var debug_options_row := controls_layout.get_node("DebugOptionsRow") as Control
+		var debug_options_index: int = controls_layout.get_children().find(debug_options_row)
+		var insert_index: int = maxi(debug_options_index + 1, 0)
+		controls_layout.add_child(_surface_row)
+		controls_layout.move_child(_surface_row, insert_index)
+	else:
+		_surface_selector = _surface_row.get_node_or_null("SurfaceSelector") as OptionButton
+	if _surface_selector == null:
+		return
+	_surface_selector.clear()
+	for surface_name in DEBUG_SURFACES:
+		_surface_selector.add_item(surface_name)
+	_sync_surface_selector_ui()
+
+
+func _sync_surface_selector_ui() -> void:
+	if _surface_selector == null:
+		return
+	var selected_index := DEBUG_SURFACES.find(_current_debug_surface)
+	if selected_index < 0:
+		selected_index = 0
+	_current_debug_surface = DEBUG_SURFACES[selected_index]
+	_syncing_ui = true
+	_surface_selector.select(selected_index)
+	_syncing_ui = false
+
+
+func _on_surface_selected(index: int) -> void:
+	if _syncing_ui or index < 0 or index >= DEBUG_SURFACES.size():
+		return
+	_apply_debug_surface_type(DEBUG_SURFACES[index], true)
+
+
+func _apply_debug_surface_type(surface_name: String, show_status: bool) -> void:
+	_current_debug_surface = _normalized_debug_surface(surface_name)
+	_assign_surface_type_to_node(flat_track, _current_debug_surface)
+	_assign_surface_type_to_node(flat_track_shape, _current_debug_surface)
+	_assign_surface_type_to_node(flat_track_mesh, _current_debug_surface)
+	if car != null:
+		if car.has_method("set_debug_surface_type"):
+			car.set_debug_surface_type(_current_debug_surface)
+		else:
+			car.set("surface_type", _current_debug_surface)
+	_sync_surface_selector_ui()
+	if show_status:
+		_set_status("Surface set to %s" % _current_debug_surface)
+
+
+func _assign_surface_type_to_node(node: Node, surface_name: String) -> void:
+	if node == null:
+		return
+	for candidate in DEBUG_SURFACES:
+		if node.is_in_group(candidate):
+			node.remove_from_group(candidate)
+	node.set_meta("eagl_collision_category", surface_name)
+	node.add_to_group(surface_name)
+
+
+func _normalized_debug_surface(value: String) -> String:
+	match value.to_lower():
+		"terrain", "dirt":
+			return "Dirt"
+		"grass":
+			return "Grass"
+		_:
+			return "Road"
 
 
 func _build_runtime_config_for_car(car_name: String, duplicate_index: int = 1, drive_type: String = ""):

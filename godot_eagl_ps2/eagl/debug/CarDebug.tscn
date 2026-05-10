@@ -1,8 +1,8 @@
-[gd_scene load_steps=9 format=3 uid="uid://ccsn403ygawdo"]
+[gd_scene format=3 uid="uid://ccsn403ygawdo"]
 
 [ext_resource type="Script" uid="uid://bp3rlrj7y2s3l" path="res://eagl/debug/car_debug.gd" id="1"]
-[ext_resource type="PackedScene" path="res://gameplay/vehicles/hp2_controller/hp2_car.tscn" id="2"]
-[ext_resource type="Script" path="res://gameplay/debug/debug_speedometer.gd" id="3_w642t"]
+[ext_resource type="PackedScene" uid="uid://dqtvs4j1abco1" path="res://gameplay/vehicles/hp2_controller/hp2_car.tscn" id="2"]
+[ext_resource type="Script" uid="uid://c3m2piscjto08" path="res://gameplay/debug/debug_speedometer.gd" id="3_w642t"]
 
 [sub_resource type="Environment" id="1"]
 background_mode = 2
@@ -32,21 +32,20 @@ transform = Transform3D(0.76604444, 0.46238267, -0.4465178, 0, 0.6946584, 0.7193
 light_energy = 1.8
 shadow_enabled = true
 
-[node name="FlatTrack" type="StaticBody3D" parent="." unique_id=1148499770]
+[node name="FlatTrack" type="StaticBody3D" parent="." unique_id=1148499770 groups=["Road"]]
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="FlatTrack" unique_id=426370608]
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FlatTrack" unique_id=426370608 groups=["Road"]]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
 shape = SubResource("3")
 
-[node name="MeshInstance3D" type="MeshInstance3D" parent="FlatTrack" unique_id=415842352]
+[node name="MeshInstance3D" type="MeshInstance3D" parent="FlatTrack" unique_id=415842352 groups=["Road"]]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
 material_override = SubResource("2")
 mesh = SubResource("4")
 
-[node name="Car" parent="." instance=ExtResource("2")]
+[node name="Car" parent="." unique_id=677299104 instance=ExtResource("2")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.35, 0)
-draw_debug = true
-surface_type = "asphalt"
+surface_type = "Road"
 
 [node name="FollowCamera" type="Camera3D" parent="." unique_id=1739694075]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 4, 0)
@@ -55,7 +54,8 @@ fov = 70.0
 
 [node name="HUD" type="CanvasLayer" parent="." unique_id=1810195261]
 
-[node name="Speedometer" type="Control" parent="HUD"]
+[node name="Speedometer" type="Control" parent="HUD" unique_id=1913822933]
+layout_mode = 3
 anchors_preset = 3
 anchor_left = 1.0
 anchor_top = 1.0
@@ -78,7 +78,6 @@ offset_bottom = 206.0
 
 [node name="Telemetry" type="RichTextLabel" parent="HUD/TelemetryPanel" unique_id=1945975048]
 layout_mode = 2
-theme_override_font_sizes/font_size = 18
 bbcode_enabled = true
 text = "Loading telemetry..."
 fit_content = true
@@ -121,11 +120,11 @@ text = "Debug Overlay"
 layout_mode = 2
 text = "Reset Car"
 
-[node name="DebugOptionsRow" type="HBoxContainer" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout"]
+[node name="DebugOptionsRow" type="HBoxContainer" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout" unique_id=1087375147]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="AirborneToggle" type="CheckBox" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout/DebugOptionsRow"]
+[node name="AirborneToggle" type="CheckBox" parent="HUD/ControlsPanel/MarginContainer/ControlsLayout/DebugOptionsRow" unique_id=446415506]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Airborne Debug"

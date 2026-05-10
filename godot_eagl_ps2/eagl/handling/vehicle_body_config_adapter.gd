@@ -35,12 +35,28 @@ static func visual_anchor_basis() -> Basis:
 	)
 
 
+static func gevp_visual_anchor_basis() -> Basis:
+	return Basis(
+		Vector3(0.0, 0.0, -1.0),
+		Vector3(0.0, 1.0, 0.0),
+		Vector3(1.0, 0.0, 0.0)
+	)
+
+
 static func vehicle_space_from_ps2(value: Vector3) -> Vector3:
 	return visual_anchor_basis() * MathUtils.ps2_to_godot_vec3(value)
 
 
+static func gevp_vehicle_space_from_ps2(value: Vector3) -> Vector3:
+	return gevp_visual_anchor_basis() * MathUtils.ps2_to_godot_vec3(value)
+
+
 static func visual_space_from_vehicle(value: Vector3) -> Vector3:
 	return Vector3(value.z, value.y, value.x)
+
+
+static func build_gevp_vehicle_setup(config) -> Dictionary:
+	return _build_vehicle_setup_with_mapping(config, Callable(VehicleBodyConfigAdapter, "gevp_vehicle_space_from_ps2"), gevp_visual_anchor_basis())
 
 
 static func body_size_vehicle(config) -> Vector3:
@@ -52,6 +68,10 @@ static func body_size_vehicle(config) -> Vector3:
 
 
 static func build_vehicle_setup(config) -> Dictionary:
+	return _build_vehicle_setup_with_mapping(config, Callable(VehicleBodyConfigAdapter, "vehicle_space_from_ps2"), visual_anchor_basis())
+
+
+static func _build_vehicle_setup_with_mapping(config, point_mapper: Callable, anchor_basis: Basis) -> Dictionary:
 	var resolved_mass := physics_mass_kg(config)
 	var axle_masses := _axle_supported_masses(config)
 	var driven_wheel_count := _driven_wheel_count(config)
@@ -73,7 +93,7 @@ static func build_vehicle_setup(config) -> Dictionary:
 		var suspension_travel := _suspension_travel_for_axle(config, is_front)
 		var rest_length := _rest_length_for_axle(config, is_front)
 		var static_ride_height := _static_ride_height_for_axle(config, is_front)
-		var wheel_center := vehicle_space_from_ps2(config.wheel_local_positions_ps2[index])
+		var wheel_center: Vector3 = point_mapper.call(config.wheel_local_positions_ps2[index])
 		wheels[slot_id] = {
 			"slot_id": slot_id,
 			"position": wheel_center + Vector3.UP * rest_length,
@@ -98,11 +118,11 @@ static func build_vehicle_setup(config) -> Dictionary:
 	return {
 		"mass": resolved_mass,
 		"mass_is_estimate": bool(config.mass_kg_is_estimate),
-		"center_of_mass": vehicle_space_from_ps2(config.center_of_mass_ps2),
+		"center_of_mass": point_mapper.call(config.center_of_mass_ps2),
 		"body_size": body_size_vehicle(config),
 		"body_transform_diagonal": config.body_transform_diagonal,
 		"collision_center": Vector3(0.0, body_size_vehicle(config).y * 0.5, 0.0),
-		"visual_anchor_basis": visual_anchor_basis(),
+		"visual_anchor_basis": anchor_basis,
 		"wheels": wheels,
 		"driven_wheel_count": driven_wheel_count,
 		"driven_average_radius": config.driven_average_radius(),
