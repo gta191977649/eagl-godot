@@ -39,6 +39,8 @@ var surface_sampler = null
 var _vehicle_setup := {}
 var _debug_snapshot := {}
 var _runtime_parameters := {}
+var _hp2_upshift_rpm := 0.0
+var _hp2_downshift_rpm := 0.0
 var _visual_root: Node3D
 var _wheel_nodes := {}
 var _wheel_helpers := {}
@@ -316,10 +318,10 @@ func _apply_config_to_vehicle() -> void:
 	gear_ratios = _typed_float_array(config.forward_gears)
 	final_drive = float(config.final_drive_ratio)
 	reverse_ratio = absf(float(config.reverse_gear_ratio))
-	shift_time = 0.22
+	shift_time = 0.3
 	automatic_transmission = true
-	automatic_time_between_shifts = 250.0
-	gear_inertia = 0.025
+	automatic_time_between_shifts = 1000.0
+	gear_inertia = 0.02
 
 	front_torque_split = _front_torque_split_from_config(config)
 	variable_torque_split = false
@@ -376,6 +378,16 @@ func _apply_config_to_vehicle() -> void:
 
 	max_rpm = float(config.engine_redline_rpm)
 	idle_rpm = float(config.idle_rpm)
+	_hp2_upshift_rpm = clampf(
+		float(config.shift_up_rpm),
+		float(config.engine_peak_rpm) * 0.75,
+		float(config.engine_redline_rpm) * 0.985
+	)
+	_hp2_downshift_rpm = clampf(
+		float(config.shift_down_rpm),
+		float(config.idle_rpm) * 1.8,
+		float(config.engine_peak_rpm) * 0.82
+	)
 	torque_curve = _build_torque_curve(config.engine_torque_samples)
 	if torque_curve == null:
 		torque_curve = _build_torque_curve(PackedFloat32Array())
@@ -383,8 +395,8 @@ func _apply_config_to_vehicle() -> void:
 	motor_drag = _estimated_motor_drag(config)
 	motor_brake = _estimated_motor_brake(config)
 	motor_moment = clampf(vehicle_mass / 3200.0, 0.4, 1.15)
-	clutch_out_rpm = lerpf(idle_rpm * 1.8, float(config.engine_peak_rpm), 0.45)
-	max_clutch_torque_ratio = 1.7
+	clutch_out_rpm = _estimated_clutch_out_rpm(config)
+	max_clutch_torque_ratio = _estimated_clutch_torque_ratio(config)
 	_runtime_parameters = _build_runtime_parameters(config)
 
 
@@ -405,6 +417,10 @@ func _reinitialize_vehicle_runtime() -> void:
 	_apply_brake_force_mapping(config)
 	_apply_ackermann_for_config()
 	_sync_visual_wheels_from_helpers()
+
+
+func process_transmission() -> void:
+	super.process_transmission()
 
 
 func _apply_brake_force_mapping(_source_config) -> void:
@@ -670,8 +686,8 @@ func _build_runtime_parameters(source_config) -> Dictionary:
 		"max_rpm": max_rpm,
 		"motor_drag": motor_drag,
 		"motor_brake": motor_brake,
-		"upshift_rpm": max_rpm * 0.8,
-		"downshift_rpm": maxf(idle_rpm * 2.0, max_rpm * 0.55),
+		"upshift_rpm": _hp2_upshift_rpm,
+		"downshift_rpm": _hp2_downshift_rpm,
 		"steering_speed": steering_speed,
 		"countersteer_speed": countersteer_speed,
 		"max_steer_degrees": rad_to_deg(max_steering_angle),
@@ -804,20 +820,30 @@ func _estimated_max_torque(source_config) -> float:
 	if gear_ratios.is_empty():
 		return 300.0
 	var avg_radius := maxf(source_config.driven_average_radius(), 0.1)
-	var first_ratio := absf(float(gear_ratios[0]) * final_drive)
+	var first_ratio := maxf(absf(float(gear_ratios[0]) * final_drive), 0.1)
 	var idle_factor := torque_curve.sample_baked(clampf(idle_rpm / maxf(max_rpm, 1.0), 0.0, 1.0))
-	var hp2_launch_force := float(_vehicle_setup.get("hp2_idle_launch_force_total", source_config.engine_force_scale))
-	return clampf(hp2_launch_force * avg_radius / maxf(first_ratio * maxf(idle_factor, 0.18), 0.1), 220.0, 1400.0)
+	var hp2_idle_launch_force := float(_vehicle_setup.get("hp2_idle_launch_force_total", source_config.engine_force_scale))
+	var hp2_peak_launch_force := float(_vehicle_setup.get("hp2_launch_force_total", hp2_idle_launch_force))
+	var idle_torque_match := hp2_idle_launch_force * avg_radius / maxf(first_ratio * maxf(idle_factor, 0.18), 0.1)
+	var peak_torque_match := hp2_peak_launch_force * avg_radius / first_ratio
+	var torque_estimate := lerpf(idle_torque_match, peak_torque_match, 0.68)
+	return clampf(torque_estimate, 900.0, 3200.0)
 
 
 func _estimated_motor_drag(source_config) -> float:
-	var average := _average_sample(source_config.engine_friction_samples, 0.55)
-	return clampf(average * 0.018, 0.004, 0.018)
+	return 0.005
 
 
 func _estimated_motor_brake(source_config) -> float:
-	var first := float(source_config.engine_friction_samples[0]) if source_config.engine_friction_samples.size() > 0 else 0.55
-	return clampf(first * 34.0, 8.0, 28.0)
+	return 10.0
+
+
+func _estimated_clutch_out_rpm(source_config) -> float:
+	return clampf(float(source_config.engine_peak_rpm) * 0.46, 2800.0, 3200.0)
+
+
+func _estimated_clutch_torque_ratio(source_config) -> float:
+	return 1.6
 
 
 func _average_sample(samples: PackedFloat32Array, fallback: float) -> float:
