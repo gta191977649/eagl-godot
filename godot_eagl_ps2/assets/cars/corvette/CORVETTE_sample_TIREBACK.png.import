@@ -2,20 +2,24 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cktn635oy6enu"
-path="res://.godot/imported/icon.png-5c02e577949519db0d433e4823657e79.ctex"
+uid="uid://bccqc157f7xxe"
+path.s3tc="res://.godot/imported/CORVETTE_sample_TIREBACK.png-43a19d71860418814f8d777af6968599.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
+}
+generator_parameters={
+"md5": "8a138dd550b39d0b47e6c8781e82f7d0"
 }
 
 [deps]
 
-source_file="res://addons/gevp/icon.png"
-dest_files=["res://.godot/imported/icon.png-5c02e577949519db0d433e4823657e79.ctex"]
+source_file="res://assets/cars/corvette/CORVETTE_sample_TIREBACK.png"
+dest_files=["res://.godot/imported/CORVETTE_sample_TIREBACK.png-43a19d71860418814f8d777af6968599.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -23,7 +27,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=false
+mipmaps/generate=true
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""
@@ -37,4 +41,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

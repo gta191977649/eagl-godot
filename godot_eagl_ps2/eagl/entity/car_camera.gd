@@ -294,6 +294,13 @@ func _cycle_profile_index(profile: int) -> int:
 func _target_forward() -> Vector3:
 	if target == null:
 		return Vector3.FORWARD
+	if target.has_method("get_camera_forward_vector"):
+		var custom_forward = target.call("get_camera_forward_vector")
+		if custom_forward is Vector3:
+			var resolved_forward := custom_forward as Vector3
+			resolved_forward.y = 0.0
+			if resolved_forward.length_squared() > 0.0001:
+				return resolved_forward.normalized()
 	var forward := target.global_transform.basis * Vector3(0.0, 0.0, 1.0)
 	forward.y = 0.0
 	if forward.length_squared() <= 0.0001:

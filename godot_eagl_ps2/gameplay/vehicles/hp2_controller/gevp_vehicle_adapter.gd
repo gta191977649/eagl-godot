@@ -8,22 +8,6 @@ const MathUtils = preload("res://eagl/utils/math_utils.gd")
 const HP2PlayerInputScript = preload("res://gameplay/vehicles/hp2_controller/player_input.gd")
 
 const SLOT_IDS := ["FL", "FR", "RL", "RR"]
-const DEMO_BASELINE := "demo_arcade"
-const DEMO_ROAD_TIRE_STIFFNESS := 1.0
-const DEMO_DIRT_TIRE_STIFFNESS := 0.85
-const DEMO_GRASS_TIRE_STIFFNESS := 0.7
-const DEMO_ROAD_COF := 1.0
-const DEMO_DIRT_COF := 0.72
-const DEMO_GRASS_COF := 0.5
-const DEMO_ROAD_ROLLING_RESISTANCE := 1.0
-const DEMO_DIRT_ROLLING_RESISTANCE := 2.0
-const DEMO_GRASS_ROLLING_RESISTANCE := 4.0
-const DEMO_ROAD_LATERAL_GRIP_ASSIST := 0.05
-const DEMO_LONGITUDINAL_GRIP_RATIO := 0.5
-const DEMO_BRAKING_GRIP_MULTIPLIER := 1.1
-const DEMO_DAMPING_RATIO := 0.6
-const DEMO_STABILITY_YAW_GROUND_MULTIPLIER := 1.35
-const DEMO_TRACTION_CONTROL_MAX_SLIP := 0.0
 
 @export var config = null
 @export var draw_debug := true
@@ -31,16 +15,11 @@ const DEMO_TRACTION_CONTROL_MAX_SLIP := 0.0
 @export var auto_fit_collision_from_visual := true
 @export var drive_area_surface_filter_enabled := true
 @export_range(0.0, 1.0) var drive_area_off_surface_friction_scale := 0.25
-@export_enum("demo_arcade") var handling_baseline := DEMO_BASELINE
+@export var ride_height := 0.35
 
 var input_source = null
 var surface_sampler = null
 
-var _vehicle_setup := {}
-var _debug_snapshot := {}
-var _runtime_parameters := {}
-var _hp2_upshift_rpm := 0.0
-var _hp2_downshift_rpm := 0.0
 var _visual_root: Node3D
 var _wheel_nodes := {}
 var _wheel_helpers := {}
@@ -49,9 +28,8 @@ var _wheel_suspension_nodes := {}
 var _wheel_steer_nodes := {}
 var _wheel_roll_nodes := {}
 var _wheel_spin_nodes := {}
-var _debug_mesh := ImmediateMesh.new()
-var _debug_mesh_instance: MeshInstance3D
-var _debug_material: StandardMaterial3D
+var _airborne_debug_enabled := false
+var _airborne_debug_height := 0.0
 
 
 func _ready() -> void:
@@ -65,61 +43,74 @@ func _ready() -> void:
 		input_source = HP2PlayerInputScript.new()
 	_cache_wheel_nodes()
 	apply_config(config)
-	print("HP2Car controller=GEVP scene=hp2_car.tscn script=%s" % get_script().resource_path)
-	_log_runtime_configuration()
 	set_debug_overlay_enabled(draw_debug)
 
 
 func _physics_process(delta: float) -> void:
 	_update_inputs()
 	super._physics_process(delta)
+	if _airborne_debug_enabled:
+		linear_velocity = Vector3.ZERO
+		angular_velocity = Vector3.ZERO
+		global_position.y = _airborne_debug_height
 
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	_sync_visual_wheels_from_helpers()
-	if draw_debug:
-		_rebuild_debug_mesh()
-	_update_debug_snapshot()
 
 
 func apply_config(new_config) -> void:
 	if new_config == null:
 		return
 	config = new_config
-	_vehicle_setup = VehicleBodyConfigAdapter.build_gevp_vehicle_setup(config)
 	_cache_wheel_nodes()
+	_ensure_default_gevp_curve()
+	_apply_demo_arcade_defaults()
 	_apply_config_to_vehicle()
 	_sync_scene_component_nodes_from_config()
-	_reinitialize_vehicle_runtime()
 	refresh_visual_bindings()
 	_fit_chassis_collision_shape()
 	if auto_fit_collision_from_visual:
 		_fit_collision_shape_to_visual_bounds()
-	_update_debug_snapshot()
+	ride_height = _configured_ride_height(config)
+	_reinitialize_vehicle_runtime()
+	_apply_default_surface_type()
 
 
 func reset_runtime_state(target_transform: Transform3D = Transform3D.IDENTITY) -> void:
 	if target_transform == Transform3D.IDENTITY:
-		target_transform = transform
+		target_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, ride_height, 0.0))
 	transform = target_transform
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
 	sleeping = false
 	previous_global_position = global_position
 	delta_time = 0.0
-	current_gear = 1
-	requested_gear = 1
+	current_gear = 0
+	requested_gear = 0
 	steering_amount = 0.0
 	true_steering_amount = 0.0
 	steering_exponent_amount = 0.0
 	throttle_amount = 0.0
 	brake_amount = 0.0
-	clutch_amount = 0.0
+	clutch_amount = 1.0
 	torque_output = 0.0
 	clutch_torque = 0.0
+	max_clutch_torque = max_torque * max_clutch_torque_ratio
 	handbrake_force = 0.0
 	brake_force = 0.0
 	motor_rpm = idle_rpm
+	complete_shift_delta_time = 0.0
+	last_shift_delta_time = 0.0
+	current_torque_split = 0.0
+	true_torque_split = front_torque_split
+	is_shifting = false
+	is_up_shifting = false
+	need_clutch = true
+	tcs_active = false
+	stability_active = false
+	stability_yaw_torque = 0.0
+	stability_torque_vector = Vector3.ZERO
 	for wheel in wheel_array:
 		wheel.spin = 0.0
 		wheel.force_vector = Vector2.ZERO
@@ -131,9 +122,6 @@ func reset_runtime_state(target_transform: Transform3D = Transform3D.IDENTITY) -
 		wheel.spring_current_length = wheel.spring_length
 		wheel.last_collider = null
 	_sync_visual_wheels_from_helpers()
-	_update_debug_snapshot()
-	if draw_debug:
-		_rebuild_debug_mesh()
 
 
 func replace_visual(visual: Node3D) -> void:
@@ -168,7 +156,6 @@ func sync_wheel_slots_from_visual() -> void:
 		_ensure_scene_visual_components(car_visual)
 	refresh_visual_bindings()
 	_sync_visual_wheels_from_helpers()
-	_update_debug_snapshot()
 
 
 func refresh_visual_bindings() -> void:
@@ -206,18 +193,59 @@ func set_surface_sampler(sampler) -> void:
 
 func set_debug_overlay_enabled(enabled: bool) -> void:
 	draw_debug = enabled
-	if draw_debug:
-		_ensure_debug_mesh()
-		if _debug_mesh_instance != null:
-			_debug_mesh_instance.visible = true
-			_rebuild_debug_mesh()
-	elif _debug_mesh_instance != null:
-		_debug_mesh.clear_surfaces()
-		_debug_mesh_instance.visible = false
+	var debug_lines := get_node_or_null("DebugLines") as VisualInstance3D
+	if debug_lines != null:
+		debug_lines.visible = enabled
 
 
 func get_debug_snapshot() -> Dictionary:
-	return _debug_snapshot.duplicate(true)
+	var wheels: Array[Dictionary] = []
+	var dominant_surface := surface_type
+	var surface_mu := 0.0
+	var grounded_count := 0
+	for slot_id in SLOT_IDS:
+		var wheel := _wheel_nodes.get(slot_id, null) as Wheel
+		if wheel == null:
+			continue
+		var grounded := wheel.is_colliding()
+		var wheel_surface := _normalize_surface_name(String(wheel.surface_type if wheel.surface_type != "" else surface_type))
+		if grounded:
+			dominant_surface = wheel_surface
+			surface_mu += float(wheel.current_cof)
+			grounded_count += 1
+		wheels.append({
+			"slot": slot_id,
+			"grounded": grounded,
+			"surface_type": wheel_surface,
+			"force_regime": "default_gevp",
+			"lambda_long": float(wheel.force_vector.y),
+			"lambda_lat": float(wheel.force_vector.x),
+			"skid": float(absf(wheel.slip_vector.y)),
+			"slip_locked": bool(wheel.limit_spin),
+			"rpm": float(wheel.spin * 60.0 / TAU),
+			"normal_load": float(wheel.spring_force),
+		})
+	if grounded_count > 0:
+		surface_mu /= float(grounded_count)
+	var speed_ms := speed
+	var speed_kmh := speed_ms * 3.6
+	var slip_angle_deg := 0.0
+	if absf(local_velocity.z) > 0.25 or absf(local_velocity.x) > 0.25:
+		slip_angle_deg = rad_to_deg(atan2(local_velocity.x, -local_velocity.z))
+	return {
+		"speed_ms": speed_ms,
+		"speed_kmh": speed_kmh,
+		"rpm": motor_rpm,
+		"gear": current_gear,
+		"slip_angle_deg": slip_angle_deg,
+		"surface_type": dominant_surface,
+		"surface_mu": surface_mu,
+		"traction_control_active": tcs_active,
+		"stability_active": stability_active,
+		"mass_kg": vehicle_mass,
+		"grip_solver": "gevp_default",
+		"wheels": wheels,
+	}
 
 
 func get_telemetry_row() -> Dictionary:
@@ -233,171 +261,84 @@ func get_telemetry_row() -> Dictionary:
 		"vy": linear_velocity.z,
 		"pos_x": global_position.x,
 		"pos_y": global_position.z,
-		"accel_long": float(snapshot.get("engine_force_total", 0.0)) / maxf(mass, 1.0),
+		"accel_long": 0.0,
 		"rpm": float(snapshot.get("rpm", 0.0)),
 		"gear": int(snapshot.get("gear", 0)),
 		"shift_cut": 1 if is_shifting else 0,
 		"surface_type": String(snapshot.get("surface_type", "")),
 		"surface_mu": float(snapshot.get("surface_mu", 0.0)),
 	}
-	for slot_id in SLOT_IDS:
-		row["grip_%s" % slot_id] = _wheel_snapshot_value(slot_id, "skid")
-		row["load_%s" % slot_id] = _wheel_snapshot_value(slot_id, "normal_load")
+	for wheel in snapshot.get("wheels", []):
+		var slot_id := String(wheel.get("slot", ""))
+		row["grip_%s" % slot_id] = float(wheel.get("skid", 0.0))
+		row["load_%s" % slot_id] = float(wheel.get("normal_load", 0.0))
 	return row
+
+
+func get_reference_params() -> Dictionary:
+	return {
+		"controller": "gevp_default",
+		"vehicle_mass": vehicle_mass,
+		"front_tire_radius": front_tire_radius,
+		"rear_tire_radius": rear_tire_radius,
+		"wheelbase": absf(rear_left_wheel.position.z - front_left_wheel.position.z),
+		"front_track_width": absf(front_right_wheel.position.x - front_left_wheel.position.x),
+		"rear_track_width": absf(rear_right_wheel.position.x - rear_left_wheel.position.x),
+		"gear_ratios": gear_ratios.duplicate(),
+		"final_drive": final_drive,
+		"max_rpm": max_rpm,
+		"idle_rpm": idle_rpm,
+		"surface_type": surface_type,
+	}
+
+
+func set_forward_speed(speed_mps: float) -> void:
+	linear_velocity = -global_transform.basis.z.normalized() * speed_mps
+	angular_velocity = Vector3.ZERO
+	sleeping = false
+	previous_global_position = global_position
+
+
+func get_camera_forward_vector() -> Vector3:
+	var forward := -global_transform.basis.z
+	forward.y = 0.0
+	if forward.length_squared() <= 0.0001:
+		return Vector3(0.0, 0.0, -1.0)
+	return forward.normalized()
+
+
+func set_airborne_debug_enabled(enabled: bool, airborne_height: float) -> void:
+	_airborne_debug_enabled = enabled
+	_airborne_debug_height = airborne_height
+	for wheel in _wheel_nodes.values():
+		if wheel is RayCast3D:
+			(wheel as RayCast3D).enabled = not enabled
+	if enabled:
+		var airborne_transform := transform
+		airborne_transform.origin.y = airborne_height
+		reset_runtime_state(airborne_transform)
+	else:
+		reset_runtime_state(transform)
+
+
+func set_debug_surface_type(new_surface: String) -> void:
+	surface_type = _normalize_surface_name(new_surface)
+	_apply_default_surface_type()
 
 
 func default_wheel_surface_name() -> String:
 	return _normalize_surface_name(surface_type)
 
 
-func get_hp2_body_slip_angle_deg() -> float:
-	return _slip_angle_deg()
-
-
-func get_hp2_grip_solver_name() -> String:
-	return "hp2_lambda"
-
-
-func set_debug_surface_type(new_surface: String) -> void:
-	surface_type = _normalize_surface_name(new_surface)
-	for wheel in wheel_array:
-		if wheel != null and wheel.has_method("_set_surface_profile"):
-			wheel.call("_set_surface_profile", surface_type)
-
-
-func is_driveable_point(world_point: Vector3) -> bool:
-	if surface_sampler == null:
-		return true
-	return bool(surface_sampler.has_driveable_surface(_godot_to_ps2(world_point)))
-
-
 func _apply_config_to_vehicle() -> void:
-	var wheel_positions: Dictionary = _vehicle_wheel_positions_from_config()
-	var front_left: Vector3 = wheel_positions["FL"]
-	var front_right: Vector3 = wheel_positions["FR"]
-	var rear_left: Vector3 = wheel_positions["RL"]
-	var rear_right: Vector3 = wheel_positions["RR"]
-	front_left_wheel.position = front_left
-	front_right_wheel.position = front_right
-	rear_left_wheel.position = rear_left
-	rear_right_wheel.position = rear_right
-
-	vehicle_mass = float(_vehicle_setup.get("mass", config.mass_kg))
-	front_weight_distribution = _front_weight_distribution_from_config(config)
-	center_of_gravity_height_offset = _center_of_gravity_height_offset(front_left, front_right, rear_left, rear_right)
-	inertia_multiplier = clampf(1.05 + vehicle_mass / 3000.0, 1.0, 1.8)
-
-	steering_speed = maxf(float(config.steering_response), 0.1)
-	countersteer_speed = maxf(float(config.steering_return), steering_speed)
-	steering_speed_decay = clampf(0.14 + float(config.high_speed_steer_scale) * 0.22, 0.08, 0.28)
-	steering_slip_assist = clampf(deg_to_rad(float(config.stabilization_slip_deg)) * 0.45, 0.08, 0.28)
-	countersteer_assist = clampf(float(config.steering_yaw_assist) / 1500.0, 0.2, 1.2)
-	steering_exponent = 1.35
-	max_steering_angle = deg_to_rad(float(config.steering_max_degrees) * float(config.steering_lock_scale))
-	front_steering_ratio = 1.0
-	rear_steering_ratio = 0.0
-
-	throttle_speed = 14.0 + float(config.steering_response)
-	throttle_steering_adjust = 0.12
-	braking_speed = 11.0
-	brake_force_multiplier = 1.0
-	front_brake_bias = clampf(0.54 + (front_weight_distribution - 0.5) * 0.32, 0.48, 0.68)
-	traction_control_max_slip = _baseline_traction_control_max_slip(config)
-	front_abs_pulse_time = 0.03
-	front_abs_spin_difference_threshold = 12.0
-	rear_abs_pulse_time = 0.03
-	rear_abs_spin_difference_threshold = 12.0
-
-	enable_stability = true
-	stability_yaw_engage_angle = clampf(float(config.stabilization_slip_deg) / maxf(float(config.drift_slip_deg), 1.0), 0.12, 0.55)
-	stability_yaw_strength = clampf(float(config.yaw_assist) / 220.0, 2.5, 9.5)
-	stability_yaw_ground_multiplier = _baseline_stability_yaw_ground_multiplier(config)
-	stability_upright_spring = 1.15
-	stability_upright_damping = 950.0
-
-	gear_ratios = _typed_float_array(config.forward_gears)
-	final_drive = float(config.final_drive_ratio)
-	reverse_ratio = absf(float(config.reverse_gear_ratio))
-	shift_time = 0.3
-	automatic_transmission = true
-	automatic_time_between_shifts = 1000.0
-	gear_inertia = 0.02
-
-	front_torque_split = _front_torque_split_from_config(config)
-	variable_torque_split = false
-	front_variable_split = front_torque_split
-	variable_split_speed = 1.0
-	front_locking_differential_engage_torque = 180.0
-	front_torque_vectoring = 0.0
-	rear_locking_differential_engage_torque = 180.0
-	rear_torque_vectoring = 0.0
-
-	var front_travel := _suspension_travel(config, true)
-	var rear_travel := _suspension_travel(config, false)
-	front_spring_length = front_travel
-	rear_spring_length = rear_travel
-	front_resting_ratio = _resting_ratio(config, true)
-	rear_resting_ratio = _resting_ratio(config, false)
-	front_damping_ratio = _baseline_damping_ratio(config, true)
-	rear_damping_ratio = _baseline_damping_ratio(config, false)
-	front_bump_damp_multiplier = clampf(float(config.front_bump_damping) / maxf(float(config.front_rebound_damping), 0.1), 0.45, 1.35)
-	front_rebound_damp_multiplier = clampf(float(config.front_rebound_damping) / maxf(float(config.front_bump_damping), 0.1), 0.75, 1.75)
-	rear_bump_damp_multiplier = clampf(float(config.rear_bump_damping) / maxf(float(config.rear_rebound_damping), 0.1), 0.45, 1.35)
-	rear_rebound_damp_multiplier = clampf(float(config.rear_rebound_damping) / maxf(float(config.rear_bump_damping), 0.1), 0.75, 1.75)
-	front_arb_ratio = clampf(float(config.front_anti_roll_coefficient) / 120.0, 0.08, 0.85)
-	rear_arb_ratio = clampf(float(config.rear_anti_roll_coefficient) / 120.0, 0.08, 0.85)
-	front_camber = 0.01745329
-	rear_camber = 0.01745329
-	front_toe = 0.01
-	rear_toe = 0.01
-	front_bump_stop_multiplier = clampf(float(config.front_bump_stop_coefficient) / 28.0, 0.7, 2.2)
-	rear_bump_stop_multiplier = clampf(float(config.rear_bump_stop_coefficient) / 28.0, 0.7, 2.2)
-	front_beam_axle = false
-	rear_beam_axle = false
-
-	contact_patch = 0.19
-	braking_grip_multiplier = _baseline_braking_grip_multiplier(config)
-	wheel_to_body_torque_multiplier = 0.75
-	var grip_profiles := _surface_profiles_from_config(config)
-	tire_stiffnesses = grip_profiles["tire_stiffnesses"]
-	coefficient_of_friction = grip_profiles["coefficient_of_friction"]
-	rolling_resistance = grip_profiles["rolling_resistance"]
-	lateral_grip_assist = grip_profiles["lateral_grip_assist"]
-	longitudinal_grip_ratio = grip_profiles["longitudinal_grip_ratio"]
-	front_tire_radius = float(config.wheel_radii[0]) if config.wheel_radii.size() > 0 else 0.32
-	rear_tire_radius = float(config.wheel_radii[2]) if config.wheel_radii.size() > 2 else front_tire_radius
-	front_tire_width = 245.0
-	rear_tire_width = 255.0
-	front_wheel_mass = 15.0
-	rear_wheel_mass = 16.0
-
-	var body_size: Vector3 = _vehicle_setup.get("body_size", Vector3(1.9, 1.2, 4.6))
-	frontal_area = maxf(body_size.x * body_size.y * 0.82, 1.6)
-	coefficient_of_drag = clampf(0.24 + float(config.aero_drag) * vehicle_mass * 0.22, 0.24, 0.48)
-	air_density = 1.225
-
-	max_rpm = float(config.engine_redline_rpm)
-	idle_rpm = float(config.idle_rpm)
-	_hp2_upshift_rpm = clampf(
-		float(config.shift_up_rpm),
-		float(config.engine_peak_rpm) * 0.75,
-		float(config.engine_redline_rpm) * 0.985
-	)
-	_hp2_downshift_rpm = clampf(
-		float(config.shift_down_rpm),
-		float(config.idle_rpm) * 1.8,
-		float(config.engine_peak_rpm) * 0.82
-	)
-	torque_curve = _build_torque_curve(config.engine_torque_samples)
-	if torque_curve == null:
-		torque_curve = _build_torque_curve(PackedFloat32Array())
-	max_torque = _estimated_max_torque(config)
-	motor_drag = _estimated_motor_drag(config)
-	motor_brake = _estimated_motor_brake(config)
-	motor_moment = clampf(vehicle_mass / 3200.0, 0.4, 1.15)
-	clutch_out_rpm = _estimated_clutch_out_rpm(config)
-	max_clutch_torque_ratio = _estimated_clutch_torque_ratio(config)
-	_runtime_parameters = _build_runtime_parameters(config)
+	var wheel_positions := _vehicle_wheel_positions_from_config()
+	front_left_wheel.position = wheel_positions["FL"]
+	front_right_wheel.position = wheel_positions["FR"]
+	rear_left_wheel.position = wheel_positions["RL"]
+	rear_right_wheel.position = wheel_positions["RR"]
+	if config != null and config.wheel_radii.size() > 0:
+		front_tire_radius = float(config.wheel_radii[0])
+		rear_tire_radius = float(config.wheel_radii[2]) if config.wheel_radii.size() > 2 else front_tire_radius
 
 
 func _reinitialize_vehicle_runtime() -> void:
@@ -412,44 +353,29 @@ func _reinitialize_vehicle_runtime() -> void:
 	current_gravity = ProjectSettings.get_setting("physics/3d/default_gravity_vector", Vector3.DOWN) * ProjectSettings.get_setting("physics/3d/default_gravity", 9.8)
 	initialize()
 	motor_rpm = idle_rpm
-	current_gear = 1
-	requested_gear = 1
-	_apply_brake_force_mapping(config)
-	_apply_ackermann_for_config()
+	current_gear = 0
+	requested_gear = 0
+	need_clutch = true
+	is_shifting = false
+	is_up_shifting = false
+	current_torque_split = 0.0
+	true_torque_split = front_torque_split
 	_sync_visual_wheels_from_helpers()
 
 
-func process_transmission() -> void:
-	super.process_transmission()
-
-
-func _apply_brake_force_mapping(_source_config) -> void:
-	var setup_force := float(_vehicle_setup.get("service_brake_total", max_brake_force))
-	max_brake_force = maxf(setup_force * 0.6, 10.0)
-	max_handbrake_force = maxf(float(_vehicle_setup.get("handbrake_total", max_handbrake_force)) * 0.10, 2.0)
-
-
-func _apply_ackermann_for_config() -> void:
-	var wheel_base := absf(rear_left_wheel.position.z - front_left_wheel.position.z)
-	var front_track_width := absf(front_right_wheel.position.x - front_left_wheel.position.x)
-	var rear_track_width := absf(rear_right_wheel.position.x - rear_left_wheel.position.x)
-	if wheel_base <= 0.0001 or absf(max_steering_angle) <= 0.0001:
-		return
-	var front_ackermann := (atan((wheel_base * tan(max_steering_angle)) / maxf(wheel_base - (front_track_width * 0.5 * tan(max_steering_angle)), 0.0001)) / max_steering_angle) - 1.0
-	var rear_ackermann := (atan((wheel_base * tan(max_steering_angle)) / maxf(wheel_base - (rear_track_width * 0.5 * tan(max_steering_angle)), 0.0001)) / max_steering_angle) - 1.0
-	front_left_wheel.ackermann = front_ackermann
-	front_right_wheel.ackermann = -front_ackermann
-	rear_left_wheel.ackermann = rear_ackermann
-	rear_right_wheel.ackermann = -rear_ackermann
-
-
 func _vehicle_wheel_positions_from_config() -> Dictionary:
+	if config == null:
+		return {
+			"FL": Vector3(-0.72, 0.2, -1.3),
+			"FR": Vector3(0.72, 0.2, -1.3),
+			"RL": Vector3(-0.72, 0.2, 1.36),
+			"RR": Vector3(0.72, 0.2, 1.36),
+		}
 	var out := {}
 	var positions: Array = config.wheel_local_positions_ps2
 	for index in range(mini(SLOT_IDS.size(), positions.size())):
 		var slot_id: String = SLOT_IDS[index]
-		var vehicle_position := VehicleBodyConfigAdapter.gevp_vehicle_space_from_ps2(positions[index])
-		out[slot_id] = vehicle_position
+		out[slot_id] = VehicleBodyConfigAdapter.gevp_vehicle_space_from_ps2(positions[index])
 	return {
 		"FL": out.get("FL", Vector3(-0.72, 0.2, -1.3)),
 		"FR": out.get("FR", Vector3(0.72, 0.2, -1.3)),
@@ -462,7 +388,7 @@ func _sync_scene_component_nodes_from_config() -> void:
 	var car_visual: Node3D = null
 	if _visual_root != null:
 		car_visual = _visual_root.get_node_or_null("CarVisual") as Node3D
-	if car_visual == null:
+	if car_visual == null or config == null:
 		return
 	_ensure_scene_visual_components(car_visual)
 	var body_root := car_visual.get_node_or_null("Body") as Node3D
@@ -521,398 +447,80 @@ func _read_action_pair(primary_action: String, fallback_action: String) -> float
 
 func _cache_wheel_nodes() -> void:
 	_wheel_nodes = {
-		"FL": get_node_or_null("WheelFrontLeft"),
-		"FR": get_node_or_null("WheelFrontRight"),
-		"RL": get_node_or_null("WheelRearLeft"),
-		"RR": get_node_or_null("WheelRearRight"),
+		"FL": front_left_wheel,
+		"FR": front_right_wheel,
+		"RL": rear_left_wheel,
+		"RR": rear_right_wheel,
 	}
-	_wheel_helpers = {
-		"FL": get_node_or_null("WheelFrontLeft/FrontLeftWheel"),
-		"FR": get_node_or_null("WheelFrontRight/FrontRightWheel"),
-		"RL": get_node_or_null("WheelRearLeft/RearLeftWheel"),
-		"RR": get_node_or_null("WheelRearRight/RearRightWheel"),
-	}
+	_wheel_helpers.clear()
+	for slot_id in SLOT_IDS:
+		var wheel := _wheel_nodes.get(slot_id, null) as Wheel
+		if wheel == null or wheel.wheel_node == null:
+			continue
+		_wheel_helpers[slot_id] = wheel.wheel_node
 
 
 func _sync_visual_wheels_from_helpers() -> void:
 	for slot_id in SLOT_IDS:
+		var wheel := _wheel_nodes.get(slot_id, null) as Wheel
 		var helper := _wheel_helpers.get(slot_id, null) as Node3D
-		if helper == null:
+		if wheel == null or helper == null:
 			continue
 		var suspension_node := _wheel_suspension_nodes.get(slot_id, null) as Node3D
-		if suspension_node != null:
-			var suspension_position := suspension_node.position
-			suspension_position.y = helper.position.y
-			suspension_node.position = suspension_position
-		var wheel_node := _wheel_nodes.get(slot_id, null) as Wheel
 		var steer_node := _wheel_steer_nodes.get(slot_id, null) as Node3D
-		if wheel_node != null and steer_node != null:
-			var steer_rotation := steer_node.rotation
-			steer_rotation.y = wheel_node.rotation.y
-			steer_node.rotation = steer_rotation
 		var roll_node := _wheel_roll_nodes.get(slot_id, null) as Node3D
-		if roll_node != null:
-			var roll_rotation := roll_node.rotation
-			roll_rotation.z = helper.rotation.z
-			roll_node.rotation = roll_rotation
 		var spin_node := _wheel_spin_nodes.get(slot_id, null) as Node3D
+		if suspension_node != null:
+			suspension_node.position.y = helper.position.y
+		if steer_node != null:
+			steer_node.rotation.y = wheel.rotation.y
+		if roll_node != null:
+			roll_node.rotation.z = wheel.rotation.z
 		if spin_node != null:
-			var spin_rotation := spin_node.rotation
-			spin_rotation.x = helper.rotation.x * float(spin_node.get_meta("eagl_spin_direction", 1.0))
-			spin_node.rotation = spin_rotation
+			spin_node.rotation.x = helper.rotation.x
 
 
-func _update_debug_snapshot() -> void:
-	var dominant_surface := surface_type
-	var surface_mu_total := 0.0
-	var surface_mu_count := 0
-	var wheel_rows: Array[Dictionary] = []
-	var engine_force_total := 0.0
-	var engine_brake_total := 0.0
-	for slot_id in SLOT_IDS:
-		var wheel := _wheel_nodes.get(slot_id, null) as Wheel
-		if wheel == null:
-			continue
-		var wheel_surface: String = _normalize_surface_name(String(wheel.surface_type))
-		if wheel.is_colliding():
-			dominant_surface = wheel_surface
-		surface_mu_total += float(wheel.current_cof)
-		surface_mu_count += 1
-		var wheel_engine_force := float(wheel.force_vector.y) if wheel.is_driven else 0.0
-		var wheel_brake_force := _command_brake_force_for_wheel(slot_id)
-		engine_force_total += wheel_engine_force
-		engine_brake_total += wheel_brake_force
-		var wheel_row := {
-			"slot": slot_id,
-			"grounded": wheel.is_colliding(),
-			"rpm": wheel.spin * 60.0 / TAU,
-			"skid": wheel.slip_vector.length(),
-			"lock": wheel.limit_spin,
-			"slip_locked": wheel.limit_spin,
-			"steering_deg": rad_to_deg(wheel.rotation.y),
-			"engine_force": wheel_engine_force,
-			"brake_force": wheel_brake_force,
-			"suspension_length": wheel.spring_current_length,
-			"raw_length": wheel.spring_current_length,
-			"current_length": wheel.spring_current_length,
-			"travel_velocity": wheel.damping_force,
-			"spring_force": wheel.spring_force,
-			"damper_force": wheel.damping_force,
-			"suspension_force": wheel.spring_force,
-			"normal_load": wheel.spring_force,
-			"slip_long": wheel.slip_vector.y,
-			"slip_lat": wheel.slip_vector.x,
-			"force_long": wheel.force_vector.y,
-			"force_lat": wheel.force_vector.x,
-			"grip": wheel.slip_vector.length(),
-			"surface_type": wheel_surface,
-		}
-		if wheel.has_method("get_hp2_debug_state"):
-			wheel_row.merge(wheel.call("get_hp2_debug_state"), true)
-		wheel_rows.append(wheel_row)
-	var flat_speed := Vector3(linear_velocity.x, 0.0, linear_velocity.z).length()
-	_debug_snapshot = {
-		"speed_kmh": flat_speed * 3.6,
-		"speed_kph": flat_speed * 3.6,
-		"speed_ms": flat_speed,
-		"rpm": motor_rpm,
-		"gear": current_gear,
-		"slip_angle_deg": _slip_angle_deg(),
-		"steering_deg": rad_to_deg(true_steering_amount),
-		"mass_kg": mass,
-		"mass_is_estimate": bool(_vehicle_setup.get("mass_is_estimate", false)),
-		"driven_wheel_count": drive_wheels.size(),
-		"engine_force_gain": float(_vehicle_setup.get("engine_force_normalization_gain", 0.0)),
-		"hp2_launch_accel_reference": float(_vehicle_setup.get("hp2_launch_accel_reference", 0.0)),
-		"drag_force": 0.5 * air_density * pow(flat_speed, 2.0) * frontal_area * coefficient_of_drag,
-		"engine_force_total": engine_force_total,
-		"engine_brake_total": engine_brake_total,
-		"surface_type": dominant_surface,
-		"surface_mu": surface_mu_total / float(surface_mu_count) if surface_mu_count > 0 else 0.0,
-		"grip_solver": get_hp2_grip_solver_name(),
-		"handling_baseline": handling_baseline,
-		"road_cof": float(coefficient_of_friction.get("Road", 0.0)),
-		"road_tire_stiffness": float(tire_stiffnesses.get("Road", 0.0)),
-		"traction_control_active": tcs_active,
-		"stability_active": stability_active,
-		"wheels": wheel_rows,
-		"runtime": _runtime_parameters.duplicate(true),
-	}
+func _apply_default_surface_type() -> void:
+	for wheel in _wheel_nodes.values():
+		if wheel is Wheel:
+			(wheel as Wheel).surface_type = surface_type
 
 
-func _wheel_snapshot_value(slot_id: String, key: String):
-	for wheel in _debug_snapshot.get("wheels", []):
-		if String(wheel.get("slot", "")) == slot_id:
-			return wheel.get(key, 0.0)
-	return 0.0
+func _apply_demo_arcade_defaults() -> void:
+	stability_yaw_ground_multiplier = 6.0
+	variable_torque_split = true
+	front_variable_split = 0.5
+	center_of_gravity_height_offset = -0.25
+	front_damping_ratio = 0.6
+	rear_damping_ratio = 0.6
+	braking_grip_multiplier = 2.0
 
 
-func _slip_angle_deg() -> float:
-	var horizontal_velocity := Vector3(linear_velocity.x, 0.0, linear_velocity.z)
-	if horizontal_velocity.length_squared() <= 0.0001:
-		return 0.0
-	var forward := (global_transform.basis * Vector3.FORWARD).normalized()
-	var flat_forward := Vector3(forward.x, 0.0, forward.z).normalized()
-	if flat_forward.length_squared() <= 0.0001:
-		return 0.0
-	var flat_velocity := horizontal_velocity.normalized()
-	return rad_to_deg(atan2(flat_forward.cross(flat_velocity).y, flat_forward.dot(flat_velocity)))
-
-
-func _command_brake_force_for_wheel(slot_id: String) -> float:
-	var axle := front_axle if slot_id in ["FL", "FR"] else rear_axle
-	if axle == null:
-		return 0.0
-	var base_force := brake_force * 0.5 * axle.brake_bias
-	if slot_id in ["RL", "RR"]:
-		base_force += handbrake_force * 0.5
-	return base_force
-
-
-func _build_runtime_parameters(source_config) -> Dictionary:
-	return {
-		"wheelbase": absf(float(source_config.wheelbase_meters())),
-		"wheel_radius": source_config.driven_average_radius(),
-		"gear_ratios": _float_array(source_config.forward_gears),
-		"reverse_ratio": absf(float(source_config.reverse_gear_ratio)),
-		"final_drive": float(source_config.final_drive_ratio),
-		"front_longitudinal_grip": float(source_config.front_longitudinal_grip),
-		"rear_longitudinal_grip": float(source_config.rear_longitudinal_grip),
-		"front_lateral_grip": float(source_config.front_lateral_grip),
-		"rear_lateral_grip": float(source_config.rear_lateral_grip),
-		"max_torque": max_torque,
-		"idle_rpm": idle_rpm,
-		"peak_rpm": float(source_config.engine_peak_rpm),
-		"max_rpm": max_rpm,
-		"motor_drag": motor_drag,
-		"motor_brake": motor_brake,
-		"upshift_rpm": _hp2_upshift_rpm,
-		"downshift_rpm": _hp2_downshift_rpm,
-		"steering_speed": steering_speed,
-		"countersteer_speed": countersteer_speed,
-		"max_steer_degrees": rad_to_deg(max_steering_angle),
-		"grip_solver": get_hp2_grip_solver_name(),
-		"handling_baseline": handling_baseline,
-		"front_weight_distribution": front_weight_distribution,
-		"coefficient_of_drag": coefficient_of_drag,
-		"rolling_resistance": rolling_resistance.get("Road", 1.0),
-		"road_cof": coefficient_of_friction.get("Road", 0.0),
-		"road_tire_stiffness": tire_stiffnesses.get("Road", 0.0),
-		"surface_force_scale": coefficient_of_friction.duplicate(true),
-		"tire_stiffnesses": tire_stiffnesses.duplicate(true),
-		"coefficient_of_friction": coefficient_of_friction.duplicate(true),
-		"longitudinal_grip_ratio": longitudinal_grip_ratio.duplicate(true),
-		"torque_curve": _samples_to_points(source_config.engine_torque_samples),
-		"friction_curve": _friction_curve_points(source_config.engine_friction_samples),
-	}
-
-
-func _surface_profiles_from_config(source_config) -> Dictionary:
-	var rolling_scale := clampf(1.0 + (float(source_config.rolling_resistance) - 0.045) * 4.0, 0.90, 1.15)
-	return {
-		"tire_stiffnesses": {
-			"Road": DEMO_ROAD_TIRE_STIFFNESS,
-			"Dirt": DEMO_DIRT_TIRE_STIFFNESS,
-			"Grass": DEMO_GRASS_TIRE_STIFFNESS,
-		},
-		"coefficient_of_friction": {
-			"Road": DEMO_ROAD_COF,
-			"Dirt": DEMO_DIRT_COF,
-			"Grass": DEMO_GRASS_COF,
-		},
-		"rolling_resistance": {
-			"Road": DEMO_ROAD_ROLLING_RESISTANCE * rolling_scale,
-			"Dirt": DEMO_DIRT_ROLLING_RESISTANCE * rolling_scale,
-			"Grass": DEMO_GRASS_ROLLING_RESISTANCE * rolling_scale,
-		},
-		"lateral_grip_assist": {
-			"Road": 0.0,
-			"Dirt": 0.0,
-			"Grass": 0.0,
-		},
-		"longitudinal_grip_ratio": {
-			"Road": 1.0,
-			"Dirt": 1.0,
-			"Grass": 1.0,
-		},
-	}
-
-
-func _grip_scalar(value: float, reference_value: float, minimum: float, maximum: float) -> float:
-	return clampf(1.0 + ((value - reference_value) * 0.28), minimum, maximum)
-
-
-func _baseline_damping_ratio(source_config, is_front: bool) -> float:
-	var bump: float = source_config.front_bump_damping if is_front else source_config.rear_bump_damping
-	return clampf(DEMO_DAMPING_RATIO + ((bump - 5.0) * 0.035), 0.52, 0.72)
-
-
-func _baseline_braking_grip_multiplier(source_config) -> float:
-	var brake_scalar := clampf(1.0 + ((float(source_config.brake_force) - 10500.0) / 9000.0) * 0.18, 0.94, 1.08)
-	return clampf(DEMO_BRAKING_GRIP_MULTIPLIER * brake_scalar, 0.95, 1.25)
-
-
-func _baseline_stability_yaw_ground_multiplier(source_config) -> float:
-	return clampf(DEMO_STABILITY_YAW_GROUND_MULTIPLIER + ((float(source_config.yaw_damping) - 1.8) * 0.12), 1.0, 1.6)
-
-
-func _baseline_traction_control_max_slip(source_config) -> float:
-	return DEMO_TRACTION_CONTROL_MAX_SLIP
-
-
-func _log_runtime_configuration() -> void:
-	print(
-		"HP2Car config baseline=%s solver=%s road_cof=%.2f road_tire_stiffness=%.2f engine_sound=%s" % [
-			handling_baseline,
-			get_hp2_grip_solver_name(),
-			float(coefficient_of_friction.get("Road", 0.0)),
-			float(tire_stiffnesses.get("Road", 0.0)),
-			"yes" if get_node_or_null("EngineSound") != null else "no",
-		]
-	)
-
-
-func _normalize_surface_name(value: String) -> String:
-	match value.to_lower():
-		"asphalt", "road":
-			return "Road"
-		"terrain", "dirt":
-			return "Dirt"
-		"grass":
-			return "Grass"
-		_:
-			return "Road"
-
-
-func _typed_float_array(values) -> Array[float]:
-	var out: Array[float] = []
-	for value in values:
-		out.append(float(value))
-	return out
-
-
-func _float_array(values) -> Array:
-	var out: Array = []
-	for value in values:
-		out.append(float(value))
-	return out
-
-
-func _build_torque_curve(samples: PackedFloat32Array) -> Curve:
+func _ensure_default_gevp_curve() -> void:
+	if torque_curve != null:
+		return
 	var curve := Curve.new()
-	if samples.is_empty():
-		curve.add_point(Vector2(0.0, 0.45))
-		curve.add_point(Vector2(0.6, 1.0))
-		curve.add_point(Vector2(1.0, 0.7))
-		return curve
-	var max_sample := 0.0
-	for sample in samples:
-		max_sample = maxf(max_sample, float(sample))
-	var denom := maxf(float(samples.size() - 1), 1.0)
-	for index in range(samples.size()):
-		var x := float(index) / denom
-		var y := float(samples[index]) / maxf(max_sample, 0.0001)
-		curve.add_point(Vector2(x, y))
-	return curve
+	curve.add_point(Vector2(0.0, 0.494505))
+	curve.add_point(Vector2(0.617978, 1.0))
+	curve.add_point(Vector2(1.0, 0.692308))
+	torque_curve = curve
 
 
-func _estimated_max_torque(source_config) -> float:
-	if gear_ratios.is_empty():
-		return 300.0
-	var avg_radius := maxf(source_config.driven_average_radius(), 0.1)
-	var first_ratio := maxf(absf(float(gear_ratios[0]) * final_drive), 0.1)
-	var idle_factor := torque_curve.sample_baked(clampf(idle_rpm / maxf(max_rpm, 1.0), 0.0, 1.0))
-	var hp2_idle_launch_force := float(_vehicle_setup.get("hp2_idle_launch_force_total", source_config.engine_force_scale))
-	var hp2_peak_launch_force := float(_vehicle_setup.get("hp2_launch_force_total", hp2_idle_launch_force))
-	var idle_torque_match := hp2_idle_launch_force * avg_radius / maxf(first_ratio * maxf(idle_factor, 0.18), 0.1)
-	var peak_torque_match := hp2_peak_launch_force * avg_radius / first_ratio
-	var torque_estimate := lerpf(idle_torque_match, peak_torque_match, 0.68)
-	return clampf(torque_estimate, 900.0, 3200.0)
-
-
-func _estimated_motor_drag(source_config) -> float:
-	return 0.005
-
-
-func _estimated_motor_brake(source_config) -> float:
-	return 10.0
-
-
-func _estimated_clutch_out_rpm(source_config) -> float:
-	return clampf(float(source_config.engine_peak_rpm) * 0.46, 2800.0, 3200.0)
-
-
-func _estimated_clutch_torque_ratio(source_config) -> float:
-	return 1.6
-
-
-func _average_sample(samples: PackedFloat32Array, fallback: float) -> float:
-	if samples.is_empty():
-		return fallback
-	var total := 0.0
-	for sample in samples:
-		total += float(sample)
-	return total / float(samples.size())
-
-
-func _front_torque_split_from_config(source_config) -> float:
-	var split: Dictionary = source_config.drivetrain_axle_bias()
-	return clampf(float(split.get("front", 0.0)), 0.0, 1.0)
-
-
-func _front_weight_distribution_from_config(source_config) -> float:
-	var load_origin_x: float = source_config.physics_origin_offset_ps2.x
-	if absf(load_origin_x) <= 0.0001:
-		load_origin_x = source_config.center_of_mass_ps2.x
-	var front_x: float = source_config.front_axle_center_x() - load_origin_x
-	var rear_x: float = source_config.rear_axle_center_x() - load_origin_x
-	var denom: float = front_x - rear_x
-	if absf(denom) <= 0.0001:
-		return 0.5
-	var rear_each_fraction: float = (front_x / denom) * 0.5
-	var front_each_fraction: float = 0.5 - rear_each_fraction
-	return clampf(front_each_fraction * 2.0, 0.25, 0.75)
-
-
-func _center_of_gravity_height_offset(front_left: Vector3, front_right: Vector3, rear_left: Vector3, rear_right: Vector3) -> float:
-	var axle_front := front_left.lerp(front_right, 0.5)
-	var axle_rear := rear_left.lerp(rear_right, 0.5)
-	var base_center := axle_rear.lerp(axle_front, front_weight_distribution)
-	var com_vehicle: Vector3 = _vehicle_setup.get("center_of_mass", Vector3.ZERO)
-	return float(com_vehicle.y) - base_center.y
-
-
-func _suspension_travel(source_config, is_front: bool) -> float:
-	var min_compression: float = source_config.front_min_compression if is_front else source_config.rear_min_compression
-	var max_compression: float = source_config.front_max_compression if is_front else source_config.rear_max_compression
-	return clampf(absf(max_compression - min_compression), 0.12, 0.35)
-
-
-func _resting_ratio(source_config, is_front: bool) -> float:
-	var min_compression: float = source_config.front_min_compression if is_front else source_config.rear_min_compression
-	var max_compression: float = source_config.front_max_compression if is_front else source_config.rear_max_compression
-	var travel := maxf(absf(max_compression - min_compression), 0.001)
-	return clampf(absf(min_compression) / travel, 0.18, 0.82)
-
-
-func _samples_to_points(samples: PackedFloat32Array) -> Array:
-	var out: Array = []
-	if samples.is_empty():
-		return out
-	var denom := maxf(float(samples.size() - 1), 1.0)
-	for index in range(samples.size()):
-		out.append([float(index) / denom, float(samples[index])])
-	return out
-
-
-func _friction_curve_points(samples: PackedFloat32Array) -> Array:
-	var out: Array = []
-	if samples.is_empty():
-		return [[0.0, motor_brake], [1.0, motor_brake + motor_drag * max_rpm]]
-	var denom := maxf(float(samples.size() - 1), 1.0)
-	for index in range(samples.size()):
-		out.append([float(index) / denom, float(samples[index]) * 40.0])
-	return out
+func _configured_ride_height(source_config) -> float:
+	if source_config == null:
+		return ride_height
+	var configured_positions = source_config.get("wheel_local_positions_ps2")
+	var configured_radii = source_config.get("wheel_radii")
+	if configured_positions == null or configured_radii == null:
+		return ride_height
+	var count = mini(configured_positions.size(), configured_radii.size())
+	if count <= 0:
+		return ride_height
+	var target_height := 0.0
+	for index in range(count):
+		var pivot_local_z: float = configured_positions[index].z
+		target_height = maxf(target_height, float(configured_radii[index]) - pivot_local_z)
+	return target_height + 0.02
 
 
 func _fit_chassis_collision_shape() -> void:
@@ -923,10 +531,9 @@ func _fit_chassis_collision_shape() -> void:
 	if box_shape == null:
 		box_shape = BoxShape3D.new()
 		collision_shape.shape = box_shape
-	var body_size: Vector3 = _vehicle_setup.get("body_size", Vector3(1.9, 1.2, 4.6))
-	var collision_center: Vector3 = _vehicle_setup.get("collision_center", Vector3(0.0, body_size.y * 0.5, 0.0))
+	var body_size := VehicleBodyConfigAdapter.body_size_vehicle(config) if config != null else Vector3(1.9, 1.2, 4.6)
 	box_shape.size = body_size
-	collision_shape.position = collision_center
+	collision_shape.position = Vector3(0.0, body_size.y * 0.5, 0.0)
 
 
 func _fit_collision_shape_to_visual_bounds() -> void:
@@ -1080,105 +687,13 @@ func _remove_child_now(parent: Node, child: Node) -> void:
 	child.queue_free()
 
 
-func _ensure_debug_mesh() -> void:
-	_debug_mesh_instance = get_node_or_null("DebugLines") as MeshInstance3D
-	if _debug_mesh_instance == null:
-		return
-	if _debug_material == null:
-		_debug_material = StandardMaterial3D.new()
-		_debug_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		_debug_material.vertex_color_use_as_albedo = true
-		_debug_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		_debug_material.no_depth_test = true
-	_debug_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_debug_mesh_instance.material_override = _debug_material
-	_debug_mesh_instance.mesh = _debug_mesh
-
-
-func _rebuild_debug_mesh() -> void:
-	if _debug_mesh_instance == null:
-		_ensure_debug_mesh()
-	if _debug_mesh_instance == null:
-		return
-	_debug_mesh.clear_surfaces()
-	_debug_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
-	_add_collision_wireframe()
-	for slot_id in SLOT_IDS:
-		var raycast := _wheel_nodes.get(slot_id, null) as Wheel
-		if raycast == null:
-			continue
-		var helper := _wheel_helpers.get(slot_id, null) as Node3D
-		var pivot := to_local(raycast.global_position)
-		var center := pivot
-		if helper != null:
-			center = to_local(helper.global_position)
-		_debug_mesh.surface_set_color(Color(0.0, 0.85, 1.0, 1.0))
-		_debug_mesh.surface_add_vertex(pivot)
-		_debug_mesh.surface_add_vertex(center)
-		_debug_mesh.surface_set_color(Color(1.0, 0.75, 0.2, 0.95))
-		_add_debug_cross(center, 0.07)
-		if raycast.is_colliding():
-			var contact := to_local(raycast.last_collision_point)
-			var normal_end := to_local(raycast.last_collision_point + raycast.last_collision_normal * 0.45)
-			_debug_mesh.surface_set_color(Color(0.25, 1.0, 0.3, 0.95))
-			_debug_mesh.surface_add_vertex(center)
-			_debug_mesh.surface_add_vertex(contact)
-			_add_debug_cross(contact, 0.05)
-			_debug_mesh.surface_add_vertex(contact)
-			_debug_mesh.surface_add_vertex(normal_end)
-			_add_force_component(pivot + Vector3.LEFT * 0.08, Vector3.UP, raycast.spring_force, maxf(raycast.spring_force, 1.0), Color(0.1, 1.0, 0.35, 0.9))
-			_add_force_component(contact, Vector3.FORWARD, raycast.force_vector.y, maxf(absf(raycast.force_vector.y), 1.0), Color(1.0, 0.55, 0.18, 0.9))
-			_add_force_component(contact, Vector3.RIGHT, raycast.force_vector.x, maxf(absf(raycast.force_vector.x), 1.0), Color(0.22, 0.78, 1.0, 0.9))
-	_debug_mesh.surface_end()
-
-
-func _add_collision_wireframe() -> void:
-	var collision_shape := get_node_or_null("CollisionShape3D") as CollisionShape3D
-	if collision_shape == null:
-		return
-	var box_shape := collision_shape.shape as BoxShape3D
-	if box_shape == null:
-		return
-	var extents := box_shape.size * 0.5
-	var corners := [
-		Vector3(-extents.x, -extents.y, -extents.z),
-		Vector3(extents.x, -extents.y, -extents.z),
-		Vector3(extents.x, extents.y, -extents.z),
-		Vector3(-extents.x, extents.y, -extents.z),
-		Vector3(-extents.x, -extents.y, extents.z),
-		Vector3(extents.x, -extents.y, extents.z),
-		Vector3(extents.x, extents.y, extents.z),
-		Vector3(-extents.x, extents.y, extents.z),
-	]
-	var edges := [
-		Vector2i(0, 1), Vector2i(1, 2), Vector2i(2, 3), Vector2i(3, 0),
-		Vector2i(4, 5), Vector2i(5, 6), Vector2i(6, 7), Vector2i(7, 4),
-		Vector2i(0, 4), Vector2i(1, 5), Vector2i(2, 6), Vector2i(3, 7),
-	]
-	_debug_mesh.surface_set_color(Color(1.0, 1.0, 1.0, 0.85))
-	for edge in edges:
-		var start: Vector3 = collision_shape.transform * corners[edge.x]
-		var finish: Vector3 = collision_shape.transform * corners[edge.y]
-		_debug_mesh.surface_add_vertex(start)
-		_debug_mesh.surface_add_vertex(finish)
-
-
-func _add_debug_cross(center: Vector3, radius: float) -> void:
-	_debug_mesh.surface_add_vertex(center + Vector3.LEFT * radius)
-	_debug_mesh.surface_add_vertex(center + Vector3.RIGHT * radius)
-	_debug_mesh.surface_add_vertex(center + Vector3.UP * radius)
-	_debug_mesh.surface_add_vertex(center + Vector3.DOWN * radius)
-	_debug_mesh.surface_add_vertex(center + Vector3.FORWARD * radius)
-	_debug_mesh.surface_add_vertex(center + Vector3.BACK * radius)
-
-
-func _add_force_component(origin: Vector3, direction: Vector3, value: float, reference_value: float, color: Color) -> void:
-	var magnitude := clampf(value / maxf(reference_value, 0.001), -1.0, 1.0)
-	var end_point := origin + direction.normalized() * magnitude * 0.35
-	_debug_mesh.surface_set_color(color)
-	_debug_mesh.surface_add_vertex(origin)
-	_debug_mesh.surface_add_vertex(end_point)
-
-
-func _godot_to_ps2(value: Vector3) -> Vector3:
-	return Vector3(value.x, -value.z, value.y)
+func _normalize_surface_name(value: String) -> String:
+	match value.to_lower():
+		"asphalt", "road":
+			return "Road"
+		"terrain", "dirt":
+			return "Dirt"
+		"grass":
+			return "Grass"
+		_:
+			return "Road"

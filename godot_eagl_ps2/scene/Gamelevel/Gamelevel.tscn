@@ -1,8 +1,8 @@
 [gd_scene format=3 uid="uid://qm1toibrlx5n"]
 
 [ext_resource type="Script" uid="uid://dy84qu6sq5k27" path="res://scene/Gamelevel/gamelevel.gd" id="1"]
-[ext_resource type="PackedScene" uid="uid://de5vwlin5j5k8" path="res://eagl/entity/Track.tscn" id="2"]
-[ext_resource type="PackedScene" uid="uid://bx30y3w6dic5l" path="res://eagl/entity/Car.tscn" id="3"]
+[ext_resource type="PackedScene" path="res://eagl/entity/Track.tscn" id="2"]
+[ext_resource type="PackedScene" uid="uid://dqtvs4j1abco1" path="res://gameplay/vehicles/hp2_controller/hp2_car.tscn" id="3"]
 [ext_resource type="PackedScene" uid="uid://d1767pd6qqkrd" path="res://gameplay/ui/level_ui.tscn" id="4_g6qnq"]
 [ext_resource type="AudioStream" uid="uid://1ubhf6rian52" path="res://scene/Gamelevel/test.mp3" id="5_om873"]
 [ext_resource type="PackedScene" path="res://eagl/entity/CarCamera.tscn" id="6_5jd2h"]

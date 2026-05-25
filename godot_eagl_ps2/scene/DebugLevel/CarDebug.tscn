@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://ccsn403ygawdo"]
 
-[ext_resource type="Script" uid="uid://bp3rlrj7y2s3l" path="res://eagl/debug/car_debug.gd" id="1"]
+[ext_resource type="Script" uid="uid://bp3rlrj7y2s3l" path="res://scene/DebugLevel/car_debug.gd" id="1"]
 [ext_resource type="PackedScene" uid="uid://dqtvs4j1abco1" path="res://gameplay/vehicles/hp2_controller/hp2_car.tscn" id="2"]
 [ext_resource type="Script" uid="uid://c3m2piscjto08" path="res://gameplay/debug/debug_speedometer.gd" id="3_w642t"]
 
@@ -45,7 +45,6 @@ mesh = SubResource("4")
 
 [node name="Car" parent="." unique_id=677299104 instance=ExtResource("2")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.35, 0)
-surface_type = "Road"
 
 [node name="FollowCamera" type="Camera3D" parent="." unique_id=1739694075]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 4, 0)

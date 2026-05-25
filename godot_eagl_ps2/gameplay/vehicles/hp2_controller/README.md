@@ -1,14 +1,14 @@
 # HP2 Vehicle Harness
 
-`hp2_car.tscn` now uses the GEVP vehicle controller through `gevp_vehicle_adapter.gd`, while preserving the PS2 vehicle visual loading path and handling config adaptation.
+`hp2_car.tscn` now keeps the PS2 vehicle visual loading path, but drives through stock `gevp` vehicle and wheel behavior instead of the previous HP2-to-GEVP handling adaptation layer.
 
 The legacy planar HP2 validation controller is still kept in this folder for reference and older benchmark work, but it is not the controller used by `hp2_car.tscn`, `CarDebug.tscn`, or `Gamelevel.tscn`.
 
 ## Files
 
-- `hp2_car.tscn` - `RigidBody3D` vehicle scene wired to the GEVP adapter and PS2 visual skeleton.
-- `gevp_vehicle_adapter.gd` - GEVP-based vehicle controller adapter used by `hp2_car.tscn`.
-- `gevp_wheel_adapter.gd` - GEVP wheel adapter with EAGL surface mapping and drive-area fallback handling.
+- `hp2_car.tscn` - `RigidBody3D` vehicle scene wired to stock `gevp` wheel physics and the PS2 visual skeleton.
+- `gevp_vehicle_adapter.gd` - thin scene adapter that keeps PS2 wheel placement, collision fitting, input mapping, and visual assembly sync without remapping handling values.
+- `gevp_wheel_adapter.gd` - older HP2 wheel adaptation path kept in the repo for reference; no longer used by `hp2_car.tscn`.
 - `engine.gd` / `drivetrain.gd` - simplified torque curve, shift cut, automatic gears, and RWD torque split.
 - `input_source.gd`, `player_input.gd`, `scripted_input.gd` - deterministic input abstraction.
 - `telemetry_exporter.gd` - strict CSV schema writer.
