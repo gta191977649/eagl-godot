@@ -11,6 +11,7 @@ from .chunks import format_chunk_tree, parse_chunks
 from .comp import decompress_lzc, load_bundle_bytes
 from .debug_writer import write_ps2mesh_debug
 from .glb_writer import write_glb
+from .godot_writer import write_godot_track_package
 from .gs_transform_benchmark import benchmark_transform_against_gsdump
 from .gs_oracle import compare_track_to_gsdump
 from .gs_validate import validate_gsdump_against_track
@@ -130,8 +131,32 @@ def _cmd_export(args: argparse.Namespace) -> int:
             progress=True,
         )
     else:
-        write_obj(scene, out_path, progress=True)
+        write_obj(scene, out_path, progress=True, expand_instances=args.with_placement)
     print(f"wrote {out_path} ({len(scene.objects)} objects, {scene.vertex_count} decoded vertices)")
+    return 0
+
+
+def _cmd_export_godot(args: argparse.Namespace) -> int:
+    src = _resolve_track_input(args)
+    data = load_bundle_bytes(src)
+    scene = parse_scene(parse_chunks(data), data)
+    if not scene.objects:
+        raise SystemExit("no mesh objects decoded")
+    texture_dir = Path(args.texture_dir) if args.texture_dir else None
+    textures = load_texture_library_for_track(src, texture_dir)
+    out_dir = Path(args.output) if args.output else src.with_suffix("")
+    manifest_path = write_godot_track_package(
+        scene,
+        out_dir,
+        src.stem,
+        textures,
+        vertex_colors=args.vertex_colors,
+        progress=True,
+    )
+    print(
+        f"wrote {manifest_path} "
+        f"({len(scene.objects)} objects, {len(scene.scenery_instances)} scenery instances, {scene.vertex_count} decoded vertices)"
+    )
     return 0
 
 
@@ -282,6 +307,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(func=_cmd_export)
 
+    godot_parser = subparsers.add_parser(
+        "export-godot",
+        help="export a Godot-optimized .eagltrack package",
+    )
+    godot_parser.add_argument("input", nargs="?")
+    godot_parser.add_argument("-o", "--output", help="output directory for .eagltrack.json/bin and textures")
+    godot_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
+    godot_parser.add_argument("--track", type=int, help="track number, for example 44 for TRACKB44")
+    godot_parser.add_argument("--texture-dir", help="directory containing TEX##TRACK.BIN and TEX##LOCATION.BIN")
+    godot_parser.add_argument(
+        "--vertex-colors",
+        choices=("auto", "always", "off"),
+        default="always",
+        help="vertex color export mode for Godot output",
+    )
+    godot_parser.set_defaults(func=_cmd_export_godot)
+
     dual_parser = subparsers.add_parser(
         "export-dual",
         help="export a native-primitive GLB plus ps2mesh debug JSON/BIN",
@@ -422,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
     if argv and argv[0] not in {
         "export",
+        "export-godot",
         "export-dual",
         "export-placement",
         "decompress",

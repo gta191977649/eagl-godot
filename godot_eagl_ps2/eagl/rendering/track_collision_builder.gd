@@ -18,10 +18,26 @@ const CATEGORY_COLORS := {
 }
 
 const DEFAULT_DEBUG_SURFACE_OFFSET := 0.08
+const DEFAULT_DRIVABLE_MIN_NORMAL_Y := 0.1
 
 
 func add_track_collision(track_root: Node3D, asset, options: Dictionary = {}) -> Dictionary:
 	var source_stats: Dictionary = asset.collision_stats.duplicate(true)
+	if not bool(options.get("build_collision", false)):
+		var disabled_stats := source_stats.duplicate(true)
+		disabled_stats["enabled"] = false
+		_apply_root_metadata(track_root, disabled_stats)
+		return disabled_stats
+
+	return add_collision_surfaces(track_root, asset.collision_surfaces, options, source_stats)
+
+
+func add_collision_surfaces(
+	track_root: Node3D,
+	surfaces: Array[Dictionary],
+	options: Dictionary = {},
+	source_stats: Dictionary = {}
+) -> Dictionary:
 	if not bool(options.get("build_collision", false)):
 		var disabled_stats := source_stats.duplicate(true)
 		disabled_stats["enabled"] = false
@@ -37,7 +53,7 @@ func add_track_collision(track_root: Node3D, asset, options: Dictionary = {}) ->
 	var mask := int(options.get("collision_mask", 1))
 	var overlay_visible := bool(options.get("collision_debug_visible", false))
 	var overlay_surface_offset := float(options.get("collision_debug_surface_offset", DEFAULT_DEBUG_SURFACE_OFFSET))
-	var built_stats := _build_collision_nodes(collision_root, asset.collision_surfaces, layer, mask, overlay_visible, overlay_surface_offset, source_stats)
+	var built_stats := _build_collision_nodes(collision_root, surfaces, layer, mask, overlay_visible, overlay_surface_offset, source_stats)
 	_apply_root_metadata(track_root, built_stats)
 	return built_stats
 
@@ -51,8 +67,10 @@ func set_debug_overlay_visible(track_root: Node, visible: bool) -> void:
 
 
 func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary], layer: int, mask: int, overlay_visible: bool, overlay_surface_offset: float, source_stats: Dictionary) -> Dictionary:
-	var physics_grouped := _group_faces_by_category(surfaces, false)
-	var overlay_grouped := _group_faces_by_category(surfaces, true)
+	var sanitization := _sanitize_surfaces(surfaces)
+	var sanitized_surfaces: Array[Dictionary] = sanitization.get("surfaces", [])
+	var physics_grouped := _group_faces_by_category(sanitized_surfaces, false)
+	var overlay_grouped := _group_faces_by_category(sanitized_surfaces, true)
 	var overlay_line_grouped := _group_debug_lines_by_category(surfaces)
 	var body_count := 0
 	var shape_count := 0
@@ -82,7 +100,7 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 
 		if not faces.is_empty():
 			var shape := ConcavePolygonShape3D.new()
-			shape.backface_collision = true
+			shape.backface_collision = _use_backface_collision(category)
 			shape.set_faces(faces)
 			var shape_node := CollisionShape3D.new()
 			shape_node.name = "%sShape" % category
@@ -94,6 +112,7 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 				"triangles": int(faces.size() / 3),
 				"shapes": 1,
 				"body": body.name,
+				"shape_kind": "concave",
 			}
 
 		if not overlay_faces.is_empty():
@@ -117,6 +136,8 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 	stats["collision_mask"] = mask
 	stats["debug_overlay_visible"] = overlay_visible
 	stats["debug_overlay_surface_offset"] = overlay_surface_offset
+	stats["filtered_triangle_count"] = int(sanitization.get("filtered_triangle_count", 0))
+	stats["filtered_by_category"] = sanitization.get("filtered_by_category", {})
 	return stats
 
 
@@ -152,6 +173,51 @@ func _group_debug_lines_by_category(surfaces: Array[Dictionary]) -> Dictionary:
 		target.append_array(lines)
 		grouped[category] = target
 	return grouped
+
+
+func _sanitize_surfaces(surfaces: Array[Dictionary]) -> Dictionary:
+	var sanitized: Array[Dictionary] = []
+	var filtered_triangle_count := 0
+	var filtered_by_category := {}
+
+	for surface in surfaces:
+		var next_surface := surface.duplicate(true)
+		var category := String(surface.get("category", ""))
+		var faces: PackedVector3Array = surface.get("faces", PackedVector3Array())
+		if category in ["Road", "DriveArea"] and not faces.is_empty():
+			var filtered_faces := _filter_drivable_faces(faces, DEFAULT_DRIVABLE_MIN_NORMAL_Y)
+			filtered_triangle_count += max(0, int((faces.size() - filtered_faces.size()) / 3))
+			if filtered_faces.size() != faces.size():
+				filtered_by_category[category] = int(filtered_by_category.get(category, 0)) + int((faces.size() - filtered_faces.size()) / 3)
+			next_surface["faces"] = filtered_faces
+			next_surface["triangle_count"] = int(filtered_faces.size() / 3)
+		sanitized.append(next_surface)
+
+	return {
+		"surfaces": sanitized,
+		"filtered_triangle_count": filtered_triangle_count,
+		"filtered_by_category": filtered_by_category,
+	}
+
+
+func _filter_drivable_faces(faces: PackedVector3Array, min_normal_y: float) -> PackedVector3Array:
+	if faces.is_empty():
+		return faces
+
+	var filtered := PackedVector3Array()
+	for index in range(0, faces.size() - 2, 3):
+		var a := faces[index]
+		var b := faces[index + 1]
+		var c := faces[index + 2]
+		var normal := (b - a).cross(c - a)
+		if normal.length_squared() <= 0.000001:
+			continue
+		if normal.normalized().y < min_normal_y:
+			continue
+		filtered.append(a)
+		filtered.append(b)
+		filtered.append(c)
+	return filtered
 
 
 func _make_overlay_mesh(category: String, faces: PackedVector3Array, visible: bool, surface_offset: float) -> MeshInstance3D:
@@ -219,6 +285,13 @@ func _make_overlay_line_mesh(category: String, lines: PackedVector3Array, visibl
 	overlay.set_meta("eagl_collision_category", category)
 	overlay.set_meta("eagl_collision_line_count", int(lines.size() / 2))
 	return overlay
+
+
+func _use_backface_collision(category: String) -> bool:
+	match category:
+		"Road", "DriveArea":
+			return true
+	return category not in ["Road", "DriveArea"]
 
 
 func _wireframe_overlay_lines(faces: PackedVector3Array, surface_offset: float) -> PackedVector3Array:

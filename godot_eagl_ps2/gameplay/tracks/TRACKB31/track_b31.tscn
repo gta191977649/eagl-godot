@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://bm1tsvvpcl0q4"]
+
+[ext_resource type="PackedScene" uid="uid://4r35axuht7xi" path="res://assets/tracks/eagltrack/TRACKB31/TRACKB31.eagltrack" id="1_track_content"]
+
+[node name="TRACKB31" type="Node3D"]
+
+[node name="TrackContent" parent="." instance=ExtResource("1_track_content")]
+
+[node name="ackMarkers" type="Node3D" parent="."]
+
+[node name="Section_102" type="Node3D" parent="ackMarkers"]
+
+[node name="TRACK31_STARTLINE_FORW_" type="Node3D" parent="ackMarkers/Section_102"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 794.0571, 1.6657, -218.8022)

@@ -13,8 +13,10 @@ const CAMERA_FOLLOW_LERP_SPEED := 6.0
 @export var wheels: Array[RaycastWheel]
 
 @export var acceleration := 600.0
-@export var deceleration := 200.0
+#@export var deceleration := 200.0
 @export var max_speed := 20.0
+@export var tire_turn_speed := 2.0
+@export var tire_max_turn_degrees := 25.0
 
 @export var accel_curve : Curve
 
@@ -42,6 +44,12 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_update_debug_camera(delta)
 
+func _basic_steering_rotation(delta: float) -> void:
+	var turn_input := Input.get_axis("turn_l","turn_r") * tire_turn_speed
+
+	if turn_input:
+		$WheelFL.rotation.y = clampf($WheelFL.rotation.y + turn_input * delta, deg_to_rad(-tire_max_turn_degrees),deg_to_rad(tire_max_turn_degrees))
+		
 
 func _physics_process(delta: float) -> void:
 	var grounded := false
@@ -89,12 +97,10 @@ func _do_single_wheel_acceleration(ray: RaycastWheel) -> void:
 			#apply_force(force_vector_projected,force_pos)
 			if draw_debug: DebugDraw3D.draw_arrow_ray(contact,force_vector.normalized(),2.5,Color.RED,0.1)
 			if draw_debug: DebugDraw3D.draw_arrow_ray(contact,force_vector_projected.normalized(),2.5,Color.BLACK,0.1)
-		elif abs(vel) > 0.015 and not motor_input:
-			var drag_force_vector = global_basis.z * deceleration * signf(vel)
-			apply_force(drag_force_vector,force_pos)
-
-			if draw_debug: 
-				DebugDraw3D.draw_arrow_ray(contact,drag_force_vector.normalized(),2.5,Color.PINK,0.1)
+			# 	elif abs(vel) > 0.015 and not motor_input:
+			# 	var drag_force_vector = global_basis.z * deceleration * signf(vel)
+			# 	apply_force(drag_force_vector,force_pos)
+			# 	if draw_debug: DebugDraw3D.draw_arrow_ray(contact,drag_force_vector.normalized(),2.5,Color.PINK,0.1)
 		
 		if draw_debug:
 			ui_accel_ratio.value = ac * 100.0 

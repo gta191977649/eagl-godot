@@ -1,6 +1,0 @@
-[gd_scene load_steps=2 format=3]
-
-[ext_resource type="Script" path="res://gameplay/vehicles/hp2_controller/benchmark_runner.gd" id="1"]
-
-[node name="HP2BenchmarkRunner" type="Node"]
-script = ExtResource("1")

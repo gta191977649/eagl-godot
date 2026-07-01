@@ -18,6 +18,7 @@ src/map_tools_ps2/png.py
 src/map_tools_ps2/primitive_probe.py
 src/map_tools_ps2/primitive_stream.py
 src/map_tools_ps2/primitives.py
+src/map_tools_ps2/progress.py
 src/map_tools_ps2/strip_entries.py
 src/map_tools_ps2/textures.py
 src/map_tools_ps2/topology_benchmark.py
@@ -27,8 +28,8 @@ src/map_tools_ps2.egg-info/PKG-INFO
 src/map_tools_ps2.egg-info/SOURCES.txt
 src/map_tools_ps2.egg-info/dependency_links.txt
 src/map_tools_ps2.egg-info/entry_points.txt
+src/map_tools_ps2.egg-info/requires.txt
 src/map_tools_ps2.egg-info/top_level.txt
 tests/test_comp.py
 tests/test_glb_writer_topology.py
 tests/test_primitive_stream.py
-tests/test_primitives.py

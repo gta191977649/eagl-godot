@@ -7,7 +7,7 @@ import unittest
 from map_tools_ps2.binary import IDENTITY4, Vec3, Vec4, compose_matrix4, transform_point
 from map_tools_ps2.bounds_benchmark import _bounds_error, benchmark_bounds_against_metadata
 from map_tools_ps2.cli import _default_placement_path, _resolve_track_input, write_placement_txt
-from map_tools_ps2.chunks import parse_chunks
+from map_tools_ps2.chunks import Chunk, parse_chunks
 from map_tools_ps2.comp import decompress_lzc, load_bundle_bytes
 from map_tools_ps2.debug_writer import write_ps2mesh_debug
 from map_tools_ps2.glb_writer import (
@@ -47,6 +47,7 @@ from map_tools_ps2.model import (
     MeshObject,
     Scene,
     SceneryInstance,
+    TrackCollisionPolygon,
     _extract_blocks_from_strip_entries,
     _find_ascii_name,
     instantiated_mesh_object,
@@ -1578,6 +1579,58 @@ class ObjWriterTests(unittest.TestCase):
             ["f 1 2 3", "f 4 3 2", "f 5 6 7", "f 8 7 6"],
         )
 
+    def test_write_obj_can_expand_scenery_instances(self):
+        block = DecodedBlock(
+            run=VifVertexRun(
+                (
+                    Vec3(0.0, 0.0, 0.0),
+                    Vec3(1.0, 0.0, 0.0),
+                    Vec3(0.0, 1.0, 0.0),
+                ),
+                (),
+                (),
+                (),
+                (),
+            ),
+            primitive_mode="triangles",
+            expected_face_count=1,
+        )
+        base = MeshObject(
+            name="XS_PROP",
+            chunk_offset=0x100,
+            transform=IDENTITY4,
+            blocks=(block,),
+        )
+        scene = Scene(
+            objects=[base],
+            scenery_instances=[
+                SceneryInstance(
+                    object_index=0,
+                    object_name=base.name,
+                    transform=(
+                        (1.0, 0.0, 0.0, 0.0),
+                        (0.0, 1.0, 0.0, 0.0),
+                        (0.0, 0.0, 1.0, 0.0),
+                        (10.0, 20.0, 30.0, 1.0),
+                    ),
+                    source_chunk_offset=0x200,
+                    record_index=3,
+                )
+            ],
+        )
+
+        with TemporaryDirectory() as tmp_dir:
+            out_path = Path(tmp_dir) / "instanced.obj"
+            write_obj(scene, out_path, expand_instances=True)
+            lines = out_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertIn("o XS_PROP_inst_00000200_003_0000_000", lines)
+        vertex_lines = [line for line in lines if line.startswith("v ")]
+        self.assertEqual(
+            vertex_lines,
+            ["v 10 20 30", "v 11 20 30", "v 10 21 30"],
+        )
+
 
 class ModelRunMetadataTests(unittest.TestCase):
     def test_run_texture_indices_accept_no_prefix_table(self):
@@ -1636,6 +1689,86 @@ class ModelRunMetadataTests(unittest.TestCase):
         self.assertEqual(blocks[0].run.vertices[0], Vec3(0.0, 10.0, 20.0))
         self.assertEqual(blocks[1].run.vertices[0], Vec3(100.0, 110.0, 120.0))
         self.assertEqual(blocks[0].primitive_mode, "strip")
+
+
+class TrackCollisionParseTests(unittest.TestCase):
+    @staticmethod
+    def _collision_record(
+        *,
+        material_id: int,
+        flags: int,
+        z_base: int,
+        xs: tuple[int, int, int, int],
+        ys: tuple[int, int, int, int],
+        z_offsets: tuple[int, int, int, int],
+    ) -> bytes:
+        record = bytearray(0x20)
+        record[0x02] = material_id
+        record[0x03] = flags
+        record[0x04:0x06] = int(z_base).to_bytes(2, "little", signed=True)
+        vertex_count = 4 if (flags & 0x10) else 3
+        for index in range(vertex_count):
+            record[0x08 + index * 2 : 0x0A + index * 2] = int(xs[index]).to_bytes(2, "little", signed=True)
+            record[0x10 + index * 2 : 0x12 + index * 2] = int(ys[index]).to_bytes(2, "little", signed=True)
+            record[0x18 + index * 2 : 0x1A + index * 2] = int(z_offsets[index]).to_bytes(2, "little", signed=True)
+        return bytes(record)
+
+    def test_parse_scene_reads_triangle_track_collision_polygon(self):
+        payload = self._collision_record(
+            material_id=5,
+            flags=0x00,
+            z_base=12,
+            xs=(8, 16, 24, 0),
+            ys=(32, 40, 48, 0),
+            z_offsets=(128, 256, -128, 0),
+        )
+        chunk = Chunk(0x00034132, len(payload), 0x64F050, 0, ())
+
+        scene = parse_scene((chunk,), payload)
+
+        self.assertEqual(len(scene.track_collision_polygons), 1)
+        polygon = scene.track_collision_polygons[0]
+        self.assertEqual(polygon.material_id, 5)
+        self.assertEqual(polygon.flags, 0x00)
+        self.assertEqual(polygon.vertex_count, 3)
+        self.assertEqual(
+            polygon.points_ps2,
+            (
+                Vec3(1.0, 4.0, 12.5),
+                Vec3(2.0, 5.0, 13.0),
+                Vec3(3.0, 6.0, 11.5),
+            ),
+        )
+        self.assertEqual(polygon.source_chunk_offset, 0x64F050)
+        self.assertEqual(polygon.source_record_offset, 0)
+
+    def test_parse_scene_reads_quad_track_collision_polygon_and_height_scale_flag(self):
+        payload = self._collision_record(
+            material_id=7,
+            flags=0x14,
+            z_base=10,
+            xs=(8, 16, 16, 8),
+            ys=(8, 8, 16, 16),
+            z_offsets=(64, 128, 192, 256),
+        )
+        chunk = Chunk(0x00034132, len(payload), 0x64F050, 0, ())
+
+        scene = parse_scene((chunk,), payload)
+
+        self.assertEqual(len(scene.track_collision_polygons), 1)
+        polygon = scene.track_collision_polygons[0]
+        self.assertEqual(polygon.material_id, 7)
+        self.assertEqual(polygon.flags, 0x14)
+        self.assertEqual(polygon.vertex_count, 4)
+        self.assertEqual(
+            polygon.points_ps2,
+            (
+                Vec3(1.0, 1.0, 41.0),
+                Vec3(2.0, 1.0, 42.0),
+                Vec3(2.0, 2.0, 43.0),
+                Vec3(1.0, 2.0, 44.0),
+            ),
+        )
 
 
 class VifDecodeTests(unittest.TestCase):

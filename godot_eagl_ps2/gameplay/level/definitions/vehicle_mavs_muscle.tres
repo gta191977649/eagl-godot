@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="VehicleDefinition" format=3 uid="uid://ccheil7rnexmo"]
+
+[ext_resource type="Script" uid="uid://caiewvjfpp7jn" path="res://gameplay/level/vehicle_definition.gd" id="1_vehicle_definition"]
+[ext_resource type="PackedScene" uid="uid://c3ti2tt2jxx87" path="res://gameplay/vehicles/car.tscn" id="2_vehicle_scene"]
+
+[resource]
+script = ExtResource("1_vehicle_definition")
+id = "mavs_muscle"
+display_name = "M.A.V.S Muscle"
+vehicle_scene = ExtResource("2_vehicle_scene")

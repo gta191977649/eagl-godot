@@ -1,0 +1,58 @@
+[gd_scene format=3 uid="uid://rdv4m2liaehd"]
+
+[ext_resource type="Script" uid="uid://dco5lxs3whf51" path="res://gameplay/level/level.gd" id="1_level"]
+[ext_resource type="Resource" path="res://gameplay/level/definitions/track_b31.tres" id="2_track_definition"]
+[ext_resource type="Resource" uid="uid://ccheil7rnexmo" path="res://gameplay/level/definitions/vehicle_mavs_muscle.tres" id="3_vehicle_definition"]
+[ext_resource type="PackedScene" path="res://eagl/entity/CarCamera.tscn" id="4_car_camera"]
+[ext_resource type="PackedScene" uid="uid://d1767pd6qqkrd" path="res://gameplay/ui/level_ui.tscn" id="5_level_ui"]
+[ext_resource type="Script" uid="uid://pgmhafdrr60g" path="res://gameplay/level/components/track_loader_component.gd" id="6_track_loader"]
+[ext_resource type="Script" uid="uid://x07luhirp0gw" path="res://gameplay/level/components/track_collision_component.gd" id="7_track_collision"]
+[ext_resource type="Script" uid="uid://bt4sggxauxjiy" path="res://gameplay/level/components/spawn_resolver_component.gd" id="8_spawn_resolver"]
+[ext_resource type="Script" uid="uid://8jlcwgftoetb" path="res://gameplay/level/components/vehicle_spawner_component.gd" id="9_vehicle_spawner"]
+[ext_resource type="Script" uid="uid://cma7u7rd6q1hj" path="res://gameplay/level/components/ai_spawn_service.gd" id="10_ai_spawn"]
+
+[node name="Level" type="Node3D" unique_id=2114630381]
+script = ExtResource("1_level")
+track_definition = ExtResource("2_track_definition")
+vehicle_definition = ExtResource("3_vehicle_definition")
+
+[node name="TrackRoot" type="Node3D" parent="." unique_id=1957359794]
+
+[node name="Vehicles" type="Node3D" parent="." unique_id=303106908]
+
+[node name="Player" type="Node3D" parent="Vehicles" unique_id=805689585]
+
+[node name="RaceAI" type="Node3D" parent="Vehicles" unique_id=2126151356]
+
+[node name="PoliceAI" type="Node3D" parent="Vehicles" unique_id=1606724651]
+
+[node name="Cameras" type="Node3D" parent="." unique_id=2139263306]
+
+[node name="CarCamera" parent="Cameras" unique_id=1497237669 instance=ExtResource("4_car_camera")]
+current = false
+
+[node name="UI" type="Node" parent="." unique_id=70881762]
+
+[node name="LevelUi" parent="UI" unique_id=1580710614 instance=ExtResource("5_level_ui")]
+
+[node name="Services" type="Node" parent="." unique_id=32364025]
+
+[node name="TrackLoader" type="Node" parent="Services" unique_id=1406871892]
+script = ExtResource("6_track_loader")
+target_root_path = NodePath("../../TrackRoot")
+
+[node name="TrackCollision" type="Node" parent="Services" unique_id=2085495948]
+script = ExtResource("7_track_collision")
+collision_parent_path = NodePath("../../TrackRoot")
+
+[node name="SpawnResolver" type="Node" parent="Services" unique_id=1109377294]
+script = ExtResource("8_spawn_resolver")
+
+[node name="VehicleSpawner" type="Node" parent="Services" unique_id=857591293]
+script = ExtResource("9_vehicle_spawner")
+player_parent_path = NodePath("../../Vehicles/Player")
+
+[node name="AISpawnService" type="Node" parent="Services" unique_id=247989399]
+script = ExtResource("10_ai_spawn")
+race_ai_parent_path = NodePath("../../Vehicles/RaceAI")
+police_ai_parent_path = NodePath("../../Vehicles/PoliceAI")

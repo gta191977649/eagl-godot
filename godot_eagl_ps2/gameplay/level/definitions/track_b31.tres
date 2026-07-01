@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="TrackDefinition" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://gameplay/level/track_definition.gd" id="1_track_definition"]
+[ext_resource type="PackedScene" path="res://gameplay/tracks/TRACKB31/track_b31.tscn" id="2_track_scene"]
+
+[resource]
+script = ExtResource("1_track_definition")
+id = "TRACKB31"
+display_name = "TRACKB31"
+editable_track_scene = ExtResource("2_track_scene")
+source_scn_path = "res://assets/tracks/eagltrack/TRACKB31/TRACKB31.scn"
+player_start_marker_path = NodePath("ackMarkers/Section_102/TRACK31_STARTLINE_FORW_")

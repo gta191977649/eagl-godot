@@ -8,3 +8,6 @@ map_tools_ps2/.DS_Store
 /godot_eagl_ps2/tmp
 /car_ps2_tool/out
 map_tools_ps2/.DS_Store
+/map_tools_ps2/out
+/_godot_import_quarantine
+*.TMP

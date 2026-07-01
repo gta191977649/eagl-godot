@@ -9,6 +9,16 @@ from .strip_entries import StripEntryRecord, parse_strip_entry_record
 from .vif import VifVertexRun, extract_vif_vertex_runs
 
 
+CHUNK_TRACK_ROUTE = 0x00034121
+CHUNK_TRACK_ROUTE_EDGES = 0x00034122
+CHUNK_TRACK_POLYGON_COLLISION = 0x00034132
+CHUNK_ALLOWED_ROAD_AREAS = 0x00034530
+TRACK_ROUTE_EDGE_RECORD_SIZE = 0x0C
+TRACK_COLLISION_POLYGON_RECORD_SIZE = 0x20
+ALLOWED_ROAD_AREA_RECORD_SIZE = 0x3C
+ALLOWED_ROAD_AREA_MAX_POINTS = 6
+
+
 @dataclass(frozen=True)
 class DecodedBlock:
     run: VifVertexRun
@@ -57,6 +67,84 @@ class SceneryInstance:
     record_index: int
     scenery_info_index: int | None = None
     object_hash: int | None = None
+    section_index: int | None = None
+    section_chunk_offset: int | None = None
+
+
+@dataclass(frozen=True)
+class ScenerySection:
+    section_index: int
+    source_chunk_offset: int
+    info_table: tuple[tuple[int, int, int], ...]
+    instances: tuple[SceneryInstance, ...]
+
+
+@dataclass(frozen=True)
+class SolidPack:
+    index: int
+    source_chunk_offset: int
+    is_scenery_template_palette: bool
+    object_chunk_offsets: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class TrackCollisionPolygon:
+    index: int
+    material_id: int
+    flags: int
+    vertex_count: int
+    points_ps2: tuple[Vec3, ...]
+    source_chunk_offset: int
+    source_record_offset: int
+
+
+@dataclass(frozen=True)
+class TrackRoutePoint:
+    index: int
+    position_ps2: Vec3
+    forward_ps2_2d: tuple[float, float]
+    segment_length: float
+    left_width: float
+    right_width: float
+    route_edge_index: int
+    route_edge_flags: int
+    boundary_offsets_raw: tuple[int, int, int, int]
+    boundary_offsets: tuple[float, float, float, float]
+    source_record_offset: int
+
+
+@dataclass(frozen=True)
+class TrackRouteSegment:
+    index: int
+    route_index: int
+    route_type: int
+    flags: int
+    points: tuple[TrackRoutePoint, ...]
+    source_chunk_offset: int
+    source_record_offset: int
+
+
+@dataclass(frozen=True)
+class TrackRouteEdge:
+    index: int
+    target_route_index: int
+    mode: int
+    target_point_index: int
+    metadata0: int
+    metadata1: int
+    source_chunk_offset: int
+    source_record_offset: int
+
+
+@dataclass(frozen=True)
+class AllowedRoadArea:
+    index: int
+    declared_vertex_count: int
+    points_ps2_2d: tuple[tuple[float, float], ...]
+    metadata: bytes
+    source_chunk_offset: int
+    source_record_offset: int
+    source_metadata_offset: int
 
 
 @dataclass
@@ -64,6 +152,12 @@ class Scene:
     objects: list[MeshObject] = field(default_factory=list)
     scenery_instances: list[SceneryInstance] = field(default_factory=list)
     scenery_template_offsets: set[int] = field(default_factory=set)
+    solid_packs: list[SolidPack] = field(default_factory=list)
+    scenery_sections: list[ScenerySection] = field(default_factory=list)
+    track_collision_polygons: list[TrackCollisionPolygon] = field(default_factory=list)
+    track_route_segments: list[TrackRouteSegment] = field(default_factory=list)
+    track_route_edges: list[TrackRouteEdge] = field(default_factory=list)
+    allowed_road_areas: list[AllowedRoadArea] = field(default_factory=list)
 
     @property
     def vertex_count(self) -> int:
@@ -146,26 +240,38 @@ def parse_mesh_object(object_chunk: Chunk, bundle: bytes) -> MeshObject | None:
 
 def parse_scene(chunks: tuple[Chunk, ...], bundle: bytes) -> Scene:
     scene = Scene()
-    primary_object_list: list[MeshObject] = []
-    found_primary_object_list = False
     for chunk in _walk(chunks):
         if chunk.chunk_id == 0x80034002:
             obj = parse_mesh_object(chunk, bundle)
             if obj is not None:
                 scene.objects.append(obj)
-                if not found_primary_object_list:
-                    primary_object_list.append(obj)
-        elif chunk.chunk_id == 0x80034000 and not found_primary_object_list:
-            found_primary_object_list = True
-            primary_object_list = [
-                obj
-                for child in chunk.children
-                if child.chunk_id == 0x80034002
-                for obj in [parse_mesh_object(child, bundle)]
-                if obj is not None
-            ]
-            scene.scenery_template_offsets = {obj.chunk_offset for obj in primary_object_list}
-    scene.scenery_instances.extend(_extract_scenery_instances(chunks, bundle, tuple(scene.objects), tuple(primary_object_list)))
+
+    objects_by_offset = {obj.chunk_offset: obj for obj in scene.objects}
+    primary_object_list: list[MeshObject] = []
+    for solid_pack_index, chunk in enumerate(chunk for chunk in _walk(chunks) if chunk.chunk_id == 0x80034000):
+        object_offsets = tuple(child.offset for child in chunk.children if child.chunk_id == 0x80034002 and child.offset in objects_by_offset)
+        is_template_palette = solid_pack_index == 0
+        scene.solid_packs.append(
+            SolidPack(
+                index=solid_pack_index,
+                source_chunk_offset=chunk.offset,
+                is_scenery_template_palette=is_template_palette,
+                object_chunk_offsets=object_offsets,
+            )
+        )
+        if is_template_palette:
+            primary_object_list = [objects_by_offset[offset] for offset in object_offsets]
+            scene.scenery_template_offsets = set(object_offsets)
+
+    scene.scenery_sections.extend(
+        _extract_scenery_sections(chunks, bundle, tuple(scene.objects), tuple(primary_object_list))
+    )
+    for section in scene.scenery_sections:
+        scene.scenery_instances.extend(section.instances)
+    scene.track_collision_polygons.extend(_parse_track_collision_polygons(chunks, bundle))
+    scene.track_route_segments.extend(_parse_track_route_segments(chunks, bundle))
+    scene.track_route_edges.extend(_parse_track_route_edges(chunks, bundle))
+    scene.allowed_road_areas.extend(_parse_allowed_road_areas(chunks, bundle))
     return scene
 
 
@@ -200,17 +306,36 @@ def _extract_scenery_instances(
     objects: tuple[MeshObject, ...],
     primary_objects: tuple[MeshObject, ...],
 ) -> tuple[SceneryInstance, ...]:
+    instances: list[SceneryInstance] = []
+    for section in _extract_scenery_sections(chunks, bundle, objects, primary_objects):
+        instances.extend(section.instances)
+    return tuple(instances)
+
+
+def _extract_scenery_sections(
+    chunks: tuple[Chunk, ...],
+    bundle: bytes,
+    objects: tuple[MeshObject, ...],
+    primary_objects: tuple[MeshObject, ...],
+) -> tuple[ScenerySection, ...]:
     if not objects and not primary_objects:
         return ()
 
     object_indices_by_hash = _object_indices_by_hash(objects)
-    instances: list[SceneryInstance] = []
-    for chunk in walk_chunks(chunks):
-        if chunk.chunk_id != 0x80034100:
-            continue
+    sections: list[ScenerySection] = []
+    for section_index, chunk in enumerate(chunk for chunk in walk_chunks(chunks) if chunk.chunk_id == 0x80034100):
         info_table = _read_scenery_info_table(chunk, bundle)
         instance_chunk = next((child for child in chunk.children if child.chunk_id == 0x00034103), None)
+        instances: list[SceneryInstance] = []
         if instance_chunk is None:
+            sections.append(
+                ScenerySection(
+                    section_index=section_index,
+                    source_chunk_offset=chunk.offset,
+                    info_table=info_table,
+                    instances=(),
+                )
+            )
             continue
         payload = instance_chunk.payload(bundle)
         for record_index, offset in enumerate(range(0, len(payload) - 0x2F, 0x30)):
@@ -237,9 +362,19 @@ def _extract_scenery_instances(
                     record_index=record_index,
                     scenery_info_index=scenery_info_index,
                     object_hash=object_hash,
+                    section_index=section_index,
+                    section_chunk_offset=chunk.offset,
                 )
             )
-    return tuple(instances)
+        sections.append(
+            ScenerySection(
+                section_index=section_index,
+                source_chunk_offset=chunk.offset,
+                info_table=info_table,
+                instances=tuple(instances),
+            )
+        )
+    return tuple(sections)
 
 
 def _object_indices_by_hash(objects: tuple[MeshObject, ...]) -> dict[int, int]:
@@ -305,6 +440,191 @@ def _read_texture_hashes(payload: bytes) -> tuple[int, ...]:
         if value:
             hashes.append(value)
     return tuple(hashes)
+
+
+def _parse_track_collision_polygons(chunks: tuple[Chunk, ...], bundle: bytes) -> tuple[TrackCollisionPolygon, ...]:
+    polygons: list[TrackCollisionPolygon] = []
+    for chunk in walk_chunks(chunks):
+        if chunk.chunk_id != CHUNK_TRACK_POLYGON_COLLISION:
+            continue
+        payload = chunk.payload(bundle)
+        polygon_count = len(payload) // TRACK_COLLISION_POLYGON_RECORD_SIZE
+        for polygon_index in range(polygon_count):
+            offset = polygon_index * TRACK_COLLISION_POLYGON_RECORD_SIZE
+            polygon = _parse_track_collision_polygon_record(payload, offset, polygon_index, chunk.offset)
+            if polygon is not None:
+                polygons.append(polygon)
+        break
+    return tuple(polygons)
+
+
+def _parse_track_collision_polygon_record(
+    payload: bytes,
+    offset: int,
+    polygon_index: int,
+    chunk_offset: int,
+) -> TrackCollisionPolygon | None:
+    if offset + TRACK_COLLISION_POLYGON_RECORD_SIZE > len(payload):
+        return None
+    material_id = payload[offset + 0x02]
+    flags = payload[offset + 0x03]
+    vertex_count = 4 if (flags & 0x10) else 3
+    z_base = _signed_i16le(payload, offset + 0x04)
+    points: list[Vec3] = []
+    for vertex_index in range(vertex_count):
+        x = _signed_i16le(payload, offset + 0x08 + vertex_index * 2) / 8.0
+        y = _signed_i16le(payload, offset + 0x10 + vertex_index * 2) / 8.0
+        z = z_base + (_signed_i16le(payload, offset + 0x18 + vertex_index * 2) / 256.0)
+        if flags & 0x04:
+            z *= 4.0
+        points.append(Vec3(x, y, z))
+    if len(points) < 3:
+        return None
+    return TrackCollisionPolygon(
+        index=polygon_index,
+        material_id=material_id,
+        flags=flags,
+        vertex_count=vertex_count,
+        points_ps2=tuple(points),
+        source_chunk_offset=chunk_offset,
+        source_record_offset=offset,
+    )
+
+
+def _parse_track_route_segments(chunks: tuple[Chunk, ...], bundle: bytes) -> tuple[TrackRouteSegment, ...]:
+    segments: list[TrackRouteSegment] = []
+    for chunk in walk_chunks(chunks):
+        if chunk.chunk_id != CHUNK_TRACK_ROUTE:
+            continue
+        payload = chunk.payload(bundle)
+        offset = 0
+        segment_index = 0
+        while offset + 0x428 <= len(payload):
+            point_count = u32le(payload, offset + 0x10)
+            if point_count <= 0 or point_count > 0x400:
+                break
+            record_size = 0x428 + point_count * 0x70
+            if offset + record_size > len(payload):
+                break
+            points: list[TrackRoutePoint] = []
+            for point_index in range(point_count):
+                point_offset = offset + 0x428 + point_index * 0x70
+                points.append(
+                    TrackRoutePoint(
+                        index=point_index,
+                        position_ps2=Vec3(
+                            f32le(payload, point_offset),
+                            f32le(payload, point_offset + 0x04),
+                            f32le(payload, point_offset + 0x08),
+                        ),
+                        forward_ps2_2d=(
+                            f32le(payload, point_offset + 0x0C),
+                            f32le(payload, point_offset + 0x10),
+                        ),
+                        segment_length=f32le(payload, point_offset + 0x14),
+                        left_width=f32le(payload, point_offset + 0x18),
+                        right_width=f32le(payload, point_offset + 0x1C),
+                        route_edge_index=payload[point_offset + 0x2C],
+                        route_edge_flags=u32le(payload, point_offset + 0x2C),
+                        boundary_offsets_raw=(
+                            _signed_i16le(payload, point_offset + 0x30),
+                            _signed_i16le(payload, point_offset + 0x32),
+                            _signed_i16le(payload, point_offset + 0x34),
+                            _signed_i16le(payload, point_offset + 0x36),
+                        ),
+                        boundary_offsets=(
+                            _signed_i16le(payload, point_offset + 0x30) / 256.0,
+                            _signed_i16le(payload, point_offset + 0x32) / 256.0,
+                            _signed_i16le(payload, point_offset + 0x34) / 256.0,
+                            _signed_i16le(payload, point_offset + 0x36) / 256.0,
+                        ),
+                        source_record_offset=point_offset,
+                    )
+                )
+            segments.append(
+                TrackRouteSegment(
+                    index=segment_index,
+                    route_index=_signed_i16le(payload, offset + 0x0A),
+                    route_type=u32le(payload, offset + 0x0C),
+                    flags=u32le(payload, offset + 0x18),
+                    points=tuple(points),
+                    source_chunk_offset=chunk.offset,
+                    source_record_offset=offset,
+                )
+            )
+            offset += record_size
+            segment_index += 1
+        break
+    return tuple(segments)
+
+
+def _parse_track_route_edges(chunks: tuple[Chunk, ...], bundle: bytes) -> tuple[TrackRouteEdge, ...]:
+    edges: list[TrackRouteEdge] = []
+    for chunk in walk_chunks(chunks):
+        if chunk.chunk_id != CHUNK_TRACK_ROUTE_EDGES:
+            continue
+        payload = chunk.payload(bundle)
+        edge_count = len(payload) // TRACK_ROUTE_EDGE_RECORD_SIZE
+        for edge_index in range(edge_count):
+            offset = edge_index * TRACK_ROUTE_EDGE_RECORD_SIZE
+            edges.append(
+                TrackRouteEdge(
+                    index=edge_index,
+                    target_route_index=payload[offset],
+                    mode=payload[offset + 0x01],
+                    target_point_index=int.from_bytes(payload[offset + 0x02 : offset + 0x04], "little"),
+                    metadata0=u32le(payload, offset + 0x04),
+                    metadata1=u32le(payload, offset + 0x08),
+                    source_chunk_offset=chunk.offset,
+                    source_record_offset=offset,
+                )
+            )
+        break
+    return tuple(edges)
+
+
+def _parse_allowed_road_areas(chunks: tuple[Chunk, ...], bundle: bytes) -> tuple[AllowedRoadArea, ...]:
+    areas: list[AllowedRoadArea] = []
+    for chunk in walk_chunks(chunks):
+        if chunk.chunk_id != CHUNK_ALLOWED_ROAD_AREAS:
+            continue
+        payload = chunk.payload(bundle)
+        if len(payload) < 4:
+            break
+        declared_count = u32le(payload, 0)
+        offset = 4
+        for area_index in range(declared_count):
+            if offset + ALLOWED_ROAD_AREA_RECORD_SIZE > len(payload):
+                break
+            vertex_count = u32le(payload, offset)
+            if vertex_count < 3 or vertex_count > ALLOWED_ROAD_AREA_MAX_POINTS:
+                break
+            points: list[tuple[float, float]] = []
+            points_offset = offset + 4
+            for _ in range(vertex_count):
+                points.append(
+                    (
+                        f32le(payload, points_offset),
+                        f32le(payload, points_offset + 4),
+                    )
+                )
+                points_offset += 8
+            metadata_offset = offset + 4 + ALLOWED_ROAD_AREA_MAX_POINTS * 8
+            metadata = payload[metadata_offset : metadata_offset + 8]
+            areas.append(
+                AllowedRoadArea(
+                    index=area_index,
+                    declared_vertex_count=vertex_count,
+                    points_ps2_2d=tuple(points),
+                    metadata=metadata,
+                    source_chunk_offset=chunk.offset,
+                    source_record_offset=offset,
+                    source_metadata_offset=metadata_offset,
+                )
+            )
+            offset += ALLOWED_ROAD_AREA_RECORD_SIZE
+        break
+    return tuple(areas)
 
 
 def _read_run_texture_indices(payload: bytes, run_count: int) -> tuple[int | None, ...]:
