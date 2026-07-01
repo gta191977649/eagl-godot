@@ -1,0 +1,6 @@
+start
+packed=true
+scene added
+after frames
+player? true
+vehicle_pos=(794.0571, 1.969696, -214.8022)

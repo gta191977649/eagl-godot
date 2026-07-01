@@ -13,6 +13,7 @@ extends Node3D
 
 func _ready() -> void:
 	_ensure_mavs_camera_actions()
+	_ensure_gevp_actions()
 	_bind_services()
 	track_loader.load_track(track_definition)
 
@@ -39,8 +40,9 @@ func _on_track_failed(message: String) -> void:
 	push_error("Level failed to load track: %s" % message)
 
 
-func _on_player_spawned(_vehicle_root: Node3D, vehicle_body: VehicleBody3D) -> void:
-	car_camera.set_target(vehicle_body)
+func _on_player_spawned(vehicle_root: Node3D, player_target: Node3D) -> void:
+	var camera_target := _resolve_camera_target(vehicle_root, player_target)
+	car_camera.set_target(camera_target)
 	car_camera.reset_to_target()
 	car_camera.current = true
 
@@ -61,3 +63,23 @@ func _ensure_key_action(action_name: String, keycodes: Array[int]) -> void:
 		var event := InputEventKey.new()
 		event.physical_keycode = keycode
 		InputMap.action_add_event(action_name, event)
+
+
+func _ensure_gevp_actions() -> void:
+	_ensure_key_action("Throttle", [KEY_W, KEY_UP])
+	_ensure_key_action("Brakes", [KEY_S, KEY_DOWN])
+	_ensure_key_action("Steer Left", [KEY_A, KEY_LEFT])
+	_ensure_key_action("Steer Right", [KEY_D, KEY_RIGHT])
+	_ensure_key_action("Handbrake", [KEY_SPACE])
+	_ensure_key_action("Clutch", [KEY_C])
+	_ensure_key_action("Toggle Transmission", [KEY_T])
+	_ensure_key_action("Shift Up", [KEY_F, KEY_KP_ADD])
+	_ensure_key_action("Shift Down", [KEY_R, KEY_KP_SUBTRACT])
+
+
+func _resolve_camera_target(vehicle_root: Node3D, player_target: Node3D) -> Node3D:
+	if vehicle_definition != null and vehicle_definition.camera_target_path != NodePath():
+		var from_path := vehicle_root.get_node_or_null(vehicle_definition.camera_target_path) as Node3D
+		if from_path != null:
+			return from_path
+	return player_target

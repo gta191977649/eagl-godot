@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://dco5lxs3whf51" path="res://gameplay/level/level.gd" id="1_level"]
 [ext_resource type="Resource" path="res://gameplay/level/definitions/track_b31.tres" id="2_track_definition"]
-[ext_resource type="Resource" path="res://gameplay/level/definitions/vehicle_mavs_gt30.tres" id="3_vehicle_definition"]
+[ext_resource type="Resource" path="res://gameplay/level/definitions/vehicle_gevp_arcade.tres" id="3_vehicle_definition"]
 [ext_resource type="PackedScene" path="res://eagl/entity/CarCamera.tscn" id="4_car_camera"]
 [ext_resource type="PackedScene" uid="uid://d1767pd6qqkrd" path="res://gameplay/ui/level_ui.tscn" id="5_level_ui"]
 [ext_resource type="Script" uid="uid://pgmhafdrr60g" path="res://gameplay/level/components/track_loader_component.gd" id="6_track_loader"]

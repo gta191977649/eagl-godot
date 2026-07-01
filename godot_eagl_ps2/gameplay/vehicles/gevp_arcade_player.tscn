@@ -1,0 +1,61 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="PackedScene" uid="uid://c3ixqkc6k13yi" path="res://addons/gevp/scenes/vehicle_controller.tscn" id="1_vehicle_controller"]
+[ext_resource type="PackedScene" uid="uid://fo6kt54q87tf" path="res://addons/gevp/scenes/arcade_car.tscn" id="2_arcade_car"]
+[ext_resource type="PackedScene" uid="uid://b2hlchrj4h2b7" path="res://addons/gevp/scenes/engine_sound.tscn" id="3_engine_sound"]
+[ext_resource type="Script" uid="uid://cr3p214yhfstw" path="res://addons/gevp/scripts/gui.gd" id="4_gui_script"]
+[ext_resource type="Script" path="res://gameplay/vehicles/gevp_arcade_vehicle.gd" id="5_camera_vehicle_script"]
+
+[node name="GEVPArcadePlayer" type="Node3D"]
+
+[node name="VehicleController" parent="." node_paths=PackedStringArray("vehicle_node") instance=ExtResource("1_vehicle_controller")]
+vehicle_node = NodePath("VehicleRigidBody")
+
+[node name="VehicleRigidBody" parent="VehicleController" instance=ExtResource("2_arcade_car")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.926611, 0)
+script = ExtResource("5_camera_vehicle_script")
+center_of_mass_mode = 1
+linear_damp_mode = 1
+angular_damp_mode = 1
+
+[node name="EngineSound" parent="VehicleController/VehicleRigidBody" node_paths=PackedStringArray("vehicle") instance=ExtResource("3_engine_sound")]
+max_db = -24.0
+vehicle = NodePath("..")
+
+[node name="GUI" type="Control" parent="." node_paths=PackedStringArray("vehicle")]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("4_gui_script")
+vehicle = NodePath("../VehicleController/VehicleRigidBody")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="GUI"]
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -220.0
+offset_top = -118.0
+offset_right = -28.0
+offset_bottom = -24.0
+grow_horizontal = 0
+grow_vertical = 0
+theme_override_constants/separation = 4
+
+[node name="Speed" type="Label" parent="GUI/VBoxContainer"]
+layout_mode = 2
+text = "0 km/h"
+
+[node name="RPM" type="Label" parent="GUI/VBoxContainer"]
+layout_mode = 2
+text = "0 rpm"
+
+[node name="Gear" type="Label" parent="GUI/VBoxContainer"]
+layout_mode = 2
+text = "Gear: 1"

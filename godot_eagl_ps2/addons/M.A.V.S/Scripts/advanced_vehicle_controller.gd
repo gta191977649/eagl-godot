@@ -312,16 +312,17 @@ func _physics_process(delta: float) -> void:
 				energy -= energy_consumption_rate # We gonna decrease energy by its consumption rate every physical frame we are making our car drive
 		
 		
-		# Some On Screen debug stats to track whats going on with our car
-		minimap_node.acceleration.text = "Acceleration: " + str(acceleration)
+		# Some on-screen debug stats to track what the current vehicle is doing.
+		minimap_node.acceleration.text = "Throttle: %.2f" % acceleration
 		if gear == -1: # This one checks if our gear is -1 "Reverse" and if soo then change icon to R, otherwise display gears properly
 			minimap_node.gear_shaft.text = "Gear: R"
 		elif gear == 0: 
 			minimap_node.gear_shaft.text = "Gear: N"
-		else: minimap_node.gear_shaft.text = "Gear: " + str(gear)
-		minimap_node.absolute_rpm.text = "Absolute RPM: " + str(roundi(veh_speed)) + " KMPH"
-		minimap_node.max_rpm.text = "Current Engine Force: " + str(engine_force) + " Multiplied by: " + str(gear_ratio[gear])
-		minimap_node.rpm.text = "Current RPM: " + str(rpm_calclated)
+		else:
+			minimap_node.gear_shaft.text = "Gear: %d" % gear
+		minimap_node.absolute_rpm.text = "Speed: %d km/h" % roundi(veh_speed)
+		minimap_node.max_rpm.text = "Drive Force: %.1f" % engine_force
+		minimap_node.rpm.text = "RPM: %d" % roundi(rpm_calclated)
 		minimap_node.fuel_bar.value = energy
 		minimap_node.nos_bar.value = nos_in_tank
 		

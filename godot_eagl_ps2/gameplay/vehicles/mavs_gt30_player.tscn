@@ -1,0 +1,14 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" uid="uid://bat0h5s3lfqru" path="res://addons/M.A.V.S/Vehicle/GT30/GT30.tscn" id="1_mavs_gt30"]
+
+[node name="GT30" instance=ExtResource("1_mavs_gt30")]
+debug_hud = true
+mass = 120.0
+center_of_mass_mode = 1
+gear_ratio = [0.0, 12.5, 10.5, 8.9, 8.2, 7.6]
+differential = [0.0, 48.0, 43.0, 38.6, 34.7, 32.5]
+ratio_limiter = [700, 920, 1100, 1500]
+nos_tier = 3
+can_puncture = false
+tire_points = []

@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="VehicleDefinition" format=3]
+
+[ext_resource type="Script" uid="uid://caiewvjfpp7jn" path="res://gameplay/level/vehicle_definition.gd" id="1_vehicle_definition"]
+[ext_resource type="PackedScene" path="res://gameplay/vehicles/gevp_arcade_player.tscn" id="2_vehicle_scene"]
+
+[resource]
+script = ExtResource("1_vehicle_definition")
+id = "gevp_arcade"
+display_name = "GEVP Arcade"
+vehicle_scene = ExtResource("2_vehicle_scene")
+spawn_target_path = NodePath("VehicleController/VehicleRigidBody")
+camera_target_path = NodePath("VehicleController/VehicleRigidBody")
+spawn_vertical_offset = -0.2

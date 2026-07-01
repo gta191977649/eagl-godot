@@ -74,38 +74,49 @@ pixel_size = 0.05
 texture = ExtResource("2_2w515")
 
 [node name="Debug_Hud" type="VBoxContainer" parent="."]
-offset_right = 213.0
-offset_bottom = 213.0
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -420.0
+offset_top = -220.0
+offset_right = -212.0
+offset_bottom = -92.0
+grow_horizontal = 0
+grow_vertical = 0
 size_flags_horizontal = 0
+theme_override_constants/separation = 4
 
 [node name="Acceleration" type="Label" parent="Debug_Hud"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Acceleration: "
+text = "Throttle: 0.00"
 label_settings = SubResource("LabelSettings_wyqpo")
 
 [node name="Gear Shaft" type="Label" parent="Debug_Hud"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "TEST"
+text = "Gear: N"
 label_settings = SubResource("LabelSettings_wyqpo")
 
 [node name="Absolute RPM" type="Label" parent="Debug_Hud"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "TEST"
+text = "Speed: 0 km/h"
 label_settings = SubResource("LabelSettings_wyqpo")
 
 [node name="Max RPM" type="Label" parent="Debug_Hud"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "TEST"
+text = "Drive Force: 0.0"
 label_settings = SubResource("LabelSettings_wyqpo")
 
 [node name="RPM" type="Label" parent="Debug_Hud"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Test"
+text = "RPM: 0"
+label_settings = SubResource("LabelSettings_wyqpo")
 
 [node name="Fuel" type="ProgressBar" parent="."]
 unique_name_in_owner = true
