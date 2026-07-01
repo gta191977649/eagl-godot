@@ -326,6 +326,32 @@ def test_write_godot_track_package_exports_collision_surfaces_from_track_polygon
     assert manifest["stats"]["collision_source"] == "track_collision_polygons"
 
 
+def test_write_godot_track_package_keeps_drive_area_polygons_as_individual_surfaces(tmp_path) -> None:
+    scene = Scene(
+        track_collision_polygons=[
+            _collision_polygon(index=0, flags=0x00),
+            _collision_polygon(index=1, flags=0x10),
+            _collision_polygon(index=2, flags=0x00),
+        ]
+    )
+
+    manifest_path = write_godot_track_package(scene, tmp_path, "TRACKB31", _textures())
+    manifest = json.loads(manifest_path.read_text())
+
+    surfaces = manifest["collision"]["surfaces"]
+    assert len(surfaces) == 3
+    assert [surface["source_name"] for surface in surfaces] == [
+        "TRACK_POLYGON_COLLISION_AREA_000000",
+        "TRACK_POLYGON_COLLISION_AREA_000001",
+        "TRACK_POLYGON_COLLISION_AREA_000002",
+    ]
+    assert [surface["source_record_offset"] for surface in surfaces] == [0x00, 0x20, 0x40]
+    assert [surface["triangle_count"] for surface in surfaces] == [1, 2, 1]
+    assert [surface["candidate_triangle_count"] for surface in surfaces] == [1, 2, 1]
+    assert manifest["collision"]["stats"]["surface_count"] == 3
+    assert manifest["collision"]["stats"]["triangle_count"] == 4
+
+
 def test_write_godot_track_package_skips_non_drive_area_polygons(tmp_path) -> None:
     scene = Scene(track_collision_polygons=[_collision_polygon(index=0, flags=0x08), _collision_polygon(index=1, flags=0x12)])
 

@@ -636,32 +636,16 @@ func _append_track_polygon_surfaces(asset, surfaces: Array[Dictionary], skipped:
 
 
 func _append_track_collision_drive_surface(asset, surfaces: Array[Dictionary]) -> bool:
-	var faces := PackedVector3Array()
+	var appended := false
 	for polygon in asset.track_collision_polygons:
 		if not _track_collision_polygon_contributes_to_drive_area(polygon):
 			continue
-		var points: PackedVector3Array = polygon.get("points_godot", PackedVector3Array())
-		if points.size() < 3:
+		var surface := _track_collision_drive_surface_for_polygon(polygon)
+		if surface.is_empty():
 			continue
-		_append_drive_surface_face_if_valid(faces, points[0], points[1], points[2])
-		if points.size() >= 4:
-			_append_drive_surface_face_if_valid(faces, points[0], points[2], points[3])
-	if faces.is_empty():
-		return false
-	surfaces.append(_collision_surface_from_faces(
-		"Road",
-		"drive_area",
-		"TrackPolygonCollision",
-		"TRACK_POLYGON_COLLISION_AREA",
-		faces,
-		"track_polygon_collision_area",
-		{
-			"source_chunk_offset": -1,
-			"source_record_offset": -1,
-			"index": -1,
-		}
-	))
-	return true
+		surfaces.append(surface)
+		appended = true
+	return appended
 
 
 func _append_drive_surface_face_if_valid(faces: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3) -> void:
@@ -681,6 +665,41 @@ func _append_drive_surface_face_if_valid(faces: PackedVector3Array, a: Vector3, 
 	faces.append(a)
 	faces.append(b)
 	faces.append(c)
+
+
+func _track_collision_drive_surface_for_polygon(polygon: Dictionary) -> Dictionary:
+	var points: PackedVector3Array = polygon.get("points_godot", PackedVector3Array())
+	if points.size() < 3:
+		return {}
+	var faces := PackedVector3Array()
+	var candidate_triangle_count := 1
+	_append_drive_surface_face_if_valid(faces, points[0], points[1], points[2])
+	if points.size() >= 4:
+		candidate_triangle_count += 1
+		_append_drive_surface_face_if_valid(faces, points[0], points[2], points[3])
+	var valid_triangle_count := int(faces.size() / 3)
+	if valid_triangle_count <= 0:
+		return {}
+	var polygon_index := int(polygon.get("index", -1))
+	var source_name := "TRACK_POLYGON_COLLISION_AREA_%06d" % max(polygon_index, 0)
+	var surface := _collision_surface_from_faces(
+		"Road",
+		"drive_area",
+		source_name,
+		"TRACK_POLYGON_COLLISION_AREA",
+		faces,
+		"track_polygon_collision_area",
+		{
+			"source_chunk_offset": int(polygon.get("source_chunk_offset", -1)),
+			"source_record_offset": int(polygon.get("source_record_offset", -1)),
+			"index": polygon_index,
+			"source_name": source_name,
+		}
+	)
+	surface["candidate_triangle_count"] = candidate_triangle_count
+	surface["valid_triangle_count"] = valid_triangle_count
+	surface["filtered_triangle_count"] = candidate_triangle_count - valid_triangle_count
+	return surface
 
 
 func _track_collision_drive_area_polygon_count(polygons: Array[Dictionary]) -> int:
@@ -1337,10 +1356,12 @@ func _collision_surface_dictionary(obj: Dictionary, category: String, material_k
 		"placement_kind": placement_kind,
 		"section_number": placement.get("section_number", -1),
 		"record_index": placement.get("record_index", -1),
+		"source_record_offset": placement.get("source_record_offset", -1),
 		"triangle_count": int(faces.size() / 3),
 		"block_count": block_count,
 		"collision_source_kind": source_kind,
 		"faces": faces,
+		"aabb": _aabb_dictionary_from_faces(faces),
 	}
 	if not template.is_empty():
 		surface["collision_template_offset"] = template.get("source_chunk_offset", -1)
@@ -1349,7 +1370,7 @@ func _collision_surface_dictionary(obj: Dictionary, category: String, material_k
 
 
 func _collision_surface_from_faces(category: String, material_kind: String, object_name: String, placement_kind: String, faces: PackedVector3Array, source_kind: String, source: Dictionary, debug_only: bool = false) -> Dictionary:
-	return {
+	var surface := {
 		"category": category,
 		"material_kind": material_kind,
 		"object_name": object_name,
@@ -1366,6 +1387,25 @@ func _collision_surface_from_faces(category: String, material_kind: String, obje
 		"collision_source_kind": source_kind,
 		"debug_only": debug_only,
 		"faces": faces,
+		"aabb": _aabb_dictionary_from_faces(faces),
+	}
+	if source.has("source_name"):
+		surface["source_name"] = String(source.get("source_name", ""))
+	return surface
+
+
+func _aabb_dictionary_from_faces(faces: PackedVector3Array):
+	if faces.is_empty():
+		return null
+	var min_point := faces[0]
+	var max_point := faces[0]
+	for index in range(1, faces.size()):
+		var point := faces[index]
+		min_point = min_point.min(point)
+		max_point = max_point.max(point)
+	return {
+		"min": [min_point.x, min_point.y, min_point.z],
+		"max": [max_point.x, max_point.y, max_point.z],
 	}
 
 

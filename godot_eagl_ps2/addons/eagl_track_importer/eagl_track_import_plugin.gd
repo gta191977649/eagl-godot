@@ -358,6 +358,10 @@ func _import_collision(root: Node3D, manifest: Dictionary, binary: PackedByteArr
 			"triangle_count": int(surface_record.get("triangle_count", 0)),
 			"source_kind": String(surface_record.get("source_kind", "")),
 			"source_name": String(surface_record.get("source_name", "")),
+			"source_chunk_offset": int(surface_record.get("source_chunk_offset", -1)),
+			"source_record_offset": int(surface_record.get("source_record_offset", -1)),
+			"record_index": int(surface_record.get("record_index", -1)),
+			"aabb": surface_record.get("aabb", null),
 			"faces": _read_vec3_array(binary, surface_record.get("faces", {})),
 			"debug_lines": _read_vec3_array(binary, surface_record.get("debug_lines", {})),
 		})

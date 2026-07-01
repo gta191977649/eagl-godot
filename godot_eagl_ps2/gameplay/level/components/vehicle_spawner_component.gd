@@ -49,6 +49,8 @@ func _configure_player_body(vehicle_body: VehicleBody3D, spawn_transform: Transf
 	vehicle_body.sleeping = false
 	if "is_current_veh" in vehicle_body:
 		vehicle_body.set("is_current_veh", true)
+		if vehicle_body.has_method("assign_vehicle"):
+			vehicle_body.call("assign_vehicle")
 	vehicle_body.add_to_group(player_group)
 
 

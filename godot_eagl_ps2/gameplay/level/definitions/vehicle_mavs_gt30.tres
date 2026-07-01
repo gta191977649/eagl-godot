@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="VehicleDefinition" format=3]
+
+[ext_resource type="Script" uid="uid://caiewvjfpp7jn" path="res://gameplay/level/vehicle_definition.gd" id="1_vehicle_definition"]
+[ext_resource type="PackedScene" uid="uid://bat0h5s3lfqru" path="res://addons/M.A.V.S/Vehicle/GT30/GT30.tscn" id="2_vehicle_scene"]
+
+[resource]
+script = ExtResource("1_vehicle_definition")
+id = "mavs_gt30"
+display_name = "M.A.V.S GT30"
+vehicle_scene = ExtResource("2_vehicle_scene")

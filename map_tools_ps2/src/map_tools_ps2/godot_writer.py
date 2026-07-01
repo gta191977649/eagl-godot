@@ -308,6 +308,9 @@ def _collision_manifest(scene: Scene, objects: list[dict[str, Any]], binary: Bin
                 "debug_lines": line_spec,
                 "source_kind": "track_polygon_collision_area",
                 "source_name": f"TRACK_POLYGON_COLLISION_AREA_{polygon.index:06d}",
+                "source_chunk_offset": polygon.source_chunk_offset,
+                "source_record_offset": polygon.source_record_offset,
+                "record_index": polygon.index,
             }
         )
 

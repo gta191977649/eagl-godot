@@ -198,5 +198,5 @@ LODs: -
 VSync: on"
 horizontal_alignment = 2
 
-[node name="RuntimeDebugUi" parent="." instance=ExtResource("3_runtime_debug")]
+[node name="RuntimeDebugUi" parent="." unique_id=202727457 instance=ExtResource("3_runtime_debug")]
 layer = 2

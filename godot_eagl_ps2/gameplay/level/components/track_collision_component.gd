@@ -61,8 +61,6 @@ func _configure_imported_collision(root: Node) -> void:
 		elif child is CollisionShape3D:
 			var shape_node := child as CollisionShape3D
 			shape_node.disabled = false
-			if shape_node.shape is ConcavePolygonShape3D:
-				(shape_node.shape as ConcavePolygonShape3D).backface_collision = true
 		_configure_imported_collision(child)
 
 
