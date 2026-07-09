@@ -12,6 +12,7 @@ from .vif import VifVertexRun, extract_vif_vertex_runs
 CHUNK_TRACK_ROUTE = 0x00034121
 CHUNK_TRACK_ROUTE_EDGES = 0x00034122
 CHUNK_TRACK_POLYGON_COLLISION = 0x00034132
+CHUNK_ROUTE_RADAR = 0x00034510
 CHUNK_ALLOWED_ROAD_AREAS = 0x00034530
 TRACK_ROUTE_EDGE_RECORD_SIZE = 0x0C
 TRACK_COLLISION_POLYGON_RECORD_SIZE = 0x20
@@ -90,6 +91,7 @@ class SolidPack:
 @dataclass(frozen=True)
 class TrackCollisionPolygon:
     index: int
+    selector_byte: int
     material_id: int
     flags: int
     vertex_count: int
@@ -157,6 +159,8 @@ class Scene:
     track_collision_polygons: list[TrackCollisionPolygon] = field(default_factory=list)
     track_route_segments: list[TrackRouteSegment] = field(default_factory=list)
     track_route_edges: list[TrackRouteEdge] = field(default_factory=list)
+    route_points: list[dict[str, object]] = field(default_factory=list)
+    route_stats: dict[str, object] = field(default_factory=dict)
     allowed_road_areas: list[AllowedRoadArea] = field(default_factory=list)
 
     @property
@@ -271,6 +275,9 @@ def parse_scene(chunks: tuple[Chunk, ...], bundle: bytes) -> Scene:
     scene.track_collision_polygons.extend(_parse_track_collision_polygons(chunks, bundle))
     scene.track_route_segments.extend(_parse_track_route_segments(chunks, bundle))
     scene.track_route_edges.extend(_parse_track_route_edges(chunks, bundle))
+    route_parse = _parse_route_points(chunks, bundle)
+    scene.route_points.extend(route_parse["points"])
+    scene.route_stats.update(route_parse["stats"])
     scene.allowed_road_areas.extend(_parse_allowed_road_areas(chunks, bundle))
     return scene
 
@@ -466,6 +473,7 @@ def _parse_track_collision_polygon_record(
 ) -> TrackCollisionPolygon | None:
     if offset + TRACK_COLLISION_POLYGON_RECORD_SIZE > len(payload):
         return None
+    selector_byte = payload[offset + 0x01]
     material_id = payload[offset + 0x02]
     flags = payload[offset + 0x03]
     vertex_count = 4 if (flags & 0x10) else 3
@@ -482,6 +490,7 @@ def _parse_track_collision_polygon_record(
         return None
     return TrackCollisionPolygon(
         index=polygon_index,
+        selector_byte=selector_byte,
         material_id=material_id,
         flags=flags,
         vertex_count=vertex_count,
@@ -625,6 +634,107 @@ def _parse_allowed_road_areas(chunks: tuple[Chunk, ...], bundle: bytes) -> tuple
             offset += ALLOWED_ROAD_AREA_RECORD_SIZE
         break
     return tuple(areas)
+
+
+def _parse_route_points(chunks: tuple[Chunk, ...], bundle: bytes) -> dict[str, object]:
+    raw_points: list[dict[str, object]] = []
+    source_chunk_offset = -1
+    declared_count = 0
+    for chunk in walk_chunks(chunks):
+        if chunk.chunk_id != CHUNK_ROUTE_RADAR:
+            continue
+        source_chunk_offset = chunk.offset
+        payload = chunk.payload(bundle)
+        if len(payload) < 4:
+            break
+        declared_count = u32le(payload, 0)
+        max_records = max(0, (len(payload) - 4) // 32)
+        count = min(declared_count, max_records)
+        for index in range(count):
+            record_offset = 4 + index * 32
+            name = _ascii_fixed(payload, record_offset, 16)
+            point_ps2_2d = (
+                f32le(payload, record_offset + 16),
+                f32le(payload, record_offset + 20),
+            )
+            raw_points.append(
+                {
+                    "index": index,
+                    "name": name,
+                    "position_ps2_2d": point_ps2_2d,
+                    "position_godot_flat": Vec3(point_ps2_2d[0], 0.0, -point_ps2_2d[1]),
+                    "aux": f32le(payload, record_offset + 24),
+                    "source_chunk_offset": source_chunk_offset,
+                    "source_record_offset": record_offset,
+                }
+            )
+        break
+
+    normalized = _normalized_route_points(raw_points)
+    points = normalized["points"]
+    return {
+        "points": points,
+        "stats": {
+            "point_count": len(points),
+            "raw_point_count": len(raw_points),
+            "declared_count": declared_count,
+            "source_chunk_offset": source_chunk_offset,
+            "source_chunk_id": CHUNK_ROUTE_RADAR if source_chunk_offset >= 0 else 0,
+            "filtered_non_route_point_count": normalized["filtered_non_route_point_count"],
+            "sorted_by_radar_name": normalized["sorted_by_radar_name"],
+        },
+    }
+
+
+def _normalized_route_points(raw_points: list[dict[str, object]]) -> dict[str, object]:
+    route_points: list[dict[str, object]] = []
+    route_groups: set[str] = set()
+    for point in raw_points:
+        name = str(point.get("name", ""))
+        sequence = _route_point_sequence(name)
+        if sequence < 0:
+            continue
+        route_point = dict(point)
+        route_point["route_sequence"] = sequence
+        route_point["route_group"] = _route_point_group(name)
+        route_points.append(route_point)
+        route_groups.add(str(route_point["route_group"]))
+
+    sorted_by_name = False
+    if len(route_groups) == 1:
+        route_points.sort(key=lambda point: (int(point.get("route_sequence", 0)), int(point.get("index", 0))))
+        sorted_by_name = True
+
+    return {
+        "points": route_points,
+        "filtered_non_route_point_count": len(raw_points) - len(route_points),
+        "sorted_by_radar_name": sorted_by_name,
+    }
+
+
+def _route_point_group(name: str) -> str:
+    separator = name.rfind("_")
+    if separator <= 0:
+        return ""
+    return name[:separator]
+
+
+def _route_point_sequence(name: str) -> int:
+    separator = name.rfind("_")
+    if separator < 0 or separator >= len(name) - 1:
+        return -1
+    suffix = name[separator + 1 :]
+    if not suffix.isdigit():
+        return -1
+    return int(suffix)
+
+
+def _ascii_fixed(payload: bytes, offset: int, length: int) -> str:
+    limit = min(offset + length, len(payload))
+    end = offset
+    while end < limit and payload[end] != 0:
+        end += 1
+    return payload[offset:end].decode("ascii", errors="replace").strip()
 
 
 def _read_run_texture_indices(payload: bytes, run_count: int) -> tuple[int | None, ...]:

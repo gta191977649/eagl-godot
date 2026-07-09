@@ -10,6 +10,7 @@
 [ext_resource type="Script" uid="uid://bt4sggxauxjiy" path="res://gameplay/level/components/spawn_resolver_component.gd" id="8_spawn_resolver"]
 [ext_resource type="Script" uid="uid://8jlcwgftoetb" path="res://gameplay/level/components/vehicle_spawner_component.gd" id="9_vehicle_spawner"]
 [ext_resource type="Script" uid="uid://cma7u7rd6q1hj" path="res://gameplay/level/components/ai_spawn_service.gd" id="10_ai_spawn"]
+[ext_resource type="Script" uid="uid://cegv613cjnbai" path="res://gameplay/level/components/track_boundary_limiter_component.gd" id="11_track_boundary"]
 
 [node name="Level" type="Node3D" unique_id=2114630381]
 script = ExtResource("1_level")
@@ -54,5 +55,11 @@ player_parent_path = NodePath("../../Vehicles/Player")
 
 [node name="AISpawnService" type="Node" parent="Services" unique_id=247989399]
 script = ExtResource("10_ai_spawn")
+race_ai_parent_path = NodePath("../../Vehicles/RaceAI")
+police_ai_parent_path = NodePath("../../Vehicles/PoliceAI")
+
+[node name="TrackBoundaryLimiter" type="Node" parent="Services" unique_id=1625313666]
+script = ExtResource("11_track_boundary")
+player_parent_path = NodePath("../../Vehicles/Player")
 race_ai_parent_path = NodePath("../../Vehicles/RaceAI")
 police_ai_parent_path = NodePath("../../Vehicles/PoliceAI")

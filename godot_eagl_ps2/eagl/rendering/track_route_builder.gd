@@ -15,6 +15,21 @@ func add_track_route(track_root: Node3D, asset, options: Dictionary = {}) -> Dic
 		return disabled_stats
 
 	var route_points := _project_route_points(asset.route_points, asset.collision_surfaces)
+	return _finalize_route_points(track_root, route_points, options, source_stats)
+
+
+func add_route_points(track_root: Node3D, source_points: Array[Dictionary], collision_surfaces: Array[Dictionary], options: Dictionary = {}, source_stats: Dictionary = {}) -> Dictionary:
+	if not bool(options.get("build_route", false)):
+		var disabled_stats := source_stats.duplicate(true)
+		disabled_stats["enabled"] = false
+		_apply_root_metadata(track_root, disabled_stats, [])
+		return disabled_stats
+
+	var route_points := _project_route_points(source_points, collision_surfaces)
+	return _finalize_route_points(track_root, route_points, options, source_stats)
+
+
+func _finalize_route_points(track_root: Node3D, route_points: Array[Dictionary], options: Dictionary, source_stats: Dictionary) -> Dictionary:
 	var stats := source_stats.duplicate(true)
 	stats["enabled"] = true
 	stats["point_count"] = route_points.size()

@@ -828,6 +828,14 @@ func _track_collision_polygon_contributes_to_drive_area(polygon: Dictionary) -> 
 	return (flags & 0x0a) == 0
 
 
+func _track_collision_polygon_role(flags: int) -> String:
+	if (flags & 0x02) != 0:
+		return "wall_barrier"
+	if (flags & 0x08) != 0:
+		return "secondary_collision"
+	return "road_surface"
+
+
 func _append_projected_boundary_edge(edges: Array[Dictionary], a: Vector3, b: Vector3, owner_index: int) -> void:
 	# DriveArea is a 2D outline; adjacent polygons may share X/Z edges with slightly different heights.
 	var qa := _projected_boundary_point_key(a)
@@ -1926,6 +1934,7 @@ func _parse_track_collision_polygons(chunks: Array[Dictionary], bundle: PackedBy
 func _parse_track_collision_polygon_record(payload: PackedByteArray, offset: int, polygon_index: int, chunk_offset: int) -> Dictionary:
 	if offset + TRACK_COLLISION_POLYGON_RECORD_SIZE > payload.size():
 		return {}
+	var selector_byte := Binary.u8(payload, offset + 0x01)
 	var material_id := Binary.u8(payload, offset + 0x02)
 	var flags := Binary.u8(payload, offset + 0x03)
 	var vertex_count := 4 if (flags & 0x10) != 0 else 3
@@ -1953,6 +1962,11 @@ func _parse_track_collision_polygon_record(payload: PackedByteArray, offset: int
 		faces.append(points_godot[3])
 	return {
 		"index": polygon_index,
+		"source_kind": "track_polygon_collision_area",
+		"source_name": "TRACK_POLYGON_COLLISION_AREA_%06d" % polygon_index,
+		"collision_role": _track_collision_polygon_role(flags),
+		"drive_surface": (flags & 0x0a) == 0,
+		"selector_byte": selector_byte,
 		"material_id": material_id,
 		"flags": flags,
 		"vertex_count": vertex_count,

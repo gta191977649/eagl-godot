@@ -3,6 +3,7 @@ extends Node3D
 const CarConfigScript = preload("res://eagl/handling/car_config.gd")
 const CarLoaderScript = preload("res://eagl/assets/car/car_loader.gd")
 const GlobalBHandlingLoaderScript = preload("res://eagl/handling/globalb_handling_loader.gd")
+const RoadSurfaceSamplerScript = preload("res://eagl/handling/road_surface_sampler.gd")
 
 const DEFAULT_PLATFORM := "EAGL_HOTPUSUIT2_PS2"
 
@@ -226,10 +227,27 @@ func _bind_car_drive_area_sampler(track_node: Node3D) -> void:
 		return
 	var sampler = track_node.get_meta("eagl_drive_area_sampler", null)
 	if sampler == null:
+		sampler = _build_drive_area_sampler_from_track_metadata(track_node)
+	if sampler == null:
 		push_warning("Gamelevel track loaded without DriveArea sampler; player boundary limiting is disabled")
 		return
 	car.set_surface_sampler(sampler)
-	print("Gamelevel DriveArea sampler enabled: triangles=%s" % int(track_node.get_meta("eagl_drive_area_sampler_triangle_count", 0)))
+	print("Gamelevel DriveArea sampler enabled: polygons=%s triangles=%s" % [
+		int(track_node.get_meta("eagl_drive_area_sampler_polygon_count", 0)),
+		int(track_node.get_meta("eagl_drive_area_sampler_triangle_count", 0)),
+	])
+
+
+func _build_drive_area_sampler_from_track_metadata(track_node: Node3D):
+	var sampler = RoadSurfaceSamplerScript.new()
+	sampler.build_from_track_asset(track_node)
+	if sampler.surface_count() <= 0:
+		return null
+	track_node.set_meta("eagl_drive_area_sampler", sampler)
+	track_node.set_meta("eagl_drive_area_sampler_polygon_count", sampler.polygon_count())
+	track_node.set_meta("eagl_drive_area_sampler_triangle_count", sampler.triangle_count())
+	track_node.set_meta("eagl_drive_area_sampler_surface_count", sampler.surface_count())
+	return sampler
 
 
 func _load_car_visual() -> void:

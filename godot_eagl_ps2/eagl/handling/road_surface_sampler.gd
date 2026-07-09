@@ -13,11 +13,15 @@ var up_normal_threshold = 0.05
 
 var _cells = {}
 var _triangles: Array[Dictionary] = []
+var _polygon_cells = {}
+var _polygons: Array[Dictionary] = []
 
 
 func clear() -> void:
 	_cells.clear()
 	_triangles.clear()
+	_polygon_cells.clear()
+	_polygons.clear()
 
 
 func build_from_flat_plane(width: float, depth: float, height_z: float = 0.0, material_id: int = 0) -> void:
@@ -35,6 +39,8 @@ func build_from_flat_plane(width: float, depth: float, height_z: float = 0.0, ma
 func build_from_track_asset(asset) -> void:
 	clear()
 	if asset == null:
+		return
+	if _build_from_track_collision_road_surfaces(asset):
 		return
 	if _build_from_track_collision_polygons(asset):
 		return
@@ -78,27 +84,99 @@ func build_from_track_asset(asset) -> void:
 
 
 func _build_from_track_collision_polygons(asset) -> bool:
-	var polygons_value = asset.get("track_collision_polygons")
+	var polygons_value = _track_collision_polygon_values(asset)
 	if typeof(polygons_value) != TYPE_ARRAY:
 		return false
 	var polygons: Array = polygons_value
 	if polygons.is_empty():
 		return false
 	for polygon in polygons:
-		var flags := int(polygon.get("flags", 0))
-		if (flags & 0x0a) != 0:
+		if typeof(polygon) != TYPE_DICTIONARY:
 			continue
-		var points: Array = polygon.get("points_ps2", [])
-		if points.size() < 3:
+		_add_track_polygon(polygon)
+	return not _polygons.is_empty()
+
+
+func _build_from_track_collision_road_surfaces(asset) -> bool:
+	var surfaces_value = _track_collision_road_surface_values(asset)
+	if typeof(surfaces_value) != TYPE_ARRAY:
+		return false
+	var surfaces: Array = surfaces_value
+	if surfaces.is_empty():
+		return false
+	for surface_value in surfaces:
+		if typeof(surface_value) != TYPE_DICTIONARY:
 			continue
-		var material_id := int(polygon.get("material_id", -1))
-		_add_triangle(points[0], points[1], points[2], material_id)
-		if points.size() >= 4:
-			_add_triangle(points[0], points[2], points[3], material_id)
+		var surface: Dictionary = surface_value
+		var faces = surface.get("faces", PackedVector3Array())
+		if typeof(faces) != TYPE_PACKED_VECTOR3_ARRAY:
+			continue
+		var packed_faces: PackedVector3Array = faces
+		for index in range(0, packed_faces.size() - 2, 3):
+			_add_triangle(
+				_godot_to_ps2_vec3(packed_faces[index]),
+				_godot_to_ps2_vec3(packed_faces[index + 1]),
+				_godot_to_ps2_vec3(packed_faces[index + 2]),
+				0
+			)
 	return not _triangles.is_empty()
 
 
 func sample_surface(sample_point_ps2: Vector3) -> Dictionary:
+	if not _polygons.is_empty():
+		return _sample_polygon_surface(sample_point_ps2)
+	return _sample_triangle_surface(sample_point_ps2)
+
+
+func _sample_polygon_surface(sample_point_ps2: Vector3) -> Dictionary:
+	if _polygons.is_empty():
+		return {}
+
+	var cell_x = int(floor(sample_point_ps2.x / cell_size))
+	var cell_y = int(floor(sample_point_ps2.y / cell_size))
+	var best = {}
+	var best_dist = INF
+	var query_xy := Vector2(sample_point_ps2.x, sample_point_ps2.y)
+
+	for offset_x in range(-1, 2):
+		for offset_y in range(-1, 2):
+			var key = _cell_key(cell_x + offset_x, cell_y + offset_y)
+			var candidates: Array = _polygon_cells.get(key, [])
+			for polygon_index in candidates:
+				var polygon: Dictionary = _polygons[polygon_index]
+				if sample_point_ps2.x < float(polygon["min_x"]) - SURFACE_EPSILON:
+					continue
+				if sample_point_ps2.x > float(polygon["max_x"]) + SURFACE_EPSILON:
+					continue
+				if sample_point_ps2.y < float(polygon["min_y"]) - SURFACE_EPSILON:
+					continue
+				if sample_point_ps2.y > float(polygon["max_y"]) + SURFACE_EPSILON:
+					continue
+				if not _point_in_convex_polygon_xy(query_xy, polygon["points_ps2"]):
+					continue
+
+				var normal: Vector3 = polygon["normal"]
+				if absf(normal.z) <= SURFACE_EPSILON:
+					continue
+				var height_z := -((normal.x * sample_point_ps2.x) + (normal.y * sample_point_ps2.y) + float(polygon["plane_d"])) / normal.z
+				var dist = absf(height_z - sample_point_ps2.z)
+				if dist >= best_dist:
+					continue
+
+				best_dist = dist
+				best = {
+					"height_z": height_z,
+					"point": Vector3(sample_point_ps2.x, sample_point_ps2.y, height_z),
+					"normal": normal,
+					"material_id": polygon["material_id"],
+					"record_index": polygon["record_index"],
+					"source": "track_polygon",
+				}
+
+	return best
+
+
+func _sample_triangle_surface(sample_point_ps2: Vector3) -> Dictionary:
 	if _triangles.is_empty():
 		return {}
 
@@ -142,6 +220,7 @@ func sample_surface(sample_point_ps2: Vector3) -> Dictionary:
 					"point": Vector3(sample_point_ps2.x, sample_point_ps2.y, height_z),
 					"normal": triangle["normal"],
 					"material_id": triangle["material_id"],
+					"source": "triangle",
 				}
 
 	return best
@@ -158,6 +237,156 @@ func has_driveable_surface(sample_point_ps2: Vector3) -> bool:
 
 func triangle_count() -> int:
 	return _triangles.size()
+
+
+func polygon_count() -> int:
+	return _polygons.size()
+
+
+func surface_count() -> int:
+	return _polygons.size() if not _polygons.is_empty() else _triangles.size()
+
+
+func _track_collision_polygon_values(asset):
+	if asset is Node:
+		var node := asset as Node
+		var meta_value = node.get_meta("eagl_track_collision_polygons", [])
+		if typeof(meta_value) == TYPE_ARRAY:
+			var meta_polygons: Array = meta_value
+			if not meta_polygons.is_empty():
+				return meta_polygons
+	return asset.get("track_collision_polygons")
+
+
+func _track_collision_road_surface_values(asset):
+	if asset is Node:
+		var node := asset as Node
+		var meta_value = node.get_meta("eagl_track_collision_road_surfaces", [])
+		if typeof(meta_value) == TYPE_ARRAY:
+			return meta_value
+	return []
+
+
+func _godot_to_ps2_vec3(point: Vector3) -> Vector3:
+	return Vector3(point.x, -point.z, point.y)
+
+
+func _add_track_polygon(polygon: Dictionary) -> void:
+	var flags := int(polygon.get("flags", 0))
+	if (flags & 0x0a) != 0:
+		return
+	if not bool(polygon.get("valid_plane", true)):
+		return
+	var points := _packed_vec3_array(polygon.get("points_ps2", []))
+	if points.size() < 3:
+		return
+	var normal := _vec3_value(polygon.get("plane_normal_ps2", Vector3.ZERO))
+	var plane_d := float(polygon.get("plane_d_ps2", 0.0))
+	if normal.length_squared() <= SURFACE_EPSILON:
+		var plane := _plane_for_polygon_points(points)
+		if plane.is_empty():
+			return
+		normal = plane["normal"]
+		plane_d = float(plane["plane_d"])
+	if normal.z < 0.0:
+		normal = -normal
+		plane_d = -plane_d
+	if normal.length_squared() <= SURFACE_EPSILON:
+		return
+	normal = normal.normalized()
+	if normal.z < up_normal_threshold:
+		return
+
+	var min_x := INF
+	var max_x := -INF
+	var min_y := INF
+	var max_y := -INF
+	for point in points:
+		min_x = minf(min_x, point.x)
+		max_x = maxf(max_x, point.x)
+		min_y = minf(min_y, point.y)
+		max_y = maxf(max_y, point.y)
+
+	var polygon_entry = {
+		"points_ps2": points,
+		"normal": normal,
+		"plane_d": plane_d,
+		"material_id": int(polygon.get("material_id", -1)),
+		"record_index": int(polygon.get("record_index", polygon.get("index", -1))),
+		"min_x": min_x,
+		"max_x": max_x,
+		"min_y": min_y,
+		"max_y": max_y,
+	}
+
+	var polygon_index = _polygons.size()
+	_polygons.append(polygon_entry)
+
+	var min_cell_x = int(floor(min_x / cell_size))
+	var max_cell_x = int(floor(max_x / cell_size))
+	var min_cell_y = int(floor(min_y / cell_size))
+	var max_cell_y = int(floor(max_y / cell_size))
+	for cell_x in range(min_cell_x, max_cell_x + 1):
+		for cell_y in range(min_cell_y, max_cell_y + 1):
+			var key = _cell_key(cell_x, cell_y)
+			if not _polygon_cells.has(key):
+				_polygon_cells[key] = []
+			_polygon_cells[key].append(polygon_index)
+
+
+func _packed_vec3_array(value) -> PackedVector3Array:
+	if typeof(value) == TYPE_PACKED_VECTOR3_ARRAY:
+		var packed_points: PackedVector3Array = value
+		return packed_points
+	var points := PackedVector3Array()
+	if typeof(value) != TYPE_ARRAY:
+		return points
+	for point_value in value:
+		points.append(_vec3_value(point_value))
+	return points
+
+
+func _vec3_value(value) -> Vector3:
+	if typeof(value) == TYPE_VECTOR3:
+		return value
+	if typeof(value) == TYPE_ARRAY:
+		var items: Array = value
+		if items.size() >= 3:
+			return Vector3(float(items[0]), float(items[1]), float(items[2]))
+	return Vector3.ZERO
+
+
+func _plane_for_polygon_points(points: PackedVector3Array) -> Dictionary:
+	if points.size() < 3:
+		return {}
+	var normal := (points[1] - points[0]).cross(points[2] - points[0])
+	if normal.length_squared() <= SURFACE_EPSILON:
+		return {}
+	normal = normal.normalized()
+	if normal.z < 0.0:
+		normal = -normal
+	var plane_d := -normal.dot(points[0])
+	return {
+		"normal": normal,
+		"plane_d": plane_d,
+	}
+
+
+func _point_in_convex_polygon_xy(point_xy: Vector2, points: PackedVector3Array) -> bool:
+	var sign := 0
+	for index in range(points.size()):
+		var a := points[index]
+		var b := points[(index + 1) % points.size()]
+		var cross := (b.x - a.x) * (point_xy.y - a.y) - (b.y - a.y) * (point_xy.x - a.x)
+		if absf(cross) <= SURFACE_EPSILON:
+			continue
+		var edge_sign := 1 if cross > 0.0 else -1
+		if sign == 0:
+			sign = edge_sign
+			continue
+		if sign != edge_sign:
+			return false
+	return true
 
 
 func _add_triangle(a: Vector3, b: Vector3, c: Vector3, material_id: int) -> void:

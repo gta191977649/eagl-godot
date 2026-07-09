@@ -191,12 +191,13 @@ func _load_debug_track() -> void:
 		track_node.get_meta("eagl_shadow_texture_visibility_count", 0),
 		track_node.get_meta("eagl_skipped", {}),
 	])
-	print("EAGL debug collision: enabled=%s bodies=%s shapes=%s surfaces=%s triangles=%s stats=%s" % [
+	print("EAGL debug collision: enabled=%s bodies=%s shapes=%s surfaces=%s triangles=%s polygon_overlay_lines=%s stats=%s" % [
 		track_node.get_meta("eagl_collision_enabled", false),
 		track_node.get_meta("eagl_collision_body_count", 0),
 		track_node.get_meta("eagl_collision_shape_count", 0),
 		track_node.get_meta("eagl_collision_surface_count", 0),
 		track_node.get_meta("eagl_collision_triangle_count", 0),
+		track_node.get_meta("eagl_collision_track_polygon_overlay_line_count", 0),
 		track_node.get_meta("eagl_collision_stats", {}),
 	])
 	print("EAGL debug route: enabled=%s points=%s stats=%s" % [

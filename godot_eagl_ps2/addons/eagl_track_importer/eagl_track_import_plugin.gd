@@ -2,6 +2,8 @@
 extends EditorImportPlugin
 
 const TrackCollisionBuilderScript := preload("res://eagl/rendering/track_collision_builder.gd")
+const TrackRouteBuilderScript := preload("res://eagl/rendering/track_route_builder.gd")
+const BOUNDARY_GRID_CELL_SIZE := 16.0
 
 
 func _get_importer_name() -> String:
@@ -38,6 +40,7 @@ func _get_import_options(_path: String, _preset_index: int) -> Array[Dictionary]
 		{"name": "group_scenery_by_section", "default_value": true},
 		{"name": "place_scenery_instances", "default_value": true},
 		{"name": "include_debug_metadata", "default_value": false},
+		{"name": "collision_debug_visible", "default_value": true},
 		{
 			"name": "texture_filter_mode",
 			"default_value": "linear_mipmap",
@@ -142,13 +145,26 @@ func _build_scene(manifest: Dictionary, binary: PackedByteArray, manifest_dir: S
 	root.set_meta("eagl_surface_count", int(stats.get("surface_count", 0)))
 	root.set_meta("eagl_vertex_count", int(stats.get("vertex_count", 0)))
 	root.set_meta("eagl_texture_count", textures.size())
-	var collision_result := _import_collision(root, manifest, binary)
+	var collision_payload := _parse_collision_payload(manifest, binary)
+	if not bool(collision_payload.get("ok", true)):
+		return {
+			"root": root,
+			"object_entries": object_entries,
+			"error": String(collision_payload.get("error", "EAGL track collision manifest parse failed")),
+		}
+	collision_payload["collision_debug_visible"] = bool(options.get("collision_debug_visible", true))
+	var surfaces: Array[Dictionary] = collision_payload.get("surfaces", [])
+	var polygons: Array[Dictionary] = collision_payload.get("polygons", [])
+	var collision_result := _import_collision(root, surfaces, collision_payload)
 	if not bool(collision_result.get("ok", true)):
 		return {
 			"root": root,
 			"object_entries": object_entries,
 			"error": String(collision_result.get("error", "EAGL track collision import failed")),
 		}
+	_apply_collision_polygon_metadata(root, polygons, collision_payload.get("source_stats", {}), surfaces)
+	_import_boundary(root, manifest)
+	_import_route(root, manifest, _route_projection_surfaces(surfaces, polygons))
 	return {
 		"root": root,
 		"object_entries": object_entries,
@@ -332,23 +348,40 @@ func _read_index_array(binary: PackedByteArray, spec: Dictionary) -> PackedInt32
 	return out
 
 
-func _import_collision(root: Node3D, manifest: Dictionary, binary: PackedByteArray) -> Dictionary:
+func _parse_collision_payload(manifest: Dictionary, binary: PackedByteArray) -> Dictionary:
 	var collision_record = manifest.get("collision", {})
 	if typeof(collision_record) != TYPE_DICTIONARY:
-		return {"ok": true}
+		return {
+			"ok": true,
+			"surfaces": [],
+			"source_stats": {},
+			"manifest_declares_collision": false,
+		}
 
 	var source_stats: Dictionary = collision_record.get("stats", {})
-	var manifest_declares_collision := bool(source_stats.get("enabled", false)) or int(source_stats.get("valid_triangle_count", source_stats.get("triangle_count", 0))) > 0
+	var polygons := _parse_collision_polygon_records(collision_record.get("polygons", []))
+	var manifest_declares_collision := (
+		bool(source_stats.get("enabled", false))
+		or int(source_stats.get("valid_triangle_count", source_stats.get("triangle_count", 0))) > 0
+		or not polygons.is_empty()
+	)
 
 	var surfaces_value = collision_record.get("surfaces", [])
 	if typeof(surfaces_value) != TYPE_ARRAY:
 		if manifest_declares_collision:
 			return {"ok": false, "error": "EAGL track manifest declares collision but collision.surfaces is not an array."}
-		return {"ok": true}
-	manifest_declares_collision = manifest_declares_collision or not (surfaces_value as Array).is_empty()
+		return {
+			"ok": true,
+			"surfaces": [],
+			"polygons": polygons,
+			"source_stats": source_stats,
+			"manifest_declares_collision": false,
+		}
+	var surface_values: Array = surfaces_value
+	manifest_declares_collision = manifest_declares_collision or not surface_values.is_empty()
 
 	var surfaces: Array[Dictionary] = []
-	for surface_value in surfaces_value:
+	for surface_value in surface_values:
 		if typeof(surface_value) != TYPE_DICTIONARY:
 			continue
 		var surface_record: Dictionary = surface_value
@@ -367,23 +400,92 @@ func _import_collision(root: Node3D, manifest: Dictionary, binary: PackedByteArr
 		})
 
 	if surfaces.is_empty():
-		if manifest_declares_collision:
-			return {"ok": false, "error": "EAGL track manifest declares collision but no collision surfaces were imported."}
-		return {"ok": true}
+		return {
+			"ok": true,
+			"surfaces": [],
+			"polygons": polygons,
+			"source_stats": source_stats,
+			"manifest_declares_collision": manifest_declares_collision,
+		}
+
+	return {
+		"ok": true,
+		"surfaces": surfaces,
+		"polygons": polygons,
+		"source_stats": source_stats,
+		"manifest_declares_collision": manifest_declares_collision,
+	}
+
+
+func _parse_collision_polygon_records(polygons_value) -> Array[Dictionary]:
+	var polygons: Array[Dictionary] = []
+	if typeof(polygons_value) != TYPE_ARRAY:
+		return polygons
+	for polygon_value in polygons_value:
+		if typeof(polygon_value) != TYPE_DICTIONARY:
+			continue
+		var polygon_record: Dictionary = polygon_value
+		var points := _vec3_points_from_array(polygon_record.get("points_ps2", []))
+		if points.size() < 3:
+			continue
+		var aabb_record = polygon_record.get("aabb_ps2_xy", {})
+		var min_xy := Vector2(INF, INF)
+		var max_xy := Vector2(-INF, -INF)
+		for point in points:
+			min_xy.x = minf(min_xy.x, point.x)
+			min_xy.y = minf(min_xy.y, point.y)
+			max_xy.x = maxf(max_xy.x, point.x)
+			max_xy.y = maxf(max_xy.y, point.y)
+		if typeof(aabb_record) == TYPE_DICTIONARY:
+			var aabb_dict: Dictionary = aabb_record
+			if aabb_dict.has("min"):
+				min_xy = _vec2_from_array(aabb_dict.get("min", []))
+			if aabb_dict.has("max"):
+				max_xy = _vec2_from_array(aabb_dict.get("max", []))
+		var normal := _vec3_from_array(polygon_record.get("plane_normal_ps2", []))
+		polygons.append({
+			"source_kind": String(polygon_record.get("source_kind", "track_polygon_collision_area")),
+			"source_name": String(polygon_record.get("source_name", "")),
+			"collision_role": String(polygon_record.get("collision_role", _track_collision_polygon_role(int(polygon_record.get("flags", 0))))),
+			"drive_surface": bool(polygon_record.get("drive_surface", (int(polygon_record.get("flags", 0)) & 0x0a) == 0)),
+			"record_index": int(polygon_record.get("record_index", polygon_record.get("index", polygons.size()))),
+			"source_chunk_offset": int(polygon_record.get("source_chunk_offset", -1)),
+			"source_record_offset": int(polygon_record.get("source_record_offset", -1)),
+			"material_id": int(polygon_record.get("material_id", -1)),
+			"flags": int(polygon_record.get("flags", 0)),
+			"selector_byte": int(polygon_record.get("selector_byte", 0)),
+			"vertex_count": int(polygon_record.get("vertex_count", points.size())),
+			"points_ps2": points,
+			"plane_normal_ps2": normal,
+			"plane_d_ps2": float(polygon_record.get("plane_d_ps2", 0.0)),
+			"valid_plane": bool(polygon_record.get("valid_plane", normal.length_squared() > 0.000001)),
+			"aabb_ps2_xy": {
+				"min": min_xy,
+				"max": max_xy,
+			},
+		})
+	return polygons
+
+
+func _import_collision(root: Node3D, surfaces: Array[Dictionary], collision_payload: Dictionary) -> Dictionary:
+	var source_stats: Dictionary = collision_payload.get("source_stats", {})
+	var manifest_declares_collision := bool(collision_payload.get("manifest_declares_collision", false))
+	var polygons: Array[Dictionary] = collision_payload.get("polygons", [])
 
 	var builder = TrackCollisionBuilderScript.new()
 	var options := {
 		"build_collision": true,
 		"collision_layer": 1,
 		"collision_mask": 1,
-		"collision_debug_visible": false,
+		"collision_debug_visible": bool(collision_payload.get("collision_debug_visible", false)),
 		"collision_debug_surface_offset": 0.08,
 	}
 	var built_stats: Dictionary = builder.add_collision_surfaces(
 		root,
 		surfaces,
 		options,
-		source_stats
+		source_stats,
+		polygons
 	)
 	var body_count := int(built_stats.get("body_count", 0))
 	var shape_count := int(built_stats.get("shape_count", 0))
@@ -391,8 +493,256 @@ func _import_collision(root: Node3D, manifest: Dictionary, binary: PackedByteArr
 		return {
 			"ok": false,
 			"error": "EAGL track manifest declares collision but import generated %d StaticBody3D and %d CollisionShape3D." % [body_count, shape_count],
-		}
+	}
 	return {"ok": true, "stats": built_stats}
+
+
+func _apply_collision_polygon_metadata(root: Node3D, polygons: Array[Dictionary], source_stats: Dictionary, surfaces: Array[Dictionary]) -> void:
+	root.set_meta("eagl_track_collision_polygons", polygons.duplicate(true))
+	root.set_meta("eagl_track_collision_polygon_count", polygons.size())
+	root.set_meta("eagl_track_collision_polygon_stats", source_stats.duplicate(true))
+	root.set_meta("eagl_track_collision_polygon_sampler_enabled", not polygons.is_empty())
+	root.set_meta("eagl_track_collision_road_surfaces", _sampler_road_surfaces(surfaces))
+
+
+func _sampler_road_surfaces(surfaces: Array[Dictionary]) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for surface in surfaces:
+		if String(surface.get("category", "")) != "Road":
+			continue
+		var faces: PackedVector3Array = surface.get("faces", PackedVector3Array())
+		if faces.is_empty():
+			continue
+		out.append({
+			"source_kind": String(surface.get("source_kind", "")),
+			"source_name": String(surface.get("source_name", "")),
+			"faces": faces,
+		})
+	return out
+
+
+func _import_boundary(root: Node3D, manifest: Dictionary) -> void:
+	var boundary_record = manifest.get("boundary", {})
+	if typeof(boundary_record) != TYPE_DICTIONARY:
+		_apply_boundary_metadata(root, false, BOUNDARY_GRID_CELL_SIZE, [], {})
+		return
+
+	var segments_value = boundary_record.get("segments", [])
+	var cell_size := maxf(float(boundary_record.get("cell_size", BOUNDARY_GRID_CELL_SIZE)), 0.001)
+	var segments: Array[Dictionary] = []
+	if typeof(segments_value) == TYPE_ARRAY:
+		for segment_value in segments_value:
+			if typeof(segment_value) != TYPE_DICTIONARY:
+				continue
+			var segment_record: Dictionary = segment_value
+			var a_xz := _vec2_from_array(segment_record.get("a_xz", []))
+			var b_xz := _vec2_from_array(segment_record.get("b_xz", []))
+			var inward_normal := _vec2_from_array(segment_record.get("inward_normal_xz", []))
+			if a_xz == Vector2.ZERO and b_xz == Vector2.ZERO:
+				continue
+			if inward_normal.length_squared() <= 0.000001:
+				continue
+			inward_normal = inward_normal.normalized()
+			var aabb_record = segment_record.get("aabb_xz", {})
+			var min_xz := Vector2(minf(a_xz.x, b_xz.x), minf(a_xz.y, b_xz.y))
+			var max_xz := Vector2(maxf(a_xz.x, b_xz.x), maxf(a_xz.y, b_xz.y))
+			if typeof(aabb_record) == TYPE_DICTIONARY:
+				var aabb_dict: Dictionary = aabb_record
+				if aabb_dict.has("min"):
+					min_xz = _vec2_from_array(aabb_dict.get("min", []))
+				if aabb_dict.has("max"):
+					max_xz = _vec2_from_array(aabb_dict.get("max", []))
+			segments.append({
+				"segment_index": int(segment_record.get("segment_index", segments.size())),
+				"a_xz": a_xz,
+				"b_xz": b_xz,
+				"inward_normal_xz": inward_normal,
+				"aabb_xz": {
+					"min": min_xz,
+					"max": max_xz,
+				},
+			})
+	var enabled := bool(boundary_record.get("enabled", false)) and not segments.is_empty()
+	var grid := _build_boundary_grid(segments, cell_size)
+	_apply_boundary_metadata(root, enabled, cell_size, segments, grid)
+
+
+func _import_route(root: Node3D, manifest: Dictionary, collision_surfaces: Array[Dictionary]) -> void:
+	var route_record = manifest.get("route", {})
+	if typeof(route_record) != TYPE_DICTIONARY:
+		_apply_route_metadata_disabled(root)
+		return
+	var point_values = route_record.get("points", [])
+	var source_points: Array[Dictionary] = []
+	if typeof(point_values) == TYPE_ARRAY:
+		for point_value in point_values:
+			if typeof(point_value) != TYPE_DICTIONARY:
+				continue
+			var point_record: Dictionary = point_value
+			source_points.append({
+				"index": int(point_record.get("index", source_points.size())),
+				"name": String(point_record.get("name", "")),
+				"position_godot_flat": _vec3_from_array(point_record.get("position", [])),
+				"route_sequence": int(point_record.get("route_sequence", -1)),
+				"route_group": String(point_record.get("route_group", "")),
+				"source_chunk_offset": int(point_record.get("source_chunk_offset", -1)),
+				"source_record_offset": int(point_record.get("source_record_offset", -1)),
+			})
+	var source_stats: Dictionary = route_record.get("stats", {})
+	var builder = TrackRouteBuilderScript.new()
+	builder.add_route_points(root, source_points, collision_surfaces, {
+		"build_route": not source_points.is_empty(),
+		"route_debug_visible": false,
+		"route_debug_height_offset": 1.0,
+		"route_loop": true,
+	}, source_stats)
+
+
+func _route_projection_surfaces(surfaces: Array[Dictionary], polygons: Array[Dictionary]) -> Array[Dictionary]:
+	var has_road_faces := false
+	for surface in surfaces:
+		if String(surface.get("category", "")) == "Road":
+			var faces: PackedVector3Array = surface.get("faces", PackedVector3Array())
+			if not faces.is_empty():
+				has_road_faces = true
+				break
+	if has_road_faces or polygons.is_empty():
+		return surfaces
+
+	var out: Array[Dictionary] = []
+	for polygon in polygons:
+		if not _track_collision_polygon_contributes_to_drive_area(polygon):
+			continue
+		var points := _godot_points_for_collision_polygon(polygon)
+		if points.size() < 3:
+			continue
+		var faces := PackedVector3Array()
+		_append_projection_face(faces, points[0], points[1], points[2])
+		if points.size() >= 4:
+			_append_projection_face(faces, points[0], points[2], points[3])
+		if faces.is_empty():
+			continue
+		out.append({
+			"category": "Road",
+			"triangle_count": int(faces.size() / 3),
+			"faces": faces,
+		})
+	return out
+
+
+func _track_collision_polygon_contributes_to_drive_area(polygon: Dictionary) -> bool:
+	if polygon.has("drive_surface"):
+		return bool(polygon.get("drive_surface", false))
+	return (int(polygon.get("flags", 0)) & 0x0a) == 0
+
+
+func _track_collision_polygon_role(flags: int) -> String:
+	if (flags & 0x02) != 0:
+		return "wall_barrier"
+	if (flags & 0x08) != 0:
+		return "secondary_collision"
+	return "road_surface"
+
+
+func _godot_points_for_collision_polygon(polygon: Dictionary) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	var points_value = polygon.get("points_ps2", [])
+	if typeof(points_value) != TYPE_ARRAY:
+		return out
+	for point_value in points_value:
+		var point := Vector3.ZERO
+		if typeof(point_value) == TYPE_VECTOR3:
+			point = point_value
+		elif typeof(point_value) == TYPE_ARRAY:
+			point = _vec3_from_array(point_value)
+		out.append(Vector3(point.x, point.z, -point.y))
+	return out
+
+
+func _append_projection_face(faces: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3) -> void:
+	var normal := (b - a).cross(c - a)
+	if normal.length_squared() <= 0.000001:
+		return
+	if normal.y < 0.0:
+		var swap := b
+		b = c
+		c = swap
+	faces.append(a)
+	faces.append(b)
+	faces.append(c)
+
+
+func _apply_boundary_metadata(root: Node3D, enabled: bool, cell_size: float, segments: Array[Dictionary], grid: Dictionary) -> void:
+	root.set_meta("eagl_boundary_root", true)
+	root.set_meta("eagl_boundary_enabled", enabled)
+	root.set_meta("eagl_boundary_segment_count", segments.size())
+	root.set_meta("eagl_boundary_cell_size", cell_size)
+	root.set_meta("eagl_boundary_segments", segments.duplicate(true))
+	root.set_meta("eagl_boundary_grid", grid.duplicate(true))
+
+
+func _apply_route_metadata_disabled(root: Node3D) -> void:
+	root.set_meta("eagl_route_enabled", false)
+	root.set_meta("eagl_route_stats", {"enabled": false, "point_count": 0})
+	root.set_meta("eagl_route_point_count", 0)
+	root.set_meta("eagl_route_points", [])
+
+
+func _build_boundary_grid(segments: Array[Dictionary], cell_size: float) -> Dictionary:
+	var grid := {}
+	for segment in segments:
+		var aabb_record = segment.get("aabb_xz", {})
+		if typeof(aabb_record) != TYPE_DICTIONARY:
+			continue
+		var aabb_dict: Dictionary = aabb_record
+		var min_xz := aabb_dict.get("min", Vector2.ZERO)
+		var max_xz := aabb_dict.get("max", Vector2.ZERO)
+		if typeof(min_xz) != TYPE_VECTOR2 or typeof(max_xz) != TYPE_VECTOR2:
+			continue
+		var cell_min_x := int(floor((min_xz as Vector2).x / cell_size))
+		var cell_max_x := int(floor((max_xz as Vector2).x / cell_size))
+		var cell_min_z := int(floor((min_xz as Vector2).y / cell_size))
+		var cell_max_z := int(floor((max_xz as Vector2).y / cell_size))
+		for cell_x in range(cell_min_x, cell_max_x + 1):
+			for cell_z in range(cell_min_z, cell_max_z + 1):
+				var key := _boundary_grid_key(cell_x, cell_z)
+				if not grid.has(key):
+					grid[key] = []
+				var indices: Array = grid[key]
+				indices.append(int(segment.get("segment_index", -1)))
+				grid[key] = indices
+	return grid
+
+
+func _boundary_grid_key(cell_x: int, cell_z: int) -> String:
+	return "%d:%d" % [cell_x, cell_z]
+
+
+func _vec3_points_from_array(value) -> Array[Vector3]:
+	var points: Array[Vector3] = []
+	if typeof(value) != TYPE_ARRAY:
+		return points
+	for point_value in value:
+		points.append(_vec3_from_array(point_value))
+	return points
+
+
+func _vec2_from_array(value) -> Vector2:
+	if typeof(value) != TYPE_ARRAY:
+		return Vector2.ZERO
+	var items: Array = value
+	if items.size() < 2:
+		return Vector2.ZERO
+	return Vector2(float(items[0]), float(items[1]))
+
+
+func _vec3_from_array(value) -> Vector3:
+	if typeof(value) != TYPE_ARRAY:
+		return Vector3.ZERO
+	var items: Array = value
+	if items.size() < 3:
+		return Vector3.ZERO
+	return Vector3(float(items[0]), float(items[1]), float(items[2]))
 
 
 func _add_static_geometry(manifest: Dictionary, object_entries: Dictionary, static_roots: Dictionary, environment_root: Node3D, marker_root: Node3D, place_scenery: bool, include_debug: bool) -> void:

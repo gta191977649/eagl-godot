@@ -16,4 +16,5 @@ generate_lods=false
 group_scenery_by_section=true
 place_scenery_instances=true
 include_debug_metadata=false
+collision_debug_visible=true
 texture_filter_mode="linear_mipmap"

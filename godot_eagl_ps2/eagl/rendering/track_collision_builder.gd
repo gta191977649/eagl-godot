@@ -1,6 +1,8 @@
 class_name EAGLTrackCollisionBuilder
 extends RefCounted
 
+const MathUtils = preload("res://eagl/utils/math_utils.gd")
+
 const CATEGORY_ORDER := [
 	"Road",
 	"Terrain",
@@ -10,10 +12,12 @@ const CATEGORY_ORDER := [
 ]
 
 const CATEGORY_COLORS := {
-	"Road": Color(0.1, 1.0, 0.25, 0.28),
+	"Road": Color(1.0, 0.86, 0.04, 0.40),
+	"RoadEdge": Color(0.72, 0.18, 1.0, 0.95),
+	"TrackPolygon": Color(1.0, 0.45, 0.08, 0.92),
 	"Terrain": Color(0.0, 0.85, 1.0, 0.22),
-	"WallBarrier": Color(1.0, 0.12, 0.02, 0.34),
-	"SceneryCollision": Color(1.0, 0.82, 0.02, 0.32),
+	"WallBarrier": Color(1.0, 0.12, 0.02, 0.55),
+	"SceneryCollision": Color(1.0, 0.82, 0.02, 0.45),
 	"DriveArea": Color(0.05, 0.35, 1.0, 0.28),
 }
 
@@ -33,14 +37,15 @@ func add_track_collision(track_root: Node3D, asset, options: Dictionary = {}) ->
 		_apply_root_metadata(track_root, disabled_stats)
 		return disabled_stats
 
-	return add_collision_surfaces(track_root, asset.collision_surfaces, options, source_stats)
+	return add_collision_surfaces(track_root, asset.collision_surfaces, options, source_stats, asset.track_collision_polygons)
 
 
 func add_collision_surfaces(
 	track_root: Node3D,
 	surfaces: Array[Dictionary],
 	options: Dictionary = {},
-	source_stats: Dictionary = {}
+	source_stats: Dictionary = {},
+	track_polygons: Array[Dictionary] = []
 ) -> Dictionary:
 	if not bool(options.get("build_collision", false)):
 		var disabled_stats := source_stats.duplicate(true)
@@ -57,7 +62,7 @@ func add_collision_surfaces(
 	var mask := int(options.get("collision_mask", 1))
 	var overlay_visible := bool(options.get("collision_debug_visible", false))
 	var overlay_surface_offset := float(options.get("collision_debug_surface_offset", DEFAULT_DEBUG_SURFACE_OFFSET))
-	var built_stats := _build_collision_nodes(collision_root, surfaces, layer, mask, overlay_visible, overlay_surface_offset, source_stats)
+	var built_stats := _build_collision_nodes(collision_root, surfaces, track_polygons, layer, mask, overlay_visible, overlay_surface_offset, source_stats)
 	_apply_root_metadata(track_root, built_stats)
 	return built_stats
 
@@ -70,14 +75,27 @@ func set_debug_overlay_visible(track_root: Node, visible: bool) -> void:
 			node.visible = visible
 
 
-func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary], layer: int, mask: int, overlay_visible: bool, overlay_surface_offset: float, source_stats: Dictionary) -> Dictionary:
+func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary], track_polygons: Array[Dictionary], layer: int, mask: int, overlay_visible: bool, overlay_surface_offset: float, source_stats: Dictionary) -> Dictionary:
 	var sanitization := _sanitize_surfaces(surfaces)
 	var sanitized_surfaces: Array[Dictionary] = sanitization.get("surfaces", [])
 	var overlay_line_grouped := _group_debug_lines_by_category(surfaces)
+	var track_polygon_surfaces := _track_polygon_collision_surfaces(track_polygons)
+	var use_track_polygon_collision := not track_polygon_surfaces.is_empty()
+	var explicit_road_surfaces := _surfaces_for_category(sanitized_surfaces, "Road", false)
+	var use_explicit_road_collision := not explicit_road_surfaces.is_empty()
+	var track_polygon_overlay_grouped: Dictionary = {}
+	var track_polygon_overlay_lines: PackedVector3Array = PackedVector3Array()
+	var track_polygon_total_overlay_line_count := 0
+	if use_track_polygon_collision and not use_explicit_road_collision:
+		track_polygon_overlay_grouped = _group_debug_lines_by_category(track_polygon_surfaces)
+		track_polygon_overlay_lines = track_polygon_overlay_grouped.get("Road", PackedVector3Array())
+		track_polygon_total_overlay_line_count = _line_count_for_grouped_lines(track_polygon_overlay_grouped)
 	var body_count := 0
 	var shape_count := 0
 	var overlay_count := 0
 	var triangle_count := 0
+	var track_polygon_overlay_count := 0
+	var track_polygon_overlay_line_count := 0
 	var by_category := {}
 	var road_chunk_count := 0
 	var road_chunk_triangle_max := 0
@@ -86,12 +104,13 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 
 	var road_result := _build_road_chunk_nodes(
 		collision_root,
-		_surfaces_for_category(sanitized_surfaces, "Road", false),
+		explicit_road_surfaces if use_explicit_road_collision else (_surfaces_for_category(track_polygon_surfaces, "Road", false) if use_track_polygon_collision else explicit_road_surfaces),
 		overlay_line_grouped.get("Road", PackedVector3Array()),
 		layer,
 		mask,
 		overlay_visible,
-		overlay_surface_offset
+		overlay_surface_offset,
+		use_explicit_road_collision or not use_track_polygon_collision
 	)
 	body_count += int(road_result.get("body_count", 0))
 	shape_count += int(road_result.get("shape_count", 0))
@@ -104,33 +123,56 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 	if road_result.has("by_category"):
 		by_category["Road"] = road_result["by_category"]
 
-	for category in CATEGORY_ORDER:
-		if category == "Road":
-			continue
-		var category_surfaces := _surfaces_for_category(sanitized_surfaces, category, false)
-		var overlay_surfaces := _surfaces_for_category(sanitized_surfaces, category, true)
-		var faces := _faces_from_surfaces(category_surfaces)
-		var overlay_faces := _faces_from_surfaces(overlay_surfaces)
-		var overlay_lines: PackedVector3Array = overlay_line_grouped.get(category, PackedVector3Array())
-		if faces.is_empty() and overlay_faces.is_empty() and overlay_lines.is_empty():
-			continue
-		var category_result := _build_single_category_node(
-			collision_root,
-			category,
-			faces,
-			overlay_faces,
-			overlay_lines,
-			layer,
-			mask,
-			overlay_visible,
-			overlay_surface_offset
-		)
-		body_count += int(category_result.get("body_count", 0))
-		shape_count += int(category_result.get("shape_count", 0))
-		overlay_count += int(category_result.get("overlay_count", 0))
-		triangle_count += int(category_result.get("triangle_count", 0))
-		if category_result.has("by_category"):
-			by_category[category] = category_result["by_category"]
+	if use_track_polygon_collision and not use_explicit_road_collision:
+		var overlay_root := Node3D.new()
+		overlay_root.name = "TrackPolygonDebug"
+		overlay_root.set_meta("eagl_collision_category", "TrackPolygon")
+		collision_root.add_child(overlay_root)
+		var polygon_overlay := _make_overlay_line_mesh("TrackPolygon", track_polygon_overlay_lines, overlay_visible)
+		polygon_overlay.name = "TrackPolygonCollisionLines"
+		polygon_overlay.set_meta("eagl_track_polygon_collision_overlay", true)
+		overlay_root.add_child(polygon_overlay)
+		overlay_count += 1
+		track_polygon_overlay_count = _non_empty_line_group_count(track_polygon_overlay_grouped)
+		track_polygon_overlay_line_count = track_polygon_total_overlay_line_count
+		by_category["TrackPolygon"] = {
+			"lines": int(track_polygon_overlay_lines.size() / 2),
+			"polygons": _track_polygon_drive_area_count(track_polygons),
+			"shape_kind": "track_polygon_lines",
+		}
+
+	if not use_explicit_road_collision:
+		for category in CATEGORY_ORDER:
+			if category == "Road":
+				continue
+			var category_surfaces := _surfaces_for_category(sanitized_surfaces, category, false)
+			if use_track_polygon_collision:
+				category_surfaces.append_array(_surfaces_for_category(track_polygon_surfaces, category, false))
+			var overlay_surfaces := _surfaces_for_category(sanitized_surfaces, category, true)
+			var faces := _faces_from_surfaces(category_surfaces)
+			var overlay_faces := _faces_from_surfaces(overlay_surfaces)
+			var overlay_lines: PackedVector3Array = overlay_line_grouped.get(category, PackedVector3Array())
+			if use_track_polygon_collision:
+				overlay_lines.append_array(track_polygon_overlay_grouped.get(category, PackedVector3Array()))
+			if faces.is_empty() and overlay_faces.is_empty() and overlay_lines.is_empty():
+				continue
+			var category_result := _build_single_category_node(
+				collision_root,
+				category,
+				faces,
+				overlay_faces,
+				overlay_lines,
+				layer,
+				mask,
+				overlay_visible,
+				overlay_surface_offset
+			)
+			body_count += int(category_result.get("body_count", 0))
+			shape_count += int(category_result.get("shape_count", 0))
+			overlay_count += int(category_result.get("overlay_count", 0))
+			triangle_count += int(category_result.get("triangle_count", 0))
+			if category_result.has("by_category"):
+				by_category[category] = category_result["by_category"]
 
 	var stats := source_stats.duplicate(true)
 	stats["enabled"] = true
@@ -149,6 +191,13 @@ func _build_collision_nodes(collision_root: Node3D, surfaces: Array[Dictionary],
 	stats["road_chunk_triangle_max"] = road_chunk_triangle_max
 	stats["road_chunk_triangle_avg"] = road_chunk_triangle_avg
 	stats["road_chunk_cell_size"] = road_chunk_cell_size
+	stats["track_polygon_overlay_count"] = track_polygon_overlay_count
+	stats["track_polygon_overlay_line_count"] = track_polygon_overlay_line_count
+	stats["track_polygon_overlay_source"] = "track_collision_polygons" if use_track_polygon_collision and not use_explicit_road_collision else ""
+	stats["road_edge_wall_count"] = 0
+	stats["road_edge_wall_segment_count"] = 0
+	stats["road_edge_wall_total_length"] = 0.0
+	stats["road_edge_wall_source"] = ""
 	return stats
 
 
@@ -177,6 +226,134 @@ func _group_debug_lines_by_category(surfaces: Array[Dictionary]) -> Dictionary:
 		target.append_array(lines)
 		grouped[category] = target
 	return grouped
+
+
+func _line_count_for_grouped_lines(grouped: Dictionary) -> int:
+	var count := 0
+	for value in grouped.values():
+		if typeof(value) == TYPE_PACKED_VECTOR3_ARRAY:
+			var lines: PackedVector3Array = value
+			count += int(lines.size() / 2)
+	return count
+
+
+func _non_empty_line_group_count(grouped: Dictionary) -> int:
+	var count := 0
+	for value in grouped.values():
+		if typeof(value) == TYPE_PACKED_VECTOR3_ARRAY:
+			var lines: PackedVector3Array = value
+			if not lines.is_empty():
+				count += 1
+	return count
+
+
+func _track_polygon_overlay_lines(track_polygons: Array[Dictionary]) -> PackedVector3Array:
+	var lines := PackedVector3Array()
+	for polygon in track_polygons:
+		if not _track_collision_polygon_contributes_to_drive_area(polygon):
+			continue
+		var points := _track_polygon_godot_points(polygon)
+		if points.size() < 3:
+			continue
+		for index in range(points.size()):
+			lines.append(points[index])
+			lines.append(points[(index + 1) % points.size()])
+	return lines
+
+
+func _track_polygon_collision_surfaces(track_polygons: Array[Dictionary]) -> Array[Dictionary]:
+	var surfaces: Array[Dictionary] = []
+	for polygon in track_polygons:
+		if not bool(polygon.get("valid_plane", true)):
+			continue
+		var points := _track_polygon_godot_points(polygon)
+		if points.size() < 3:
+			continue
+		var faces := PackedVector3Array()
+		_append_track_polygon_face(faces, points[0], points[1], points[2])
+		if points.size() >= 4:
+			_append_track_polygon_face(faces, points[0], points[2], points[3])
+		if faces.is_empty():
+			continue
+		var category := _track_collision_polygon_category(polygon)
+		surfaces.append({
+			"category": category,
+			"debug_only": false,
+			"triangle_count": int(faces.size() / 3),
+			"faces": faces,
+			"debug_lines": _track_polygon_edge_lines(points),
+			"source_kind": "track_polygon_collision_area",
+			"source_name": String(polygon.get("source_name", "TrackPolygon_%06d" % int(polygon.get("record_index", surfaces.size())))),
+			"source_chunk_offset": int(polygon.get("source_chunk_offset", -1)),
+			"source_record_offset": int(polygon.get("source_record_offset", -1)),
+			"record_index": int(polygon.get("record_index", polygon.get("index", -1))),
+			"aabb": _aabb_dictionary_for_faces(faces),
+		})
+	return surfaces
+
+
+func _track_polygon_edge_lines(points: PackedVector3Array) -> PackedVector3Array:
+	var lines := PackedVector3Array()
+	for index in range(points.size()):
+		lines.append(points[index])
+		lines.append(points[(index + 1) % points.size()])
+	return lines
+
+
+func _append_track_polygon_face(faces: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3) -> void:
+	var normal := (b - a).cross(c - a)
+	if normal.length_squared() <= 0.000001:
+		return
+	if normal.y < 0.0:
+		var swap := b
+		b = c
+		c = swap
+	faces.append(a)
+	faces.append(b)
+	faces.append(c)
+
+
+func _track_polygon_drive_area_count(track_polygons: Array[Dictionary]) -> int:
+	var count := 0
+	for polygon in track_polygons:
+		if _track_collision_polygon_contributes_to_drive_area(polygon):
+			count += 1
+	return count
+
+
+func _track_collision_polygon_contributes_to_drive_area(polygon: Dictionary) -> bool:
+	return (int(polygon.get("flags", 0)) & 0x0a) == 0 and bool(polygon.get("valid_plane", true))
+
+
+func _track_collision_polygon_category(polygon: Dictionary) -> String:
+	var flags := int(polygon.get("flags", 0))
+	if (flags & 0x02) != 0:
+		return "WallBarrier"
+	if (flags & 0x08) != 0:
+		return "SceneryCollision"
+	return "Road"
+
+
+func _track_polygon_godot_points(polygon: Dictionary) -> PackedVector3Array:
+	var godot_points = polygon.get("points_godot", PackedVector3Array())
+	if typeof(godot_points) == TYPE_PACKED_VECTOR3_ARRAY:
+		var packed_godot: PackedVector3Array = godot_points
+		if packed_godot.size() >= 3:
+			return packed_godot
+	if typeof(godot_points) == TYPE_ARRAY:
+		var array_godot := PackedVector3Array()
+		for point_value in godot_points:
+			array_godot.append(_vec3_value(point_value))
+		if array_godot.size() >= 3:
+			return array_godot
+
+	var ps2_points = polygon.get("points_ps2", [])
+	var out := PackedVector3Array()
+	if typeof(ps2_points) != TYPE_ARRAY and typeof(ps2_points) != TYPE_PACKED_VECTOR3_ARRAY:
+		return out
+	for point_value in ps2_points:
+		out.append(MathUtils.ps2_to_godot_vec3(_vec3_value(point_value)))
+	return out
 
 
 func _sanitize_surfaces(surfaces: Array[Dictionary]) -> Dictionary:
@@ -227,7 +404,7 @@ func _filter_drivable_faces(faces: PackedVector3Array, min_normal_y: float) -> P
 	return filtered
 
 
-func _build_road_chunk_nodes(collision_root: Node3D, surfaces: Array[Dictionary], overlay_lines: PackedVector3Array, layer: int, mask: int, overlay_visible: bool, overlay_surface_offset: float) -> Dictionary:
+func _build_road_chunk_nodes(collision_root: Node3D, surfaces: Array[Dictionary], overlay_lines: PackedVector3Array, layer: int, mask: int, overlay_visible: bool, overlay_surface_offset: float, build_surface_overlay: bool = true) -> Dictionary:
 	if surfaces.is_empty() and overlay_lines.is_empty():
 		return {}
 
@@ -270,17 +447,18 @@ func _build_road_chunk_nodes(collision_root: Node3D, surfaces: Array[Dictionary]
 		body.add_child(shape_node)
 		shape_count += 1
 
-		var overlay := _make_overlay_mesh("Road", chunk_faces, overlay_visible, overlay_surface_offset)
-		overlay.name = "%sOverlay" % body.name
-		body.add_child(overlay)
-		overlay_count += 1
+		if build_surface_overlay:
+			var overlay := _make_overlay_mesh("Road", chunk_faces, overlay_visible, overlay_surface_offset)
+			overlay.name = "%sOverlay" % body.name
+			body.add_child(overlay)
+			overlay_count += 1
 
 	if not overlay_lines.is_empty():
 		var overlay_root := Node3D.new()
-		overlay_root.name = "RoadDebug"
-		overlay_root.set_meta("eagl_collision_category", "Road")
+		overlay_root.name = "RoadEdgeDebug"
+		overlay_root.set_meta("eagl_collision_category", "RoadEdge")
 		collision_root.add_child(overlay_root)
-		var line_overlay := _make_overlay_line_mesh("Road", overlay_lines, overlay_visible)
+		var line_overlay := _make_overlay_line_mesh("RoadEdge", overlay_lines, overlay_visible)
 		overlay_root.add_child(line_overlay)
 		overlay_count += 1
 
@@ -517,6 +695,16 @@ func _vec3_from_aabb_array(value) -> Vector3:
 	return Vector3(float(array_value[0]), float(array_value[1]), float(array_value[2]))
 
 
+func _vec3_value(value) -> Vector3:
+	if typeof(value) == TYPE_VECTOR3:
+		return value
+	if typeof(value) == TYPE_ARRAY:
+		var array_value: Array = value
+		if array_value.size() >= 3:
+			return Vector3(float(array_value[0]), float(array_value[1]), float(array_value[2]))
+	return Vector3.ZERO
+
+
 func _aabb_dictionary_for_faces(faces: PackedVector3Array):
 	if faces.is_empty():
 		return null
@@ -660,3 +848,5 @@ func _apply_root_metadata(track_root: Node3D, stats: Dictionary) -> void:
 	track_root.set_meta("eagl_collision_shape_count", int(stats.get("shape_count", 0)))
 	track_root.set_meta("eagl_collision_surface_count", int(stats.get("surface_count", 0)))
 	track_root.set_meta("eagl_collision_triangle_count", int(stats.get("triangle_count", 0)))
+	track_root.set_meta("eagl_collision_track_polygon_overlay_count", int(stats.get("track_polygon_overlay_count", 0)))
+	track_root.set_meta("eagl_collision_track_polygon_overlay_line_count", int(stats.get("track_polygon_overlay_line_count", 0)))

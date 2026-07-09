@@ -1701,8 +1701,10 @@ class TrackCollisionParseTests(unittest.TestCase):
         xs: tuple[int, int, int, int],
         ys: tuple[int, int, int, int],
         z_offsets: tuple[int, int, int, int],
+        selector_byte: int = 0,
     ) -> bytes:
         record = bytearray(0x20)
+        record[0x01] = selector_byte
         record[0x02] = material_id
         record[0x03] = flags
         record[0x04:0x06] = int(z_base).to_bytes(2, "little", signed=True)
@@ -1715,6 +1717,7 @@ class TrackCollisionParseTests(unittest.TestCase):
 
     def test_parse_scene_reads_triangle_track_collision_polygon(self):
         payload = self._collision_record(
+            selector_byte=0xA5,
             material_id=5,
             flags=0x00,
             z_base=12,
@@ -1729,6 +1732,7 @@ class TrackCollisionParseTests(unittest.TestCase):
         self.assertEqual(len(scene.track_collision_polygons), 1)
         polygon = scene.track_collision_polygons[0]
         self.assertEqual(polygon.material_id, 5)
+        self.assertEqual(polygon.selector_byte, 0xA5)
         self.assertEqual(polygon.flags, 0x00)
         self.assertEqual(polygon.vertex_count, 3)
         self.assertEqual(

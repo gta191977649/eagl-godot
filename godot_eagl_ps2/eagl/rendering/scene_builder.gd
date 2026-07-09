@@ -138,6 +138,8 @@ func build_track_scene(asset, options: Dictionary = {}) -> Node3D:
 	root.set_meta("eagl_collision_triangle_count", int(collision_stats.get("triangle_count", 0)))
 	root.set_meta("eagl_drive_area_sampler", drive_area_sampler)
 	root.set_meta("eagl_drive_area_sampler_triangle_count", drive_area_sampler.triangle_count() if drive_area_sampler != null else 0)
+	root.set_meta("eagl_drive_area_sampler_polygon_count", drive_area_sampler.polygon_count() if drive_area_sampler != null else 0)
+	root.set_meta("eagl_drive_area_sampler_surface_count", drive_area_sampler.surface_count() if drive_area_sampler != null else 0)
 	root.set_meta("eagl_route_stats", route_stats.duplicate(true))
 	root.set_meta("eagl_route_point_count", int(route_stats.get("point_count", 0)))
 	return root
@@ -548,7 +550,7 @@ func _merge_builder_diagnostics() -> void:
 func _build_drive_area_sampler(asset):
 	var sampler = RoadSurfaceSamplerScript.new()
 	sampler.build_from_track_asset(asset)
-	if sampler.triangle_count() <= 0:
+	if sampler.surface_count() <= 0:
 		return null
 	return sampler
 
