@@ -123,6 +123,37 @@ def _two_cluster_road(name="RD_SECTION40_CHOP1"):
     return MeshObject(name, 1, IDENTITY4, (DecodedBlock(run, primitive_mode="triangles"),), (), 123)
 
 
+def _mixed_alpha_object(name="MIXED_MODEL"):
+    def block(x, texture_index):
+        run = VifVertexRun(
+            vertices=(Vec3(x, 0, 0), Vec3(x + 10, 0, 0), Vec3(x, 10, 0)),
+            texcoords=((0, 0), (1, 0), (0, 1)),
+            packed_values=(0xFFFF,) * 3,
+            header=None,
+            tri_cull=None,
+        )
+        return DecodedBlock(run, primitive_mode="triangles", texture_index=texture_index)
+
+    return MeshObject(name, 1, IDENTITY4, (block(0, 0), block(30, 1)), (100, 200), 123)
+
+
+def _alpha_texture(name, *, blend):
+    return SimpleNamespace(
+        name=name,
+        png=b"png-data",
+        has_alpha=blend,
+        alpha_mode="BLEND" if blend else "OPAQUE",
+        alpha_cutoff=None,
+        alpha_zero_count=1 if blend else 0,
+        alpha_opaque_count=1,
+        alpha_intermediate_count=1 if blend else 0,
+        is_any_semitransparency=1 if blend else 0,
+        alpha_bits=0x44 if blend else 0x0A,
+        alpha_fix=0,
+        texture_fx=0,
+    )
+
+
 def test_mta_staging_preserves_texture_alpha_metadata(tmp_path):
     texture = SimpleNamespace(
         name="ROAD01",
@@ -252,6 +283,46 @@ def test_mta_scene_reuses_scaled_prop_and_assigns_road_mesh_collision():
     assert result.report["prop_pivot_offset_after"]["max"] == pytest.approx(0.0, abs=1e-8)
     assert result.report["max_pivot_world_reconstruction_error"] < 1e-10
     assert result.report["bounds_error"] < 1e-6
+
+
+def test_mta_splits_mixed_blend_model_and_writes_standard_alpha_flags(tmp_path):
+    source = Scene(objects=[_mixed_alpha_object()])
+    textures = TextureLibrary(
+        {
+            100: _alpha_texture("SOLID", blend=False),
+            200: _alpha_texture("SHADOW", blend=True),
+        }
+    )
+
+    result = build_mta_scene(source, textures, track_id=31, resource_name="TEST", collision_mode="bounds-only")
+
+    assert len(result.models) == 2
+    assert len(result.placements) == 2
+    base = next(model for model in result.models if model.render_layer == "base")
+    blend = next(model for model in result.models if model.render_layer == "blend")
+    assert {material.alpha_mode for material in base.materials} == {"OPAQUE"}
+    assert {material.alpha_mode for material in blend.materials} == {"BLEND"}
+    assert not base.draw_last and not base.no_zbuffer_write and not base.additive
+    assert blend.draw_last and blend.no_zbuffer_write and not blend.additive
+    assert result.report["mixed_render_models_split"] == 1
+    assert result.report["blend_companion_models"] == 1
+    assert result.report["draw_last_models"] == 1
+    assert result.report["no_zbuffer_write_models"] == 1
+    assert result.report["additive_models"] == 0
+    assert result.report["triangle_loss"] is False
+    assert result.report["bounds_error"] == pytest.approx(0.0)
+
+    _write_resource_xml(result, tmp_path, "tester", [tmp_path / "imgs" / "dff.img"], (0.0, 0.0, 0.0))
+    definitions = {
+        node.attrib["id"]: node.attrib
+        for path in (tmp_path / "zones").rglob("*.definition")
+        for node in ET.parse(path).getroot().findall("definition")
+    }
+    assert definitions[base.model_id]["flags"] == "disable_backface_culling"
+    assert definitions[blend.model_id]["flags"] == "disable_backface_culling,draw_last,no_zbuffer_write"
+    assert definitions[blend.model_id]["draw_last"] == "true"
+    assert definitions[blend.model_id]["no_zbuffer_write"] == "true"
+    assert "additive" not in definitions[blend.model_id]
 
 
 def test_mta_scene_deduplicates_exact_streaming_section_placements_only():

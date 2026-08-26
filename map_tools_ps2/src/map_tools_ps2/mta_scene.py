@@ -45,6 +45,10 @@ class MtaModel:
     collision_materials: list[int] = field(default_factory=list)
     collision_kind: str = "bounds"
     lod_distance: float = 300.0
+    render_layer: str = "base"
+    draw_last: bool = False
+    additive: bool = False
+    no_zbuffer_write: bool = False
 
 
 @dataclass(frozen=True)
@@ -296,6 +300,49 @@ def _fill_model(
             model.colors.append(vertex.color)
         model.faces.append((base, base + 1, base + 2))
         model.face_materials.append(material_index[key])
+
+
+def _triangle_alpha_decision(
+    triangle: _Triangle,
+    alpha_decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
+    alpha_usage: dict[int, frozenset[int | None]],
+    textures: Any,
+) -> MaterialAlphaDecision:
+    if triangle.texture_hash is None:
+        return MaterialAlphaDecision("OPAQUE", None, "missing_texture", triangle.render_flag, None, None, None, None)
+    return alpha_decisions.get((triangle.texture_hash, triangle.render_flag)) or decide_material_alpha(
+        textures.get(triangle.texture_hash), triangle.render_flag, alpha_usage.get(triangle.texture_hash, ())
+    )
+
+
+def _render_layers(
+    triangles: list[_Triangle],
+    alpha_decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
+    alpha_usage: dict[int, frozenset[int | None]],
+    textures: Any,
+) -> list[tuple[str, list[_Triangle]]]:
+    """Separate standard alpha faces from opaque/cutout faces.
+
+    GTA's draw_last/additive/depth-write controls are model-level. Keeping a
+    BLEND material in a model that also contains opaque faces would apply those
+    controls to the entire DFF, so mixed HP2 models need two render layers.
+    """
+    base: list[_Triangle] = []
+    blend: list[_Triangle] = []
+    for triangle in triangles:
+        decision = _triangle_alpha_decision(triangle, alpha_decisions, alpha_usage, textures)
+        (blend if decision.mode == "BLEND" else base).append(triangle)
+    return [(name, values) for name, values in (("base", base), ("blend", blend)) if values]
+
+
+def _configure_model_render_state(model: MtaModel, layer: str) -> None:
+    model.render_layer = layer
+    if layer == "blend":
+        # HP2 TRACK31 semitransparent textures use alpha_bits=0x44, the normal
+        # source-alpha blend equation. They are not additive effects.
+        model.draw_last = True
+        model.no_zbuffer_write = True
+        model.additive = False
 
 
 def _triangle_bounds(triangles: list[_Triangle]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -619,6 +666,8 @@ def build_mta_scene(
     road_split_sources: list[dict[str, Any]] = []
     road_degenerate_faces = 0
     max_col3_coordinate = 0.0
+    mixed_render_models_split = 0
+    blend_companion_models = 0
     for obj in static_objects:
         triangles = static_triangles[obj.name]
         is_road = obj.name.upper().startswith("RD_SECTION")
@@ -632,22 +681,34 @@ def build_mta_scene(
                 }
             )
         for part_index, part in enumerate(parts):
-            origin = _bounds_center(part)
-            cell = cell_for_xy(origin[0], origin[1], chunk_size)
-            model_id = _model_id(track_id, "s", f"{obj.name}:{part_index}", part_index)
-            model = MtaModel(model_id, obj.name, "road" if is_road else "static", zone_name(track_id, cell), origin)
-            _fill_model(model, part, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
-            if vertex_colors == "off":
-                model.colors.clear()
-            model.lod_distance = _auto_lod(model)
-            if is_road and collision_mode == "model":
-                road_degenerate_faces += _copy_visual_collision(model, collision_rules)
-                max_col3_coordinate = max(
-                    max_col3_coordinate,
-                    max((abs(value) for vertex in model.collision_vertices for value in vertex), default=0.0),
+            layers = _render_layers(part, alpha_decisions, alpha_usage, textures)
+            if len(layers) > 1:
+                mixed_render_models_split += 1
+            for layer, layer_triangles in layers:
+                is_companion = layer == "blend" and len(layers) > 1
+                origin = _bounds_center(layer_triangles)
+                cell = cell_for_xy(origin[0], origin[1], chunk_size)
+                model_id = (
+                    _model_id(track_id, "a", f"static:{obj.name}:{part_index}:blend", part_index)
+                    if is_companion
+                    else _model_id(track_id, "s", f"{obj.name}:{part_index}", part_index)
                 )
-            models.append(model)
-            placements.append(MtaPlacement(model_id, model.zone, "building", origin, (0.0, 0.0, 0.0), obj.name))
+                model = MtaModel(model_id, obj.name, "road" if is_road else "static", zone_name(track_id, cell), origin)
+                _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
+                _configure_model_render_state(model, layer)
+                if is_companion:
+                    blend_companion_models += 1
+                if vertex_colors == "off":
+                    model.colors.clear()
+                model.lod_distance = _auto_lod(model)
+                if is_road and collision_mode == "model":
+                    road_degenerate_faces += _copy_visual_collision(model, collision_rules)
+                    max_col3_coordinate = max(
+                        max_col3_coordinate,
+                        max((abs(value) for vertex in model.collision_vertices for value in vertex), default=0.0),
+                    )
+                models.append(model)
+                placements.append(MtaPlacement(model_id, model.zone, "building", origin, (0.0, 0.0, 0.0), obj.name))
 
     warnings: list[str] = []
     water_quads: list[MtaWaterQuad] = []
@@ -690,53 +751,65 @@ def build_mta_scene(
         if not triangles:
             warnings.append(f"empty scenery template: {name}")
             continue
-        origin = _bounds_center(triangles)
-        prop_pivot_offsets_before.append(_length(origin))
-        adjusted_entries = []
-        sample_vertices = (
-            triangles[0].vertices[0].position,
-            triangles[len(triangles) // 2].vertices[1].position,
-            triangles[-1].vertices[2].position,
-        )
-        for instance, position, rotation in entries:
-            rotation_rows = compose_zxy_row(rotation)
-            correction = _row_transform_offset(origin, rotation_rows)
-            adjusted_position = tuple(position[axis] + correction[axis] for axis in range(3))
-            prop_placement_corrections.append(_length(correction))
-            for vertex in sample_vertices:
-                old_world = tuple(
-                    sum(vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3))
-                    + position[axis]
-                    for axis in range(3)
-                )
-                local_vertex = tuple(vertex[axis] - origin[axis] for axis in range(3))
-                new_world = tuple(
-                    sum(local_vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3))
-                    + adjusted_position[axis]
-                    for axis in range(3)
-                )
-                max_pivot_world_reconstruction_error = max(
-                    max_pivot_world_reconstruction_error,
-                    *(abs(old_world[axis] - new_world[axis]) for axis in range(3)),
-                )
-            adjusted_entries.append((instance, adjusted_position, rotation))
+        layers = _render_layers(triangles, alpha_decisions, alpha_usage, textures)
+        if len(layers) > 1:
+            mixed_render_models_split += 1
+        for layer, layer_triangles in layers:
+            is_companion = layer == "blend" and len(layers) > 1
+            origin = _bounds_center(layer_triangles)
+            prop_pivot_offsets_before.append(_length(origin))
+            adjusted_entries = []
+            sample_vertices = (
+                layer_triangles[0].vertices[0].position,
+                layer_triangles[len(layer_triangles) // 2].vertices[1].position,
+                layer_triangles[-1].vertices[2].position,
+            )
+            for instance, position, rotation in entries:
+                rotation_rows = compose_zxy_row(rotation)
+                correction = _row_transform_offset(origin, rotation_rows)
+                adjusted_position = tuple(position[axis] + correction[axis] for axis in range(3))
+                prop_placement_corrections.append(_length(correction))
+                for vertex in sample_vertices:
+                    old_world = tuple(
+                        sum(vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3))
+                        + position[axis]
+                        for axis in range(3)
+                    )
+                    local_vertex = tuple(vertex[axis] - origin[axis] for axis in range(3))
+                    new_world = tuple(
+                        sum(local_vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3))
+                        + adjusted_position[axis]
+                        for axis in range(3)
+                    )
+                    max_pivot_world_reconstruction_error = max(
+                        max_pivot_world_reconstruction_error,
+                        *(abs(old_world[axis] - new_world[axis]) for axis in range(3)),
+                    )
+                adjusted_entries.append((instance, adjusted_position, rotation))
 
-        counts = Counter(
-            cell_for_xy(position[0], position[1], chunk_size)
-            for _instance, position, _rotation in adjusted_entries
-        )
-        owner_cell = sorted(counts, key=lambda cell: (-counts[cell], cell))[0]
-        model_id = _model_id(track_id, "p", f"{name}:{scale}", variant_index)
-        model = MtaModel(model_id, name, "prop", zone_name(track_id, owner_cell), origin)
-        _fill_model(model, triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
-        prop_pivot_offsets_after.append(_length(_local_bounds_center(model.vertices)))
-        if vertex_colors == "off":
-            model.colors.clear()
-        model.lod_distance = prop_lod_distance
-        models.append(model)
-        for instance, position, rotation in adjusted_entries:
-            cell = cell_for_xy(position[0], position[1], chunk_size)
-            placements.append(MtaPlacement(model_id, zone_name(track_id, cell), "object", position, rotation, instance.object_name))
+            counts = Counter(
+                cell_for_xy(position[0], position[1], chunk_size)
+                for _instance, position, _rotation in adjusted_entries
+            )
+            owner_cell = sorted(counts, key=lambda cell: (-counts[cell], cell))[0]
+            model_id = (
+                _model_id(track_id, "a", f"prop:{name}:{scale}:blend", variant_index)
+                if is_companion
+                else _model_id(track_id, "p", f"{name}:{scale}", variant_index)
+            )
+            model = MtaModel(model_id, name, "prop", zone_name(track_id, owner_cell), origin)
+            _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
+            _configure_model_render_state(model, layer)
+            if is_companion:
+                blend_companion_models += 1
+            prop_pivot_offsets_after.append(_length(_local_bounds_center(model.vertices)))
+            if vertex_colors == "off":
+                model.colors.clear()
+            model.lod_distance = prop_lod_distance
+            models.append(model)
+            for instance, position, rotation in adjusted_entries:
+                cell = cell_for_xy(position[0], position[1], chunk_size)
+                placements.append(MtaPlacement(model_id, zone_name(track_id, cell), "object", position, rotation, instance.object_name))
 
     zones = sorted({placement.zone for placement in placements} | {model.zone for model in models})
     source_bounds = _bounds(_source_visual_points(static_triangles, scene, templates))
@@ -796,6 +869,11 @@ def build_mta_scene(
         "road_models": sum(model.kind == "road" for model in models),
         "road_split_sources": road_split_sources,
         "prop_models": sum(model.kind == "prop" for model in models),
+        "mixed_render_models_split": mixed_render_models_split,
+        "blend_companion_models": blend_companion_models,
+        "draw_last_models": sum(model.draw_last for model in models),
+        "no_zbuffer_write_models": sum(model.no_zbuffer_write for model in models),
+        "additive_models": sum(model.additive for model in models),
         "collision_models": 0,
         "models": len(models),
         "zones": len(zones),

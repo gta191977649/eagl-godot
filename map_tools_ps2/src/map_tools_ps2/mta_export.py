@@ -104,6 +104,10 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
                 "collision_faces": model.collision_faces,
                 "collision_materials": model.collision_materials,
                 "collision_kind": model.collision_kind,
+                "render_layer": model.render_layer,
+                "draw_last": model.draw_last,
+                "additive": model.additive,
+                "no_zbuffer_write": model.no_zbuffer_write,
             }
         )
     manifest = {
@@ -290,9 +294,19 @@ def _write_resource_xml(
                 "txd": f"track{scene.track_id:02d}",
                 "lodDistance": _number(model.lod_distance),
                 "zone": zone,
-                "flags": "disable_backface_culling",
                 "disable_backface_culling": "true",
             }
+            flags = ["disable_backface_culling"]
+            if model.draw_last:
+                flags.append("draw_last")
+                attrs["draw_last"] = "true"
+            if model.additive:
+                flags.append("additive")
+                attrs["additive"] = "true"
+            if model.no_zbuffer_write:
+                flags.append("no_zbuffer_write")
+                attrs["no_zbuffer_write"] = "true"
+            attrs["flags"] = ",".join(flags)
             # GTA also uses COL bounds for streaming. Models without physical
             # collision receive a same-name bounds-only COL3.
             attrs["col"] = model.model_id
