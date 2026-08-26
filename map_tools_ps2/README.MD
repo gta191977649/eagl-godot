@@ -53,6 +53,9 @@ PYTHONPATH=src python3 -m map_tools_ps2 export \
 ```text
 export              Export OBJ or GLB.
 export-dual         Export native-primitive GLB plus ps2mesh debug JSON/BIN.
+export-optimized    Export an optimized GLB and/or Binary FBX.
+export-mta          Export a complete MTA:SA EagleLoader resource.
+export-godot        Export a Godot-optimized track package.
 export-placement    Export scenery prop placement coordinates to text.
 decompress          Decompress a COMP/LZC bundle.
 chunks              Print the decompressed bChunk tree.
@@ -142,6 +145,90 @@ usage: map-tools-ps2 export-dual [-h] [-o OUTPUT]
                                  [--vertex-colors {auto,always,off}]
                                  [input]
 ```
+
+## export-optimized
+
+Exports a spatially merged, placement-instanced GLB and optionally converts it
+to a Binary FBX through Blender's command-line exporter. Placement reuse is the
+default for this command.
+
+```bash
+PYTHONPATH=src python -m map_tools_ps2 export-optimized \
+  --game-dir D:/ps2_game/GAME \
+  --track 31 \
+  --texture-dir D:/ps2_game/GAME/ZZDATA/TRACKS \
+  --format both \
+  -o D:/dev/eagl-godot/map_tools_ps2/out/TRACKB31
+```
+
+Options:
+
+- `--format glb|fbx|both` (default `glb`)
+- `--chunk-size 300` spatial merge size
+- `--instance-mode reuse|expand` (default `reuse`)
+- `--fbx-backend blender|python` (default `blender`)
+
+The Blender backend imports the optimized GLB, normalizes materials to a
+Principled BSDF + Image Texture graph, and exports a Binary FBX with Blender's
+native FBX exporter. Textures are embedded in the FBX and also written to the
+`.fbx.textures` directory. It requires Blender on `PATH` or a standard Windows
+Blender installation. The Python backend remains available as a fallback, but
+Blender is recommended for 3ds Max compatibility.
+
+## export-mta
+
+Exports a complete EagleLoader trackpack with zone `.map`/`.definition`
+files and GTA IMG v2 archives containing DragonFF DFF, COL, and TXD assets.
+The output directory must be new or empty.
+
+Windows example for TRACK31:
+
+```powershell
+cd D:\dev\eagl-godot\map_tools_ps2
+
+.\.venv\Scripts\python.exe -m map_tools_ps2 export-mta `
+  --game-dir D:\ps2_game\GAME `
+  --track 31 `
+  --output D:\dev\eagl-godot\map_tools_ps2\out\HP2_TRACK31 `
+  --resource-name HP2_TRACK31 `
+  --author nurupo `
+  --blender "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
+```
+
+Defaults:
+
+- Static geometry keeps the original HP2 model boundaries. `RD_SECTION*`
+  models are split only when required by the 60,000-vertex DFF limit or the
+  COL3 local-coordinate range.
+- Repeated props reuse DFF geometry; non-uniform scale is baked into shared
+  scale variants. Prop geometry is centered on its local DFF pivot and the
+  rotated center offset is compensated in `.map`, preserving world placement.
+- One `track##.txd` stores all track textures.
+- TXD alpha metadata is derived per texture: opaque textures disable the
+  RenderWare alpha flag and use alpha 255, while mask/blend textures preserve
+  their transparency. Every texture receives a complete explicit mip chain;
+  opaque and mask textures use DXT1, while true blend textures use DXT5.
+- Default `dff`, `col`, and `txd` IMG archives are registered directly in
+  `meta.xml`; no `eagleLoader-imgs.xml` override is generated. The override is
+  reserved for non-default archive base names.
+- An empty compatibility `water.dat` is generated unless `--water-dat` supplies
+  a real EagleLoader water file.
+- Model collision is the default: every road DFF receives a same-name COL3
+  built from its visible mesh. Props, vegetation, `SKYDOME`, and other distant
+  scenery receive a same-name bounds-only COL3 with no physical primitives.
+  HP2 `TrackCollisionPolygon` data is not used by the MTA exporter.
+- Static models use automatic 500-2000 draw distance and props use 300.
+- Missing textures are warnings and do not abort the export.
+
+Useful overrides include `--chunk-size`, `--collision`,
+`--collision-rules`, `--static-lod-distance`, `--prop-lod-distance`,
+`--offset-x/y/z`, `--water-dat`, `--dragonff-path`, and `--keep-intermediate`.
+When requested, debug staging is written beside the resource as
+`OUTPUT.intermediate`; it is never placed inside the MTA resource directory.
+
+`--collision model` is the default. Use `--collision bounds-only` to disable
+all physical collision while retaining one streaming-bounds COL per DFF. The
+legacy `track`, `hybrid`, `visual`, and `none` modes are intentionally rejected.
 
 Arguments:
 

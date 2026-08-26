@@ -34,6 +34,11 @@ class Texture:
     alpha_bits: int | None = None
     alpha_fix: int | None = None
     is_any_semitransparency: int | None = None
+    alpha_min: int | None = None
+    alpha_max: int | None = None
+    alpha_zero_count: int | None = None
+    alpha_opaque_count: int | None = None
+    alpha_intermediate_count: int | None = None
 
 
 @dataclass
@@ -116,6 +121,7 @@ def read_ps2_tpk(path: Path) -> tuple[Texture, ...]:
         except ValueError:
             continue
         alpha_mode, alpha_cutoff = _material_alpha_properties_for_rgba(rgba, is_any_semitransparency)
+        alpha_values = rgba[3::4]
         textures.append(
             Texture(
                 name=name,
@@ -141,6 +147,11 @@ def read_ps2_tpk(path: Path) -> tuple[Texture, ...]:
                 alpha_bits=alpha_bits,
                 alpha_fix=alpha_fix,
                 is_any_semitransparency=is_any_semitransparency,
+                alpha_min=min(alpha_values, default=255),
+                alpha_max=max(alpha_values, default=255),
+                alpha_zero_count=alpha_values.count(0),
+                alpha_opaque_count=sum(alpha >= 250 for alpha in alpha_values),
+                alpha_intermediate_count=sum(0 < alpha < 250 for alpha in alpha_values),
             )
         )
     return tuple(textures)

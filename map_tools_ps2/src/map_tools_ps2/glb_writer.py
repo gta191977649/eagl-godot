@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from .binary import Vec3
 from .model import DecodedBlock, MeshObject, Scene, instantiated_mesh_object, transformed_block_vertices
+from .material_alpha import decide_material_alpha, scene_texture_render_flags
 from .primitive_stream import assemble_primitive_stream_indices, primitive_stream_for_block
 from .primitives import (
     fan_indices,
@@ -654,8 +655,13 @@ def _should_double_side_alpha(texture: Texture, object_name: str, render_flag: i
 
 
 class GlbBuilder:
-    def __init__(self, textures: TextureLibrary | None = None):
+    def __init__(
+        self,
+        textures: TextureLibrary | None = None,
+        texture_render_flags: dict[int, frozenset[int | None]] | None = None,
+    ):
         self.textures = textures or TextureLibrary({})
+        self.texture_render_flags = texture_render_flags or {}
         self.bin = bytearray()
         self.buffer_views: list[dict[str, Any]] = []
         self.accessors: list[dict[str, Any]] = []
@@ -718,8 +724,9 @@ class GlbBuilder:
         texture = self.textures.get(tex_hash)
         if texture is None:
             return 0
+        decision = decide_material_alpha(texture, render_flag, self.texture_render_flags.get(texture.tex_hash, ()))
         double_sided = _should_double_side_alpha(texture, object_name, render_flag)
-        material_key = (texture.tex_hash, texture.alpha_mode, texture.alpha_cutoff, double_sided)
+        material_key = (texture.tex_hash, decision.mode, decision.cutoff, double_sided)
         if material_key in self._texture_materials:
             return self._texture_materials[material_key]
 
@@ -747,11 +754,15 @@ class GlbBuilder:
                 }
             )
         )
-        if texture.alpha_mode == "BLEND":
+        if decision.mode == "BLEND":
             self.materials[-1]["alphaMode"] = "BLEND"
-        elif texture.alpha_mode == "MASK":
+        elif decision.mode == "MASK":
             self.materials[-1]["alphaMode"] = "MASK"
-            self.materials[-1]["alphaCutoff"] = texture.alpha_cutoff if texture.alpha_cutoff is not None else 0.5
+            self.materials[-1]["alphaCutoff"] = decision.cutoff if decision.cutoff is not None else 0.5
+        self.materials[-1]["extras"] = {
+            "ps2AlphaReason": decision.reason,
+            "ps2RenderFlag": render_flag or 0,
+        }
         material_index = len(self.materials) - 1
         self._texture_materials[material_key] = material_index
         return material_index
@@ -776,7 +787,7 @@ def write_glb(
     primitive_assembly: PrimitiveAssembly = "triangles",
     progress: bool = False,
 ) -> None:
-    builder = GlbBuilder(textures)
+    builder = GlbBuilder(textures, scene_texture_render_flags(scene))
     meshes: list[dict[str, Any]] = []
     nodes: list[dict[str, Any]] = []
     export_objects = _objects_for_glb_export(scene, expand_instances=expand_instances)

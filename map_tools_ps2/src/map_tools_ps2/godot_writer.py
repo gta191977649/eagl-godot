@@ -14,6 +14,7 @@ from shapely.ops import polygonize, unary_union
 
 from .binary import Matrix4, Vec3, compose_matrix4, transform_point
 from .glb_writer import _decode_vif_color_5551, _indices_for_block, _texture_hash_for_run
+from .material_alpha import decide_material_alpha, scene_texture_render_flags
 from .model import DecodedBlock, MeshObject, Scene, TrackCollisionPolygon
 from .textures import Texture, TextureLibrary
 
@@ -76,6 +77,7 @@ def write_godot_track_package(
     objects: list[dict[str, Any]] = []
     materials: dict[str, dict[str, Any]] = {}
     referenced_texture_hashes: set[int] = set()
+    texture_render_flags = scene_texture_render_flags(scene)
 
     for object_index, obj in enumerate(scene.objects):
         info = pack_info.get(obj.chunk_offset, {})
@@ -89,6 +91,7 @@ def write_godot_track_package(
             materials,
             referenced_texture_hashes,
             vertex_colors,
+            texture_render_flags,
         )
         if not surfaces:
             continue
@@ -179,6 +182,7 @@ def _object_surfaces(
     materials: dict[str, dict[str, Any]],
     referenced_texture_hashes: set[int],
     vertex_colors: str,
+    texture_render_flags: dict[int, frozenset[int | None]],
 ) -> list[dict[str, Any]]:
     surfaces: list[dict[str, Any]] = []
     for block_index, block in enumerate(obj.blocks):
@@ -194,7 +198,14 @@ def _object_surfaces(
         normals = _normals(vertices, indices)
         texture_hash = _texture_hash_for_run(obj.texture_hashes, obj.run_texture_indices, block_index)
         material_key = _material_key(texture_hash, obj.name, block.render_flag)
-        material = _material_record(material_key, texture_hash, textures.get(texture_hash), obj.name, block.render_flag)
+        material = _material_record(
+            material_key,
+            texture_hash,
+            textures.get(texture_hash),
+            obj.name,
+            block.render_flag,
+            texture_render_flags.get(texture_hash, ()) if texture_hash is not None else (),
+        )
         materials.setdefault(material_key, material)
         if texture_hash:
             referenced_texture_hashes.add(texture_hash)
@@ -1536,12 +1547,11 @@ def _material_record(
     texture: Texture | None,
     object_name: str,
     render_flag: int | None,
+    usage_flags: frozenset[int | None] | tuple[int | None, ...] = (),
 ) -> dict[str, Any]:
-    alpha_mode = texture.alpha_mode if texture is not None and texture.alpha_mode is not None else ""
-    alpha_cutoff = texture.alpha_cutoff if texture is not None and texture.alpha_cutoff is not None else 0.5
-    if texture is not None and _should_force_opaque_road_edge(object_name, texture, render_flag):
-        alpha_mode = ""
-        alpha_cutoff = 0.5
+    decision = decide_material_alpha(texture, render_flag, usage_flags)
+    alpha_mode = "" if decision.mode == "OPAQUE" else decision.mode
+    alpha_cutoff = decision.cutoff if decision.cutoff is not None else 0.5
     return {
         "key": key,
         "name": texture.name if texture is not None else "default",
@@ -1551,30 +1561,13 @@ def _material_record(
         "alpha_mode": alpha_mode,
         "source_alpha_mode": texture.alpha_mode if texture is not None and texture.alpha_mode is not None else "",
         "alpha_cutoff": alpha_cutoff,
+        "alpha_reason": decision.reason,
         "render_flag": render_flag or 0,
         "object_name": object_name,
         "is_any_semitransparency": texture.is_any_semitransparency or 0 if texture is not None else 0,
         "alpha_bits": texture.alpha_bits or 0 if texture is not None else 0,
         "alpha_fix": texture.alpha_fix or 0 if texture is not None else 0,
     }
-
-
-def _should_force_opaque_road_edge(object_name: str, texture: Texture, render_flag: int | None) -> bool:
-    if texture.alpha_mode is None:
-        return False
-    if texture.is_any_semitransparency:
-        return False
-    if render_flag in {0x4041, 0xC180}:
-        return True
-
-    object_name_upper = object_name.upper()
-    if object_name_upper.startswith(("RD_", "RDDRT_", "DIRTRD_", "TRN_")):
-        return True
-
-    texture_name = texture.name.upper()
-    return texture_name.startswith(
-        ("ROAD", "W_ROAD", "T_ROAD", "T_DIRTRD", "SHLD_", "D_TERRAIN", "A_DIRT")
-    )
 
 
 def _write_textures(texture_dir: Path, textures: TextureLibrary, referenced_hashes: set[int]) -> list[dict[str, Any]]:

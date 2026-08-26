@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -11,16 +13,31 @@ from .chunks import format_chunk_tree, parse_chunks
 from .comp import decompress_lzc, load_bundle_bytes
 from .debug_writer import write_ps2mesh_debug
 from .glb_writer import write_glb
+from .fbx_writer import write_binary_fbx_from_glb, write_binary_fbx_with_blender
+from .optimized_export import build_optimized, write_optimized_glb
 from .godot_writer import write_godot_track_package
 from .gs_transform_benchmark import benchmark_transform_against_gsdump
 from .gs_oracle import compare_track_to_gsdump
 from .gs_validate import validate_gsdump_against_track
 from .model import parse_scene
+from .mta_export import export_mta_resource
+from .mta_scene import build_mta_scene, load_collision_rules
 from .obj_writer import write_obj
 from .primitive_probe import probe_primitive_rule
 from .progress import progress_iter
 from .textures import load_texture_library_for_track
 from .topology_benchmark import benchmark_topology
+
+
+def _mta_collision_mode(value: str) -> str:
+    if value in {"model", "bounds-only"}:
+        return value
+    if value in {"track", "hybrid", "visual", "none"}:
+        raise argparse.ArgumentTypeError(
+            f"'{value}' used the removed TrackCollisionPolygon/legacy collision pipeline; "
+            "use 'model' or 'bounds-only'"
+        )
+    raise argparse.ArgumentTypeError("expected 'model' or 'bounds-only'")
 
 
 def _resolve_track_input(args: argparse.Namespace) -> Path:
@@ -199,6 +216,85 @@ def _cmd_export_dual(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_optimized(args: argparse.Namespace) -> int:
+    src = _resolve_track_input(args)
+    data = load_bundle_bytes(src)
+    scene = parse_scene(parse_chunks(data), data)
+    if not scene.objects:
+        raise SystemExit("no mesh objects decoded")
+    texture_dir = Path(args.texture_dir) if args.texture_dir else None
+    textures = load_texture_library_for_track(src, texture_dir)
+    geometries, nodes, report = build_optimized(scene, args.chunk_size, args.instance_mode)
+    base = Path(args.output) if args.output else src.with_name(src.stem)
+    if base.suffix.lower() in {".glb", ".fbx"}:
+        base = base.with_suffix("")
+    formats = {args.format} if args.format != "both" else {"glb", "fbx"}
+    glb_path = base.with_name(base.name + ".optimized.glb")
+    if "glb" in formats or "fbx" in formats:
+        write_optimized_glb(geometries, nodes, textures, glb_path, args.vertex_colors)
+        report["glb_bytes"] = glb_path.stat().st_size
+    if "fbx" in formats:
+        fbx_path = base.with_name(base.name + ".optimized.fbx")
+        texture_out = base.with_name(base.name + ".optimized.fbx.textures")
+        texture_out.mkdir(parents=True, exist_ok=True)
+        if args.fbx_backend == "blender":
+            report.update(write_binary_fbx_with_blender(glb_path, fbx_path, texture_out))
+        else:
+            report.update(write_binary_fbx_from_glb(glb_path, fbx_path, texture_out))
+        report["fbx_bytes"] = fbx_path.stat().st_size
+    report_path = base.with_name(base.name + ".optimized.report.json")
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"wrote {', '.join(sorted(formats))} ({report['optimized_geometries']} geometries, {report['output_nodes']} nodes)")
+    print(f"wrote {report_path}")
+    return 0
+
+
+def _cmd_export_mta(args: argparse.Namespace) -> int:
+    src = _resolve_track_input(args)
+    data = load_bundle_bytes(src)
+    scene = parse_scene(parse_chunks(data), data)
+    if not scene.objects:
+        raise SystemExit("no mesh objects decoded")
+    match = re.search(r"TRACKB?(\d+)", src.stem, re.IGNORECASE)
+    track_id = int(args.track) if args.track is not None else (int(match.group(1)) if match else 0)
+    resource_name = args.resource_name or f"HP2_TRACK{track_id:02d}"
+    texture_dir = Path(args.texture_dir) if args.texture_dir else None
+    textures = load_texture_library_for_track(src, texture_dir)
+    mta_scene = build_mta_scene(
+        scene,
+        textures,
+        track_id=track_id,
+        resource_name=resource_name,
+        chunk_size=args.chunk_size,
+        max_vertices=args.max_vertices,
+        collision_mode=args.collision,
+        prop_lod_distance=args.prop_lod_distance,
+        vertex_colors=args.vertex_colors,
+        collision_rules=load_collision_rules(Path(args.collision_rules) if args.collision_rules else None),
+    )
+    if args.static_lod_distance != "auto":
+        distance = float(args.static_lod_distance)
+        for model in mta_scene.models:
+            if model.kind in {"static", "road"}:
+                model.lod_distance = distance
+    out_dir = Path(args.output) if args.output else Path.cwd() / resource_name
+    report = export_mta_resource(
+        mta_scene,
+        textures,
+        out_dir,
+        author=args.author,
+        blender_path=Path(args.blender) if args.blender else None,
+        dragonff_path=Path(args.dragonff_path) if args.dragonff_path else None,
+        keep_intermediate=args.keep_intermediate,
+        rollover_bytes=args.img_rollover_bytes,
+        offset=(args.offset_x, args.offset_y, args.offset_z),
+        water_dat=Path(args.water_dat) if args.water_dat else None,
+    )
+    print(f"wrote EagleLoader resource {out_dir}")
+    print(f"wrote {report}")
+    return 0
+
+
 def _cmd_validate_gsdump(args: argparse.Namespace) -> int:
     src = _resolve_track_input(args)
     texture_dir = Path(args.texture_dir) if args.texture_dir else None
@@ -354,6 +450,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dual_parser.set_defaults(func=_cmd_export_dual)
 
+    optimized_parser = subparsers.add_parser(
+        "export-optimized",
+        help="export a spatially merged, instanced GLB and/or Binary FBX",
+    )
+    optimized_parser.add_argument("input", nargs="?")
+    optimized_parser.add_argument("-o", "--output")
+    optimized_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
+    optimized_parser.add_argument("--track", type=int, help="track number, for example 31 for TRACKB31")
+    optimized_parser.add_argument("--texture-dir", help="directory containing TEX##TRACK.BIN and TEX##LOCATION.BIN")
+    optimized_parser.add_argument("--format", choices=("glb", "fbx", "both"), default="glb")
+    optimized_parser.add_argument("--chunk-size", type=float, default=300.0)
+    optimized_parser.add_argument("--instance-mode", choices=("reuse", "expand"), default="reuse")
+    optimized_parser.add_argument("--fbx-backend", choices=("blender", "python"), default="blender")
+    optimized_parser.add_argument("--vertex-colors", choices=("auto", "always", "off"), default="always")
+    optimized_parser.set_defaults(func=_cmd_export_optimized)
+
+    mta_parser = subparsers.add_parser(
+        "export-mta",
+        help="export a complete MTA:SA EagleLoader trackpack with DFF/COL/TXD IMG archives",
+    )
+    mta_parser.add_argument("input", nargs="?")
+    mta_parser.add_argument("-o", "--output", help="new or empty Eagle resource output directory")
+    mta_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
+    mta_parser.add_argument("--track", type=int, help="track number, for example 31 for TRACKB31")
+    mta_parser.add_argument("--texture-dir", help="directory containing TEX##TRACK.BIN and TEX##LOCATION.BIN")
+    mta_parser.add_argument("--resource-name", help="MTA resource name; defaults to HP2_TRACK##")
+    mta_parser.add_argument("--author", default="map_tools_ps2")
+    mta_parser.add_argument("--chunk-size", type=float, default=300.0)
+    mta_parser.add_argument("--max-vertices", type=int, default=60000)
+    mta_parser.add_argument("--collision", type=_mta_collision_mode, default="model", metavar="{model,bounds-only}")
+    mta_parser.add_argument("--collision-rules", help="optional JSON file mapping texture names/patterns to GTA surfaces")
+    mta_parser.add_argument("--txd-mode", choices=("track",), default="track")
+    mta_parser.add_argument("--archive-mode", choices=("img",), default="img")
+    mta_parser.add_argument("--static-lod-distance", default="auto", help="auto or a numeric draw distance")
+    mta_parser.add_argument("--prop-lod-distance", type=float, default=300.0)
+    mta_parser.add_argument("--offset-x", type=float, default=0.0)
+    mta_parser.add_argument("--offset-y", type=float, default=0.0)
+    mta_parser.add_argument("--offset-z", type=float, default=0.0)
+    mta_parser.add_argument("--water-dat", help="optional EagleLoader water.dat to copy; defaults to an empty compatibility file")
+    mta_parser.add_argument("--vertex-colors", choices=("auto", "always", "off"), default="always")
+    mta_parser.add_argument("--blender", help="path to Blender 4.2+ executable")
+    mta_parser.add_argument("--dragonff-path", help="path to the DragonFF package directory")
+    mta_parser.add_argument(
+        "--keep-intermediate",
+        action="store_true",
+        help="keep Blender staging beside the resource as OUTPUT.intermediate",
+    )
+    mta_parser.add_argument("--img-rollover-bytes", type=int, default=1_500_000_000)
+    mta_parser.set_defaults(func=_cmd_export_mta)
+
     placement_parser = subparsers.add_parser(
         "export-placement",
         help="export scenery prop placement coordinates",
@@ -466,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
         "export",
         "export-godot",
         "export-dual",
+        "export-optimized",
+        "export-mta",
         "export-placement",
         "decompress",
         "chunks",

@@ -106,19 +106,15 @@ class CompTests(unittest.TestCase):
 
 class CliTests(unittest.TestCase):
     def test_resolve_track_input_prefers_bun_in_game_dir(self):
-        args = type(
-            "Args",
-            (),
-            {
-                "input": None,
-                "game_dir": "/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile",
-                "track": 44,
-            },
-        )()
-        self.assertEqual(
-            _resolve_track_input(args),
-            Path("/Users/nurupo/Desktop/ps2/hp2_ps2/GameFile/ZZDATA/TRACKS/TRACKB44.BUN"),
-        )
+        with TemporaryDirectory() as temp_dir:
+            tracks = Path(temp_dir) / "ZZDATA" / "TRACKS"
+            tracks.mkdir(parents=True)
+            bun = tracks / "TRACKB44.BUN"
+            lzc = tracks / "TRACKB44.LZC"
+            bun.write_bytes(b"bun")
+            lzc.write_bytes(b"lzc")
+            args = type("Args", (), {"input": None, "game_dir": temp_dir, "track": 44})()
+            self.assertEqual(_resolve_track_input(args), bun)
 
     def test_export_parser_defaults_vertex_colors_to_always(self):
         args = __import__("map_tools_ps2.cli", fromlist=["build_parser"]).build_parser().parse_args(
