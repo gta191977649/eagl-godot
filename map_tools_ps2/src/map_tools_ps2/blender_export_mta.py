@@ -123,6 +123,190 @@ def _mesh_object(model: dict, materials: list[bpy.types.Material]) -> bpy.types.
     return obj
 
 
+def _weld_model_for_lod(model: dict) -> dict:
+    """Index identical position/UV/prelight/material corners before Decimate."""
+    vertices, uvs, colors, faces, face_materials = [], [], [], [], []
+    lookup = {}
+    for face, material_index in zip(model["faces"], model["face_materials"]):
+        welded_face = []
+        for source_index in face:
+            position = tuple(float(value) for value in model["vertices"][source_index])
+            uv = tuple(float(value) for value in model["uvs"][source_index]) if model["uvs"] else (0.0, 0.0)
+            color = tuple(int(value) for value in model["colors"][source_index]) if model["colors"] else (255, 255, 255, 255)
+            key = (tuple(round(value, 6) for value in position), tuple(round(value, 6) for value in uv), color, material_index)
+            index = lookup.get(key)
+            if index is None:
+                index = lookup[key] = len(vertices)
+                vertices.append(position)
+                uvs.append(uv)
+                colors.append(color)
+            welded_face.append(index)
+        if len(set(welded_face)) == 3:
+            faces.append(tuple(welded_face))
+            face_materials.append(material_index)
+    return {
+        **model,
+        "vertices": vertices,
+        "uvs": uvs if model["uvs"] else [],
+        "colors": colors if model["colors"] else [],
+        "faces": faces,
+        "face_materials": face_materials,
+    }
+
+
+def _mesh_metrics(vertices, faces) -> dict:
+    if not vertices or not faces:
+        return {"bounds": ((0, 0, 0), (0, 0, 0)), "area": 0.0, "coverage": [0.0, 0.0, 0.0]}
+    minimum = tuple(min(vertex[axis] for vertex in vertices) for axis in range(3))
+    maximum = tuple(max(vertex[axis] for vertex in vertices) for axis in range(3))
+    area = 0.0
+    for face in faces:
+        a, b, c = (vertices[index] for index in face)
+        ab = tuple(b[axis] - a[axis] for axis in range(3))
+        ac = tuple(c[axis] - a[axis] for axis in range(3))
+        cross = (
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        )
+        area += math.sqrt(sum(value * value for value in cross)) * 0.5
+    coverage = []
+    for dropped_axis in range(3):
+        axes = [axis for axis in range(3) if axis != dropped_axis]
+        occupied = set()
+        spans = [max(maximum[axis] - minimum[axis], 1e-9) for axis in axes]
+        for face in faces:
+            projected = [
+                tuple((vertices[index][axis] - minimum[axis]) / spans[i] * 39.0 for i, axis in enumerate(axes))
+                for index in face
+            ]
+            min_x = max(0, math.floor(min(point[0] for point in projected)))
+            max_x = min(39, math.ceil(max(point[0] for point in projected)))
+            min_y = max(0, math.floor(min(point[1] for point in projected)))
+            max_y = min(39, math.ceil(max(point[1] for point in projected)))
+            ax, ay = projected[0]
+            bx, by = projected[1]
+            cx, cy = projected[2]
+            denominator = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+            if abs(denominator) < 1e-9:
+                continue
+            for x in range(min_x, max_x + 1):
+                for y in range(min_y, max_y + 1):
+                    px, py = x + 0.5, y + 0.5
+                    first = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / denominator
+                    second = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / denominator
+                    third = 1.0 - first - second
+                    if min(first, second, third) >= -1e-6:
+                        occupied.add((x, y))
+        coverage.append(len(occupied) / 1600.0)
+    return {"bounds": (minimum, maximum), "area": area, "coverage": coverage}
+
+
+def _object_to_corner_model(obj: bpy.types.Object, template: dict) -> dict:
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.active
+    color_layer = mesh.color_attributes.get("Day")
+    vertices, uvs, colors, faces, face_materials = [], [], [], [], []
+    for polygon in mesh.polygons:
+        loop_indices = list(polygon.loop_indices)
+        if len(loop_indices) < 3:
+            continue
+        polygon_corner_indices = []
+        for loop_index in loop_indices:
+            loop = mesh.loops[loop_index]
+            vertices.append(tuple(float(value) for value in mesh.vertices[loop.vertex_index].co))
+            uvs.append(tuple(float(value) for value in uv_layer.data[loop_index].uv) if uv_layer else (0.0, 0.0))
+            if color_layer:
+                rgba = color_layer.data[loop_index].color_srgb
+                colors.append(tuple(max(0, min(255, round(value * 255.0))) for value in rgba))
+            else:
+                colors.append((255, 255, 255, 255))
+            polygon_corner_indices.append(len(vertices) - 1)
+        for index in range(1, len(polygon_corner_indices) - 1):
+            faces.append((polygon_corner_indices[0], polygon_corner_indices[index], polygon_corner_indices[index + 1]))
+            face_materials.append(int(polygon.material_index))
+    return {
+        **template,
+        "vertices": vertices,
+        "uvs": uvs if template["uvs"] else [],
+        "colors": colors if template["colors"] else [],
+        "faces": faces,
+        "face_materials": face_materials,
+        "collision_vertices": [],
+        "collision_faces": [],
+        "collision_materials": [],
+        "collision_kind": "bounds",
+    }
+
+
+def _build_lod_model(source: dict, target: dict, materials: list[bpy.types.Material]) -> tuple[dict | None, dict]:
+    welded = _weld_model_for_lod(source)
+    source_metrics = _mesh_metrics(welded["vertices"], welded["faces"])
+    requested = float(target.get("lod_target_ratio", 0.12))
+    ratios = []
+    for ratio in (requested, 0.20, 0.32, 0.48, 0.65):
+        if ratio not in ratios:
+            ratios.append(ratio)
+    attempts = []
+    for ratio in ratios:
+        obj = _mesh_object({**welded, "model_id": target["model_id"]}, materials)
+        edge_uses = {}
+        for face in welded["faces"]:
+            for first, second in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+                key = tuple(sorted((first, second)))
+                edge_uses[key] = edge_uses.get(key, 0) + 1
+        for edge in obj.data.edges:
+            if edge_uses.get(tuple(sorted(edge.vertices)), 0) == 1:
+                edge.use_seam = True
+        modifier = obj.modifiers.new("Adaptive LOD", "DECIMATE")
+        modifier.decimate_type = "COLLAPSE"
+        modifier.ratio = ratio
+        modifier.use_collapse_triangulate = True
+        if hasattr(modifier, "delimit"):
+            modifier.delimit = {"MATERIAL", "UV", "SEAM", "SHARP"}
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+        candidate = _object_to_corner_model(obj, target)
+        metrics = _mesh_metrics(candidate["vertices"], candidate["faces"])
+        source_min, source_max = source_metrics["bounds"]
+        candidate_min, candidate_max = metrics["bounds"]
+        extent = [max(source_max[axis] - source_min[axis], 1e-6) for axis in range(3)]
+        bounds_error = max(
+            abs(candidate_min[axis] - source_min[axis]) / extent[axis] for axis in range(3)
+        )
+        bounds_error = max(bounds_error, max(abs(candidate_max[axis] - source_max[axis]) / extent[axis] for axis in range(3)))
+        area_ratio = metrics["area"] / source_metrics["area"] if source_metrics["area"] else 1.0
+        coverage_ratio = [
+            metrics["coverage"][axis] / source_metrics["coverage"][axis]
+            if source_metrics["coverage"][axis] else 1.0
+            for axis in range(3)
+        ]
+        finite_attributes = all(math.isfinite(value) for vertex in candidate["vertices"] for value in vertex)
+        finite_attributes = finite_attributes and all(math.isfinite(value) for uv in candidate["uvs"] for value in uv)
+        valid = (
+            bool(candidate["faces"])
+            and len(candidate["vertices"]) <= 65535
+            and bounds_error <= 0.005
+            and 0.55 <= area_ratio <= 1.35
+            and min(coverage_ratio) >= 0.86
+            and finite_attributes
+        )
+        attempts.append({
+            "ratio": ratio, "vertices": len(candidate["vertices"]), "triangles": len(candidate["faces"]),
+            "bounds_error": bounds_error, "area_ratio": area_ratio, "projection_coverage": coverage_ratio,
+            "valid": valid,
+        })
+        visual_mesh = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.meshes.remove(visual_mesh)
+        if valid:
+            return candidate, {"status": "generated", "ratio": ratio, "attempts": attempts}
+    if str(target.get("lod_mode", "auto")) == "required":
+        raise RuntimeError(f"no valid LOD candidate for {source['model_id']}: {attempts}")
+    return None, {"status": "skipped", "ratio": None, "attempts": attempts}
+
+
 def _collision_collection(model: dict) -> tuple[bpy.types.Collection, bpy.types.Object, bpy.types.Mesh] | None:
     if not model["collision_faces"]:
         return None
@@ -354,6 +538,9 @@ def main() -> None:
     images = _load_images(manifest, manifest_path.parent)
     shared_materials = [_visual_material(value, images) for value in manifest["material_catalog"]]
 
+    exported_models = []
+    # LOD geometry is already generated by the Eagle Editor meshoptimizer
+    # bridge. Blender/DragonFF only serializes the staged geometry here.
     for model in manifest["models"]:
         materials = [shared_materials[index] for index in model["materials"]]
         obj = _mesh_object(model, materials)
@@ -378,17 +565,21 @@ def main() -> None:
         visual_mesh = obj.data
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(visual_mesh)
+        exported_models.append(model)
 
     txd_path = out_dir / manifest["txd_file"]
     _export_txd(txd_module, manifest, images, txd_path)
     max_dff_vertices = 0
     prelit_geometries = 0
     max_prop_local_aabb_center_error = 0.0
+    max_local_aabb_center_error = 0.0
     max_prelight_channel_error = 0
     prelight_mismatches = []
     dff_bounds = {}
     dff_face_counts = {}
-    manifest_models = {model["model_id"]: model for model in manifest["models"]}
+    dff_texture_mismatches = []
+    dff_material_assignment_mismatches = []
+    manifest_models = {model["model_id"]: model for model in exported_models}
     for path in dff_dir.glob("*.dff"):
         value = dff_module.dff.dff()
         value.load_file(str(path))
@@ -398,6 +589,42 @@ def main() -> None:
             prelit_geometries += bool(geometry.prelit_colors)
             model_vertices.extend(geometry.vertices)
         expected_model = manifest_models.get(path.stem)
+        actual_texture_names = sorted({
+            texture.name
+            for geometry in value.geometry_list
+            for material in geometry.materials
+            for texture in material.textures
+            if texture.name
+        })
+        expected_texture_names = sorted({
+            manifest["material_catalog"][index].get("texture_name")
+            for index in (expected_model or {}).get("materials", [])
+            if manifest["material_catalog"][index].get("texture_name")
+        })
+        if actual_texture_names != expected_texture_names:
+            dff_texture_mismatches.append({
+                "model": path.stem, "expected": expected_texture_names, "actual": actual_texture_names,
+            })
+        actual_assignments = {}
+        for geometry in value.geometry_list:
+            for triangle in geometry.triangles:
+                material = geometry.materials[int(triangle.material)]
+                texture_name = material.textures[0].name if material.textures else None
+                actual_assignments[texture_name] = actual_assignments.get(texture_name, 0) + 1
+        expected_assignments = {}
+        if expected_model:
+            for face, material in zip(expected_model.get("faces", []), expected_model.get("face_materials", [])):
+                catalog_index = expected_model["materials"][int(material)]
+                texture_name = manifest["material_catalog"][catalog_index].get("texture_name")
+                expected_assignments[texture_name] = expected_assignments.get(texture_name, 0) + 1
+        if actual_assignments != expected_assignments:
+            dff_material_assignment_mismatches.append({
+                "model": path.stem,
+                "expected_count": sum(expected_assignments.values()),
+                "actual_count": sum(actual_assignments.values()),
+                "missing_assignments": sum((expected_assignments[key] - actual_assignments.get(key, 0)) for key in expected_assignments if expected_assignments[key] > actual_assignments.get(key, 0)),
+                "unexpected_assignments": sum((actual_assignments[key] - expected_assignments.get(key, 0)) for key in actual_assignments if actual_assignments[key] > expected_assignments.get(key, 0)),
+            })
         actual_colors = [tuple(color) for geometry in value.geometry_list for color in geometry.prelit_colors]
         expected_colors = [tuple(color) for color in (expected_model or {}).get("colors", [])]
         if len(actual_colors) != len(expected_colors):
@@ -405,34 +632,40 @@ def main() -> None:
                 {"model": path.stem, "expected": len(expected_colors), "actual": len(actual_colors)}
             )
         else:
-            max_prelight_channel_error = max(
-                max_prelight_channel_error,
-                max(
-                    (
-                        abs(actual[channel] - expected[channel])
-                        for actual, expected in zip(actual_colors, expected_colors)
-                        for channel in range(4)
+            # DragonFF rebuilds and reorders RenderWare vertices while writing
+            # bin-mesh material splits.  Position/color pairing therefore
+            # cannot be compared by source vertex index (and float32 position
+            # quantization makes position buckets unreliable on large chunks).
+            # Compare each complete channel distribution instead.  This still
+            # proves that every staged prelight byte reached the DFF while
+            # remaining invariant to DragonFF's legal vertex reordering.
+            for channel in range(4):
+                actual_channel = sorted(int(color[channel]) for color in actual_colors)
+                expected_channel = sorted(int(color[channel]) for color in expected_colors)
+                max_prelight_channel_error = max(
+                    max_prelight_channel_error,
+                    max(
+                        (abs(actual - expected) for actual, expected in zip(actual_channel, expected_channel)),
+                        default=0,
                     ),
-                    default=0,
-                ),
-            )
+                )
         dff_face_counts[path.stem] = sum(len(geometry.triangles) for geometry in value.geometry_list)
         if model_vertices:
             dff_bounds[path.stem] = (
                 tuple(min(float(getattr(vertex, axis)) for vertex in model_vertices) for axis in ("x", "y", "z")),
                 tuple(max(float(getattr(vertex, axis)) for vertex in model_vertices) for axis in ("x", "y", "z")),
             )
-        if "_p_" in path.stem and model_vertices:
+        if model_vertices:
             center = tuple(
                 (min(float(getattr(vertex, axis)) for vertex in model_vertices)
                  + max(float(getattr(vertex, axis)) for vertex in model_vertices))
                 * 0.5
                 for axis in ("x", "y", "z")
             )
-            max_prop_local_aabb_center_error = max(
-                max_prop_local_aabb_center_error,
-                sum(component * component for component in center) ** 0.5,
-            )
+            center_error = sum(component * component for component in center) ** 0.5
+            max_local_aabb_center_error = max(max_local_aabb_center_error, center_error)
+            if "_p_" in path.stem:
+                max_prop_local_aabb_center_error = max(max_prop_local_aabb_center_error, center_error)
     col_faces = 0
     bounds_only_cols = 0
     max_bounds_only_col_error = 0.0
@@ -465,7 +698,18 @@ def main() -> None:
                     mesh_col_face_mismatches.append(
                         {"model": path.stem, "dff": expected_faces, "col": len(model.mesh_faces)}
                     )
-                expected_bounds = dff_bounds[path.stem]
+                # Native road COL geometry intentionally does not have the
+                # same faces or bounds as the visual DFF. Compare the
+                # DragonFF result with the staged collision vertices when
+                # present; visual/bounds COLs still use the DFF bounds.
+                staged_vertices = expected_model.get("collision_vertices", []) if expected_model else []
+                if staged_vertices:
+                    expected_bounds = (
+                        tuple(min(float(vertex[axis]) for vertex in staged_vertices) for axis in range(3)),
+                        tuple(max(float(vertex[axis]) for vertex in staged_vertices) for axis in range(3)),
+                    )
+                else:
+                    expected_bounds = dff_bounds[path.stem]
                 max_mesh_col_bounds_error = max(
                     max_mesh_col_bounds_error,
                     *(abs(float(model.bounds.min[axis]) - expected_bounds[0][axis]) for axis in range(3)),
@@ -474,9 +718,14 @@ def main() -> None:
     if max_bounds_only_col_error > 0.001:
         raise RuntimeError(f"bounds-only COL does not match DFF bounds: {max_bounds_only_col_error}")
     if mesh_col_face_mismatches:
-        raise RuntimeError(f"mesh COL face counts do not match DFF: {mesh_col_face_mismatches}")
+        raise RuntimeError(f"mesh COL face counts do not match staged collision geometry: {mesh_col_face_mismatches}")
     if max_mesh_col_bounds_error > 0.01:
         raise RuntimeError(f"mesh COL does not match DFF bounds: {max_mesh_col_bounds_error}")
+    if dff_texture_mismatches or dff_material_assignment_mismatches:
+        raise RuntimeError(
+            "DFF material/TXD references changed during DragonFF export: "
+            f"textures={dff_texture_mismatches[:10]}, assignments={dff_material_assignment_mismatches[:10]}"
+        )
     if prelight_mismatches or max_prelight_channel_error > 1:
         raise RuntimeError(
             "DFF prelight colors exceed the accepted DragonFF one-byte quantization tolerance: "
@@ -503,13 +752,17 @@ def main() -> None:
                 "prelit_geometries": prelit_geometries,
                 "max_prelight_channel_error": max_prelight_channel_error,
                 "prelight_mismatches": prelight_mismatches,
+                "dff_texture_mismatches": dff_texture_mismatches,
+                "dff_material_assignment_mismatches": dff_material_assignment_mismatches,
                 "max_prop_local_aabb_center_error": max_prop_local_aabb_center_error,
+                "max_local_aabb_center_error": max_local_aabb_center_error,
                 "col_faces": col_faces,
                 "bounds_only_cols": bounds_only_cols,
                 "max_bounds_only_col_error": max_bounds_only_col_error,
                 "max_mesh_col_bounds_error": max_mesh_col_bounds_error,
                 "mesh_col_face_mismatches": mesh_col_face_mismatches,
                 "dff_col_name_sets_match": True,
+                "lod": manifest.get("lod_generation", []),
                 "status": "ok",
             }
         )

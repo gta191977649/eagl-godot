@@ -14,6 +14,8 @@ from .comp import decompress_lzc, load_bundle_bytes
 from .debug_writer import write_ps2mesh_debug
 from .glb_writer import write_glb
 from .fbx_writer import write_binary_fbx_from_glb, write_binary_fbx_with_blender
+from .frontend_textures import export_frontend_textures
+from .global_textures import export_global_textures
 from .optimized_export import build_optimized, write_optimized_glb
 from .godot_writer import write_godot_track_package
 from .gs_transform_benchmark import benchmark_transform_against_gsdump
@@ -25,6 +27,9 @@ from .mta_scene import build_mta_scene, load_collision_rules
 from .obj_writer import write_obj
 from .primitive_probe import probe_primitive_rule
 from .progress import progress_iter
+from .progress import report_progress
+from .route_export import write_route_txt
+from .sound_extract import export_sound
 from .textures import load_texture_library_for_track
 from .topology_benchmark import benchmark_topology
 
@@ -38,6 +43,18 @@ def _mta_collision_mode(value: str) -> str:
             "use 'model' or 'bounds-only'"
         )
     raise argparse.ArgumentTypeError("expected 'model' or 'bounds-only'")
+
+
+def _native_collision_mode(value: str) -> str:
+    if value not in {"auto", "required", "off"}:
+        raise argparse.ArgumentTypeError("expected 'auto', 'required', or 'off'")
+    return value
+
+
+def _native_secondary_mode(value: str) -> str:
+    if value not in {"ignore", "include"}:
+        raise argparse.ArgumentTypeError("expected 'ignore' or 'include'")
+    return value
 
 
 def _resolve_track_input(args: argparse.Namespace) -> Path:
@@ -216,6 +233,21 @@ def _cmd_export_dual(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_route(args: argparse.Namespace) -> int:
+    src = _resolve_track_input(args)
+    data = load_bundle_bytes(src)
+    scene = parse_scene(parse_chunks(data), data)
+    match = re.search(r"TRACKB?(\d+)", src.stem, re.IGNORECASE)
+    track_id = int(args.track) if args.track is not None else (int(match.group(1)) if match else 0)
+    out_path = Path(args.output) if args.output else src.with_name(f"{src.stem}.route.txt")
+    route_path = write_route_txt(scene, out_path, track_id, progress=True)
+    report_path = route_path.with_name("route.report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    print(f"wrote {route_path} ({report['segments']} segments, {report['waypoints']} waypoints, {report['edges']} edges)")
+    print(f"wrote {report_path}")
+    return 0
+
+
 def _cmd_export_optimized(args: argparse.Namespace) -> int:
     src = _resolve_track_input(args)
     data = load_bundle_bytes(src)
@@ -271,11 +303,28 @@ def _cmd_export_mta(args: argparse.Namespace) -> int:
         prop_lod_distance=args.prop_lod_distance,
         vertex_colors=args.vertex_colors,
         collision_rules=load_collision_rules(Path(args.collision_rules) if args.collision_rules else None),
+        native_collision=args.native_collision,
+        native_secondary=args.native_secondary,
+        lod_mode=args.lod_mode,
+        lod_min_size=args.lod_min_size,
+        lod_target_ratio=args.lod_target_ratio,
+        lod_small_size=args.lod_small_size,
+        lod_small_diagonal=args.lod_small_diagonal,
+        lod_min_triangles=args.lod_min_triangles,
+        lod_repeated_triangles=args.lod_repeated_triangles,
+        lod_repeated_count=args.lod_repeated_count,
+        water_road_padding=args.water_road_padding,
+        water_edge_padding=args.water_edge_padding,
+        water_min_fragment_area=args.water_min_fragment_area,
+        water_snap_grid=args.water_snap_grid,
+        water_boundary_tolerance=args.water_boundary_tolerance,
     )
     if args.static_lod_distance != "auto":
         distance = float(args.static_lod_distance)
+        if args.lod_mode != "off" and not 80.0 <= distance <= 299.0:
+            raise SystemExit("--static-lod-distance must be between 80 and 299 when generated LOD is enabled")
         for model in mta_scene.models:
-            if model.kind in {"static", "road"}:
+            if model.kind in {"static", "static_scenery", "road"} and not model.is_lod:
                 model.lod_distance = distance
     out_dir = Path(args.output) if args.output else Path.cwd() / resource_name
     report = export_mta_resource(
@@ -291,7 +340,65 @@ def _cmd_export_mta(args: argparse.Namespace) -> int:
         water_dat=Path(args.water_dat) if args.water_dat else None,
     )
     print(f"wrote EagleLoader resource {out_dir}")
+    water_info = mta_scene.report.get("water_quads", 0)
+    water_source = "copied source" if args.water_dat else f"{water_info} generated quads"
+    print(f"wrote {out_dir / 'water.dat'} ({water_source})")
     print(f"wrote {report}")
+    return 0
+
+
+def _cmd_export_skybox(args: argparse.Namespace) -> int:
+    src = _resolve_track_input(args)
+    track_match = re.search(r"TRACKB?(\d+)", src.stem, re.IGNORECASE)
+    track_number = int(args.track) if args.track is not None else int(track_match.group(1)) if track_match else 0
+    data = load_bundle_bytes(src)
+    scene = parse_scene(parse_chunks(data), data)
+    textures = load_texture_library_for_track(src, Path(args.texture_dir) if args.texture_dir else None)
+    sky_objects = [obj for obj in scene.objects if obj.name.upper().startswith("SKYDOME") or "SKYBOX" in obj.name.upper()]
+    referenced = []
+    seen_hashes: set[int] = set()
+    for obj in sky_objects:
+        for texture_hash in obj.texture_hashes:
+            if texture_hash not in seen_hashes:
+                seen_hashes.add(texture_hash)
+                referenced.append((obj.name, texture_hash))
+    output = Path(args.output) if args.output else Path.cwd() / f"HP2_TRACK{track_number:02d}_skybox"
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"output directory is not empty: {output}")
+    output.mkdir(parents=True, exist_ok=True)
+    texture_dir = output / "textures"
+    texture_dir.mkdir(exist_ok=True)
+    manifest = []
+    report_progress("Exporting skybox textures", 0, len(referenced), None)
+    for index, (object_name, texture_hash) in enumerate(referenced, 1):
+        texture = textures.get(texture_hash)
+        record = {"object": object_name, "hash": texture_hash, "status": "missing"}
+        if texture is not None:
+            filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", texture.name).strip(" .") or f"texture_{texture_hash:08x}"
+            filename = f"{filename}_{texture_hash:08x}.png"
+            (texture_dir / filename).write_bytes(texture.png)
+            record.update({"status": "written", "name": texture.name, "file": f"textures/{filename}", "width": texture.width, "height": texture.height})
+        manifest.append(record)
+        report_progress("Exporting skybox textures", index, len(referenced), texture.name if texture is not None else f"0x{texture_hash:08x}")
+    manifest_path = output / "skybox_manifest.json"
+    manifest_path.write_text(json.dumps({"track": track_number, "objects": [obj.name for obj in sky_objects], "textures": manifest}, indent=2), encoding="utf-8")
+    print(f"wrote {len([item for item in manifest if item['status'] == 'written'])} skybox textures to {output}")
+    print(f"wrote {manifest_path}")
+    return 0
+
+
+def _cmd_export_frontend_textures(args: argparse.Namespace) -> int:
+    export_frontend_textures(Path(args.frontend_dir), Path(args.output))
+    return 0
+
+
+def _cmd_export_global_textures(args: argparse.Namespace) -> int:
+    export_global_textures(Path(args.global_dir), Path(args.output))
+    return 0
+
+
+def _cmd_export_sound(args: argparse.Namespace) -> int:
+    export_sound(Path(args.sound_dir), Path(args.output), workers=args.workers)
     return 0
 
 
@@ -480,15 +587,30 @@ def build_parser() -> argparse.ArgumentParser:
     mta_parser.add_argument("--chunk-size", type=float, default=300.0)
     mta_parser.add_argument("--max-vertices", type=int, default=60000)
     mta_parser.add_argument("--collision", type=_mta_collision_mode, default="model", metavar="{model,bounds-only}")
+    mta_parser.add_argument("--native-collision", type=_native_collision_mode, default="auto", metavar="{auto,required,off}")
+    mta_parser.add_argument("--native-secondary", type=_native_secondary_mode, default="ignore", metavar="{ignore,include}")
     mta_parser.add_argument("--collision-rules", help="optional JSON file mapping texture names/patterns to GTA surfaces")
     mta_parser.add_argument("--txd-mode", choices=("track",), default="track")
     mta_parser.add_argument("--archive-mode", choices=("img",), default="img")
-    mta_parser.add_argument("--static-lod-distance", default="auto", help="auto or a numeric draw distance")
-    mta_parser.add_argument("--prop-lod-distance", type=float, default=300.0)
+    mta_parser.add_argument("--static-lod-distance", default="299", help="auto or a numeric draw distance")
+    mta_parser.add_argument("--prop-lod-distance", type=float, default=299.0)
+    mta_parser.add_argument("--lod-mode", choices=("auto", "required", "off"), default="auto")
+    mta_parser.add_argument("--lod-min-size", type=float, default=100.0)
+    mta_parser.add_argument("--lod-target-ratio", type=float, default=0.12)
+    mta_parser.add_argument("--lod-small-size", type=float, default=60.0)
+    mta_parser.add_argument("--lod-small-diagonal", type=float, default=80.0)
+    mta_parser.add_argument("--lod-min-triangles", type=int, default=300)
+    mta_parser.add_argument("--lod-repeated-triangles", type=int, default=600)
+    mta_parser.add_argument("--lod-repeated-count", type=int, default=32)
     mta_parser.add_argument("--offset-x", type=float, default=0.0)
     mta_parser.add_argument("--offset-y", type=float, default=0.0)
     mta_parser.add_argument("--offset-z", type=float, default=0.0)
     mta_parser.add_argument("--water-dat", help="optional EagleLoader water.dat to copy; defaults to an empty compatibility file")
+    mta_parser.add_argument("--water-road-padding", type=float, default=8.0)
+    mta_parser.add_argument("--water-edge-padding", type=float, default=8.0)
+    mta_parser.add_argument("--water-min-fragment-area", type=float, default=16.0)
+    mta_parser.add_argument("--water-snap-grid", type=float, default=0.0)
+    mta_parser.add_argument("--water-boundary-tolerance", type=float, default=1.0)
     mta_parser.add_argument("--vertex-colors", choices=("auto", "always", "off"), default="always")
     mta_parser.add_argument("--blender", help="path to Blender 4.2+ executable")
     mta_parser.add_argument("--dragonff-path", help="path to the DragonFF package directory")
@@ -500,6 +622,48 @@ def build_parser() -> argparse.ArgumentParser:
     mta_parser.add_argument("--img-rollover-bytes", type=int, default=1_500_000_000)
     mta_parser.set_defaults(func=_cmd_export_mta)
 
+    skybox_parser = subparsers.add_parser(
+        "export-skybox",
+        help="export textures referenced by SKYDOME/SKYBOX objects as PNG files",
+    )
+    skybox_parser.add_argument("input", nargs="?")
+    skybox_parser.add_argument("-o", "--output", help="new or empty skybox output directory")
+    skybox_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
+    skybox_parser.add_argument("--track", type=int, help="track number, for example 31 for TRACKB31")
+    skybox_parser.add_argument("--texture-dir", help="directory containing TEX##TRACK.BIN and TEX##LOCATION.BIN")
+    skybox_parser.set_defaults(func=_cmd_export_skybox)
+
+    frontend_parser = subparsers.add_parser(
+        "export-frontend-textures",
+        help="export all decodable FRONTEND PS2 textures as PNG files",
+    )
+    frontend_parser.add_argument("--frontend-dir", required=True, help="FRONTEND directory")
+    frontend_parser.add_argument("-o", "--output", required=True, help="output directory")
+    frontend_parser.set_defaults(func=_cmd_export_frontend_textures)
+
+    global_parser = subparsers.add_parser(
+        "export-global-textures",
+        help="export all decodable GLOBAL PS2 textures as PNG files",
+    )
+    global_parser.add_argument("--global-dir", required=True, help="GLOBAL directory")
+    global_parser.add_argument("-o", "--output", required=True, help="output directory")
+    global_parser.set_defaults(func=_cmd_export_global_textures)
+
+    sound_parser = subparsers.add_parser(
+        "export-sound",
+        help="extract HP2 PS2 music, speech, UI/SFX, and engine banks as MP3 files",
+    )
+    sound_parser.add_argument(
+        "--zzdata-dir", "--sound-dir", dest="sound_dir", required=True,
+        help="game ZZDATA directory (--sound-dir is retained as a compatibility alias)",
+    )
+    sound_parser.add_argument("-o", "--output", required=True, help="output directory")
+    sound_parser.add_argument(
+        "--workers", type=int, default=0,
+        help="parallel resource worker processes; 0 selects automatically (up to 6)",
+    )
+    sound_parser.set_defaults(func=_cmd_export_sound)
+
     placement_parser = subparsers.add_parser(
         "export-placement",
         help="export scenery prop placement coordinates",
@@ -509,6 +673,16 @@ def build_parser() -> argparse.ArgumentParser:
     placement_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
     placement_parser.add_argument("--track", type=int, help="track number, for example 44 for TRACKB44")
     placement_parser.set_defaults(func=_cmd_export_placement)
+
+    route_parser = subparsers.add_parser(
+        "export-route",
+        help="export HP2 AI vehicle route waypoints and branch edges",
+    )
+    route_parser.add_argument("input", nargs="?")
+    route_parser.add_argument("-o", "--output", help="route.txt output path")
+    route_parser.add_argument("--game-dir", help="game directory containing ZZDATA/TRACKS")
+    route_parser.add_argument("--track", type=int, help="track number, for example 31 for TRACKB31")
+    route_parser.set_defaults(func=_cmd_export_route)
 
     decompress_parser = subparsers.add_parser("decompress", help="decompress a COMP/LZC bundle")
     decompress_parser.add_argument("input")
@@ -608,26 +782,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
-    if argv and argv[0] not in {
-        "export",
-        "export-godot",
-        "export-dual",
-        "export-optimized",
-        "export-mta",
-        "export-placement",
-        "decompress",
-        "chunks",
-        "validate-gsdump",
-        "benchmark-transform",
-        "benchmark-bounds",
-        "benchmark-topology",
-        "probe-primitive",
-        "oracle-gsdump",
-        "-h",
-        "--help",
-    }:
-        argv = ["export", *argv]
     parser = build_parser()
+    subparser_action = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    known_commands = set(subparser_action.choices)
+    if argv and argv[0] not in known_commands and argv[0] not in {"-h", "--help"}:
+        argv = ["export", *argv]
     args = parser.parse_args(argv)
     if hasattr(args, "func"):
         return args.func(args)

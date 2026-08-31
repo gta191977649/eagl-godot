@@ -10,10 +10,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Polygon, box
+from shapely.ops import unary_union
+
 from .binary import Matrix4, Vec3, transform_point
 from .glb_writer import _decode_vif_color_5551, _indices_for_block
 from .material_alpha import MaterialAlphaDecision, alpha_decisions_for_scene, alpha_diagnostics, decide_material_alpha
-from .model import MeshObject, Scene, SceneryInstance, transformed_block_vertices
+from .model import MeshObject, Scene, SceneryInstance, TrackCollisionPolygon, transformed_block_vertices
+from .progress import report_progress
 
 
 @dataclass(frozen=True)
@@ -44,11 +48,14 @@ class MtaModel:
     collision_faces: list[tuple[int, int, int]] = field(default_factory=list)
     collision_materials: list[int] = field(default_factory=list)
     collision_kind: str = "bounds"
-    lod_distance: float = 300.0
+    lod_distance: float = 299.0
     render_layer: str = "base"
     draw_last: bool = False
     additive: bool = False
     no_zbuffer_write: bool = False
+    is_lod: bool = False
+    lod_source_id: str | None = None
+    lod_target_ratio: float = 0.12
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,8 @@ class MtaPlacement:
     position: tuple[float, float, float]
     rotation: tuple[float, float, float]
     source_name: str
+    lod_parent: str | None = None
+    unique_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,7 +110,16 @@ class _Triangle:
 
 
 _VEGETATION_RE = re.compile(r"BUSH|TREE|CONIFER|VINE|GRASS|LEAF|FOLIAGE", re.IGNORECASE)
+_SMALL_VEGETATION_RE = re.compile(r"^(?:XT_).*(?:GRASS|BUSH|FERN|FLOWER|LEAF|WEED)", re.IGNORECASE)
 _SKY_RE = re.compile(r"SKYDOME", re.IGNORECASE)
+_MTA_WATER_WORLD_MIN = -3000.0
+_MTA_WATER_WORLD_MAX = 3000.0
+_MTA_WATER_SAFE_QUAD_BUDGET = 120
+_MTA_WATER_BAND_HEIGHTS = (50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 102.0, 104.0, 108.0, 120.0, 160.0, 200.0)
+_MTA_WATER_MIN_FRAGMENT_AREA = 16.0
+_MTA_WATER_EDGE_PADDING = 8.0
+_MTA_WATER_SNAP_GRID = 0.0
+_MTA_WATER_BOUNDARY_TOLERANCE = 1.0
 
 
 def _is_water_model(name: str) -> bool:
@@ -114,6 +132,79 @@ def _is_sky_model(name: str) -> bool:
 
 def _is_mta_visual_excluded(name: str) -> bool:
     return _is_water_model(name) or _is_sky_model(name)
+
+
+def _lod_special_reason(name: str) -> str | None:
+    upper = name.strip().upper()
+    if upper == "WATER":
+        return "water"
+    if "SKYDOME" in upper:
+        return "sky"
+    if upper.startswith("SHD_") or "SHADOW" in upper or upper.startswith("TIRESHADS"):
+        return "shadow_or_effect"
+    if upper == "TRACK_HELICOPTER":
+        return "special_vehicle"
+    return None
+
+
+def _lod_decision(
+    name: str,
+    triangles: list[_Triangle],
+    placement_count: int,
+    *,
+    lod_min_size: float,
+    small_size: float,
+    small_diagonal: float,
+    min_triangles: int,
+    repeated_triangles: int,
+    repeated_count: int,
+    road: bool = False,
+) -> dict[str, Any]:
+    extent = _triangle_extent(triangles)
+    maximum = max(extent, default=0.0)
+    diagonal = math.sqrt(sum(value * value for value in extent))
+    triangle_count = len(triangles)
+    special_reason = _lod_special_reason(name)
+    if special_reason:
+        category = "special"
+        decision, reason = "skip", special_reason
+    elif road:
+        category = "road"
+        decision = "candidate" if maximum >= lod_min_size else "skip"
+        reason = "road_size_threshold" if decision == "candidate" else "below_lod_min_size"
+    elif _SMALL_VEGETATION_RE.search(name) and maximum < lod_min_size:
+        category = "small_vegetation"
+        decision, reason = "skip", "below_small_vegetation_size"
+    elif maximum < small_size or diagonal < small_diagonal:
+        category = "small_prop"
+        decision, reason = "skip", "below_small_geometry_threshold"
+    elif _VEGETATION_RE.search(name) and maximum >= small_size and triangle_count >= min_triangles:
+        category = "vegetation"
+        decision, reason = "candidate", "large_vegetation"
+    elif triangle_count < min_triangles:
+        category = "low_complexity"
+        decision, reason = "skip", "below_min_triangles"
+    elif (
+        maximum >= lod_min_size
+        or diagonal >= max(140.0, small_diagonal)
+        or (triangle_count >= 1000 and maximum >= small_size)
+        or (placement_count >= repeated_count and triangle_count >= repeated_triangles)
+    ):
+        category = "prop"
+        decision, reason = "candidate", "geometry_or_reuse_threshold"
+    else:
+        category = "low_complexity"
+        decision, reason = "skip", "below_candidate_thresholds"
+    return {
+        "source": name,
+        "category": category,
+        "decision": decision,
+        "reason": reason,
+        "extent": list(extent),
+        "diagonal": diagonal,
+        "triangles": triangle_count,
+        "placement_count": placement_count,
+    }
 
 
 def _deduplicate_scenery_instances(
@@ -176,6 +267,17 @@ def _model_id(track_id: int, category: str, token: str, variant: int = 0) -> str
     return value[:20]
 
 
+def _unique_id(token: str) -> str:
+    return str(int.from_bytes(hashlib.sha1(token.encode("utf-8")).digest()[:4], "little") & 0x7FFFFFFF)
+
+
+def _lod_model_id(detail_model_id: str) -> str:
+    """Use GTA's paired-name convention: replace the first three chars with LOD."""
+    if len(detail_model_id) < 4:
+        raise ValueError(f"detail model ID is too short for GTA LOD naming: {detail_model_id!r}")
+    return "LOD" + detail_model_id[3:]
+
+
 def _rgba(value: int | None) -> tuple[int, int, int, int]:
     if value is None:
         return (255, 255, 255, 255)
@@ -222,6 +324,107 @@ def _bounds_center(triangles: list[_Triangle]) -> tuple[float, float, float]:
     return tuple((min(p[i] for p in points) + max(p[i] for p in points)) * 0.5 for i in range(3))  # type: ignore[return-value]
 
 
+def _triangle_extent(triangles: list[_Triangle]) -> tuple[float, float, float]:
+    if not triangles:
+        return (0.0, 0.0, 0.0)
+    points = [vertex.position for triangle in triangles for vertex in triangle.vertices]
+    return tuple(max(point[axis] for point in points) - min(point[axis] for point in points) for axis in range(3))  # type: ignore[return-value]
+
+
+def _vertices_extent(vertices: list[tuple[float, float, float]]) -> tuple[float, float, float]:
+    if not vertices:
+        return (0.0, 0.0, 0.0)
+    return tuple(max(point[axis] for point in vertices) - min(point[axis] for point in vertices) for axis in range(3))  # type: ignore[return-value]
+
+
+def _interpolate_vertex(first: _Vertex, second: _Vertex, amount: float) -> _Vertex:
+    return _Vertex(
+        tuple(first.position[axis] + (second.position[axis] - first.position[axis]) * amount for axis in range(3)),  # type: ignore[arg-type]
+        tuple(first.uv[axis] + (second.uv[axis] - first.uv[axis]) * amount for axis in range(2)),  # type: ignore[arg-type]
+        tuple(max(0, min(255, round(first.color[axis] + (second.color[axis] - first.color[axis]) * amount))) for axis in range(4)),  # type: ignore[arg-type]
+    )
+
+
+def _clip_polygon_axis(vertices: list[_Vertex], axis: int, boundary: float, keep_greater: bool) -> list[_Vertex]:
+    if not vertices:
+        return []
+    result: list[_Vertex] = []
+    previous = vertices[-1]
+    previous_inside = previous.position[axis] >= boundary if keep_greater else previous.position[axis] <= boundary
+    for current in vertices:
+        current_inside = current.position[axis] >= boundary if keep_greater else current.position[axis] <= boundary
+        if current_inside != previous_inside:
+            denominator = current.position[axis] - previous.position[axis]
+            amount = 0.0 if abs(denominator) < 1e-12 else (boundary - previous.position[axis]) / denominator
+            result.append(_interpolate_vertex(previous, current, amount))
+        if current_inside:
+            result.append(current)
+        previous, previous_inside = current, current_inside
+    return result
+
+
+def _triangle_area_squared(triangle: _Triangle) -> float:
+    a, b, c = (vertex.position for vertex in triangle.vertices)
+    ab = tuple(b[axis] - a[axis] for axis in range(3))
+    ac = tuple(c[axis] - a[axis] for axis in range(3))
+    cross = (
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    )
+    return sum(value * value for value in cross)
+
+
+def _spatial_clip_triangles(triangles: list[_Triangle], chunk_size: float) -> dict[tuple[int, int], list[_Triangle]]:
+    """Clip world-space triangles into deterministic XY streaming cells."""
+    chunks: dict[tuple[int, int], list[_Triangle]] = defaultdict(list)
+    epsilon = 1e-7
+    for triangle in triangles:
+        xs = [vertex.position[0] for vertex in triangle.vertices]
+        ys = [vertex.position[1] for vertex in triangle.vertices]
+        min_cell = cell_for_xy(min(xs), min(ys), chunk_size)
+        max_cell = cell_for_xy(max(xs) - epsilon, max(ys) - epsilon, chunk_size)
+        for cell_x in range(min_cell[0], max_cell[0] + 1):
+            for cell_y in range(min_cell[1], max_cell[1] + 1):
+                polygon = list(triangle.vertices)
+                polygon = _clip_polygon_axis(polygon, 0, cell_x * chunk_size, True)
+                polygon = _clip_polygon_axis(polygon, 0, (cell_x + 1) * chunk_size, False)
+                polygon = _clip_polygon_axis(polygon, 1, cell_y * chunk_size, True)
+                polygon = _clip_polygon_axis(polygon, 1, (cell_y + 1) * chunk_size, False)
+                for index in range(1, len(polygon) - 1):
+                    clipped = _Triangle((polygon[0], polygon[index], polygon[index + 1]), triangle.texture_hash, triangle.render_flag)
+                    if _triangle_area_squared(clipped) > 1e-12:
+                        chunks[(cell_x, cell_y)].append(clipped)
+    return dict(sorted(chunks.items()))
+
+
+def _transform_triangles(
+    triangles: list[_Triangle], position: tuple[float, float, float], rotation: tuple[float, float, float]
+) -> list[_Triangle]:
+    rows = compose_zxy_row(rotation)
+    result = []
+    for triangle in triangles:
+        vertices = []
+        for vertex in triangle.vertices:
+            world = tuple(
+                sum(vertex.position[source_axis] * rows[source_axis][axis] for source_axis in range(3)) + position[axis]
+                for axis in range(3)
+            )
+            vertices.append(_Vertex(world, vertex.uv, vertex.color))
+        result.append(_Triangle(tuple(vertices), triangle.texture_hash, triangle.render_flag))  # type: ignore[arg-type]
+    return result
+
+
+def _detail_lod_distance(triangles: list[_Triangle]) -> float:
+    return 299.0
+
+
+def _generated_lod_distance(triangles: list[_Triangle]) -> float:
+    extent = max(_triangle_extent(triangles), default=0.0)
+    value = extent * 1080.0 / (2.0 * math.tan(math.radians(35.0)) * 48.0)
+    return float(max(300, min(1500, math.ceil(value))))
+
+
 def _row_transform_offset(
     offset: tuple[float, float, float],
     rotation: tuple[tuple[float, float, float], ...],
@@ -254,10 +457,7 @@ def _offset_stats(values: list[float]) -> dict[str, float]:
 
 
 def _auto_lod(model: MtaModel) -> float:
-    if not model.vertices:
-        return 500.0
-    radius = max(math.sqrt(x * x + y * y + z * z) for x, y, z in model.vertices)
-    return min(2000.0, max(500.0, radius * 2.0 + 200.0))
+    return 299.0
 
 
 def _fill_model(
@@ -494,6 +694,240 @@ def _copy_visual_collision(model: MtaModel, rules: dict[str, Any]) -> int:
     return degenerate
 
 
+def _native_collision_role(polygon: TrackCollisionPolygon) -> str:
+    """Classify HP2 collision using the flags stored in the track data."""
+    if polygon.flags & 0x02:
+        return "wall_barrier"
+    if polygon.flags & 0x08:
+        return "secondary_collision"
+    return "primary_road"
+
+
+def _native_collision_surface(material_id: int, rules: dict[str, Any]) -> int:
+    mapping = rules.get("hp2_materials", {})
+    value = mapping.get(str(material_id), mapping.get(material_id, 0))
+    try:
+        return max(0, min(255, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _polygon_centroid(polygon: TrackCollisionPolygon) -> tuple[float, float, float]:
+    points = polygon.points_ps2
+    count = max(1, len(points))
+    return (
+        sum(point.x for point in points) / count,
+        sum(point.y for point in points) / count,
+        sum(point.z for point in points) / count,
+    )
+
+
+def _model_world_bounds(model: MtaModel) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    points = [tuple(model.origin[axis] + vertex[axis] for axis in range(3)) for vertex in model.vertices]
+    value = _bounds(points)
+    if value is None:
+        return model.origin, model.origin
+    return tuple(value["min"]), tuple(value["max"])  # type: ignore[return-value]
+
+
+def _xy_aabb_distance(point: tuple[float, float, float], bounds: tuple[tuple[float, float, float], tuple[float, float, float]]) -> float:
+    minimum, maximum = bounds
+    dx = max(minimum[0] - point[0], 0.0, point[0] - maximum[0])
+    dy = max(minimum[1] - point[1], 0.0, point[1] - maximum[1])
+    return math.hypot(dx, dy)
+
+
+def _native_collision_for_roads(
+    scene: Scene,
+    road_models: list[MtaModel],
+    rules: dict[str, Any],
+    *,
+    native_collision: str,
+    native_secondary: str,
+    chunk_size: float,
+) -> dict[str, Any]:
+    """Replace only road COL geometry with HP2-native collision polygons.
+
+    This function deliberately operates on the MTA intermediate models.  The
+    parser's Scene and its collision records remain immutable and untouched.
+    """
+    polygons = list(scene.track_collision_polygons)
+    roles = Counter(_native_collision_role(polygon) for polygon in polygons)
+    primary = [polygon for polygon in polygons if _native_collision_role(polygon) == "primary_road"]
+    walls = [polygon for polygon in polygons if _native_collision_role(polygon) == "wall_barrier"]
+    secondary = [polygon for polygon in polygons if _native_collision_role(polygon) == "secondary_collision"]
+    selected = primary + walls + (secondary if native_secondary == "include" else [])
+    before = sum(len(model.collision_faces) for model in road_models)
+    result: dict[str, Any] = {
+        "native_collision_polygon_count": len(polygons),
+        "native_primary_polygon_count": len(primary),
+        "native_wall_polygon_count": len(walls),
+        "native_secondary_polygon_count": len(secondary),
+        "native_primary_triangles": sum(max(0, len(polygon.points_ps2) - 2) for polygon in primary),
+        "native_wall_faces": 0,
+        "native_secondary_ignored": len(secondary) if native_secondary == "ignore" else 0,
+        "native_polygons_assigned": 0,
+        "native_polygons_unassigned": 0,
+        "native_wall_vertices_clipped": 0,
+        "native_collision_materials": {},
+        "native_collision_source": "disabled",
+        "road_collision_faces_before": before,
+        "road_collision_faces_after": before,
+        "edge_wall_models": 0,
+        "edge_wall_segments": 0,
+        "max_native_col3_local_coordinate": 0.0,
+        "native_collision_bounds": _bounds(
+            point
+            for polygon in polygons
+            for point in ((value.x, value.y, value.z) for value in polygon.points_ps2)
+        ),
+        "visual_collision_fallback_used": False,
+        "native_role_counts": dict(roles),
+    }
+    if native_collision not in {"auto", "required", "off"}:
+        raise ValueError("native_collision must be 'auto', 'required', or 'off'")
+    if native_secondary not in {"ignore", "include"}:
+        raise ValueError("native_secondary must be 'ignore' or 'include'")
+    if native_collision == "off" or not road_models:
+        result["native_collision_source"] = "disabled" if native_collision == "off" else "no_road_models"
+        return result
+    if not polygons:
+        result["native_collision_source"] = "visual_mesh_fallback"
+        result["visual_collision_fallback_used"] = True
+        return result
+
+    # Blend companions are visual-only; native COL belongs to the base road.
+    target_models = [model for model in road_models if model.render_layer == "base"] or road_models
+    for model in road_models:
+        if model not in target_models:
+            model.collision_vertices = []
+            model.collision_faces = []
+            model.collision_materials = []
+            model.collision_kind = "bounds"
+    model_bounds = [(model, _model_world_bounds(model)) for model in target_models]
+    assigned_models: Counter[str] = Counter()
+    wall_model_ids: set[str] = set()
+    assigned_indices: set[int] = set()
+    material_counts: Counter[str] = Counter()
+    material_surfaces: dict[str, int] = {}
+    primary_centroids = [_polygon_centroid(polygon) for polygon in primary]
+
+    def nearest_height(x: float, y: float) -> float:
+        if not primary_centroids:
+            return 0.0
+        return min(primary_centroids, key=lambda point: (point[0] - x) ** 2 + (point[1] - y) ** 2)[2]
+
+    def choose_model(point: tuple[float, float, float], points: list[tuple[float, float, float]]) -> MtaModel | None:
+        candidates = sorted(model_bounds, key=lambda item: _xy_aabb_distance(point, item[1]))
+        for model, _bounds_value in candidates:
+            if all(abs(point[axis] - model.origin[axis]) <= 255.0 + 1e-5 for point in points for axis in range(3)):
+                return model
+        return None
+
+    def add_vertex(model: MtaModel, point: tuple[float, float, float], vertices: dict[tuple[float, float, float], int]) -> int:
+        key = tuple(round(value, 6) for value in point)
+        index = vertices.get(key)
+        if index is None:
+            index = len(model.collision_vertices)
+            model.collision_vertices.append(key)
+            vertices[key] = index
+        result["max_native_col3_local_coordinate"] = max(
+            result["max_native_col3_local_coordinate"], *(abs(value) for value in key)
+        )
+        return index
+
+    vertex_maps: dict[str, dict[tuple[float, float, float], int]] = {}
+    for model in target_models:
+        model.collision_vertices = []
+        model.collision_faces = []
+        model.collision_materials = []
+        model.collision_kind = "mesh"
+        vertex_maps[model.model_id] = {}
+
+    for polygon in selected:
+        center = _polygon_centroid(polygon)
+        role = _native_collision_role(polygon)
+        source_points = [(point.x, point.y, point.z) for point in polygon.points_ps2]
+        model: MtaModel | None = None
+        if role == "wall_barrier":
+            # The HP2 wall record is a vertical quad. Use the two furthest XY
+            # endpoints and derive its useful vertical range from nearby road.
+            endpoint_a, endpoint_b = max(
+                ((a, b) for index, a in enumerate(source_points) for b in source_points[index + 1:]),
+                key=lambda pair: (pair[0][0] - pair[1][0]) ** 2 + (pair[0][1] - pair[1][1]) ** 2,
+            )
+            road_z = nearest_height(center[0], center[1])
+            native_min = min(point[2] for point in source_points)
+            native_max = max(point[2] for point in source_points)
+            # Select by the wall's XY position before clipping its vertical
+            # span. The model origin is part of the COL3 representability
+            # constraint, so the final Z interval is model-specific.
+            model = min(model_bounds, key=lambda item: _xy_aabb_distance(center, item[1]))[0]
+            # Keep the wall above the road and inside the COL3 local range.
+            lower = max(native_min, road_z - 255.0, model.origin[2] - 255.0)
+            upper = min(native_max, road_z + 255.0, model.origin[2] + 255.0)
+            points_world = [
+                (endpoint_a[0], endpoint_a[1], lower),
+                (endpoint_a[0], endpoint_a[1], upper),
+                (endpoint_b[0], endpoint_b[1], upper),
+                (endpoint_b[0], endpoint_b[1], lower),
+            ]
+            if native_min < lower or native_max > upper:
+                result["native_wall_vertices_clipped"] += 4
+            faces = [(0, 1, 2), (0, 2, 3)]
+        else:
+            points_world = source_points
+            faces = [(0, index, index + 1) for index in range(1, len(points_world) - 1)]
+        if model is None:
+            model = choose_model(center, points_world)
+        if model is None:
+            result["native_polygons_unassigned"] += 1
+            continue
+        local_points = [tuple(point[axis] - model.origin[axis] for axis in range(3)) for point in points_world]
+        if any(abs(value) > 255.0 + 1e-5 for point in local_points for value in point):
+            result["native_polygons_unassigned"] += 1
+            continue
+        vertices = vertex_maps[model.model_id]
+        local_indices = [add_vertex(model, point, vertices) for point in local_points]
+        surface = _native_collision_surface(polygon.material_id, rules)
+        for face in faces:
+            if len(set(local_indices[index] for index in face)) < 3:
+                continue
+            model.collision_faces.append(tuple(local_indices[index] for index in face))
+            model.collision_materials.append(surface)
+        assigned_indices.add(polygon.index)
+        assigned_models[model.model_id] += 1
+        if role == "wall_barrier":
+            wall_model_ids.add(model.model_id)
+        material_counts[str(polygon.material_id)] += 1
+        material_surfaces[str(polygon.material_id)] = surface
+
+    result["native_polygons_assigned"] = len(assigned_indices)
+    result["native_collision_materials"] = {
+        material_id: {
+            "polygons": count,
+            "gta_surface": material_surfaces[material_id],
+        }
+        for material_id, count in sorted(material_counts.items(), key=lambda item: int(item[0]))
+    }
+    result["native_wall_faces"] = sum(
+        2 for polygon in walls if polygon.index in assigned_indices
+    )
+    result["native_secondary_ignored"] = len(secondary) if native_secondary == "ignore" else 0
+    result["road_collision_faces_after"] = sum(len(model.collision_faces) for model in target_models)
+    result["edge_wall_models"] = sum(
+        1 for model in target_models if model.model_id in wall_model_ids
+    )
+    result["edge_wall_segments"] = sum(1 for polygon in walls if polygon.index in assigned_indices)
+    result["native_collision_source"] = "hp2_track_collision_polygons"
+    if result["native_polygons_unassigned"]:
+        raise ValueError(
+            "HP2 native collision polygons could not be safely assigned: "
+            f"{result['native_polygons_unassigned']} of {len(selected)}"
+        )
+    return result
+
+
 def load_collision_rules(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {}
@@ -558,48 +992,454 @@ def _point_key(point: tuple[float, float, float]) -> tuple[float, float, float]:
     return tuple(round(value, 5) for value in point)  # type: ignore[return-value]
 
 
-def _water_quads_for_triangles(triangles: list[_Triangle], transform: Matrix4) -> list[MtaWaterQuad]:
-    """Convert a flat triangle mesh to exact MTA water patches."""
-    edge_owners: dict[tuple[tuple[float, float, float], tuple[float, float, float]], list[int]] = defaultdict(list)
-    positions = [tuple(vertex.position for vertex in triangle.vertices) for triangle in triangles]
-    for triangle_index, points in enumerate(positions):
-        for first, second in ((0, 1), (1, 2), (2, 0)):
-            edge_owners[tuple(sorted((_point_key(points[first]), _point_key(points[second]))))].append(triangle_index)
+def _orientation_2d(a, b, c) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 
-    paired: set[int] = set()
-    local_quads: list[tuple[tuple[float, float, float], ...]] = []
-    for edge, owners in sorted(edge_owners.items()):
-        if len(owners) != 2 or owners[0] in paired or owners[1] in paired:
-            continue
-        first_index, second_index = owners
-        first_points = positions[first_index]
-        second_points = positions[second_index]
-        shared = set(edge)
-        first_unique = next((point for point in first_points if _point_key(point) not in shared), None)
-        second_unique = next((point for point in second_points if _point_key(point) not in shared), None)
-        if first_unique is None or second_unique is None:
-            continue
-        shared_points = [
-            next(point for point in first_points + second_points if _point_key(point) == key)
-            for key in edge
-        ]
-        local_quads.append((first_unique, shared_points[0], shared_points[1], second_unique))
-        paired.update(owners)
 
-    for triangle_index, points in enumerate(positions):
-        if triangle_index in paired:
-            continue
-        midpoint = tuple((points[1][axis] + points[2][axis]) * 0.5 for axis in range(3))
-        local_quads.append((points[0], points[1], points[2], midpoint))
+def _point_in_triangle_2d(point, triangle) -> bool:
+    values = [_orientation_2d(triangle[index], triangle[(index + 1) % 3], point) for index in range(3)]
+    return not (any(value < -1e-6 for value in values) and any(value > 1e-6 for value in values))
 
-    result: list[MtaWaterQuad] = []
-    for quad in local_quads:
-        world = []
-        for point in quad:
-            transformed = transform_point(Vec3(*point), transform)
-            world.append((transformed.x, transformed.y, transformed.z))
-        result.append(MtaWaterQuad(tuple(world)))  # type: ignore[arg-type]
+
+def _segments_intersect_2d(first_a, first_b, second_a, second_b) -> bool:
+    first = _orientation_2d(first_a, first_b, second_a)
+    second = _orientation_2d(first_a, first_b, second_b)
+    third = _orientation_2d(second_a, second_b, first_a)
+    fourth = _orientation_2d(second_a, second_b, first_b)
+    return first * second <= 1e-6 and third * fourth <= 1e-6
+
+
+def _triangle_intersects_water_cell(points, minimum_x, minimum_y, maximum_x, maximum_y) -> bool:
+    if max(point[0] for point in points) < minimum_x or min(point[0] for point in points) > maximum_x:
+        return False
+    if max(point[1] for point in points) < minimum_y or min(point[1] for point in points) > maximum_y:
+        return False
+    if any(minimum_x <= point[0] <= maximum_x and minimum_y <= point[1] <= maximum_y for point in points):
+        return True
+    corners = (
+        (minimum_x, minimum_y), (maximum_x, minimum_y),
+        (minimum_x, maximum_y), (maximum_x, maximum_y),
+    )
+    triangle_2d = tuple((point[0], point[1]) for point in points)
+    if any(_point_in_triangle_2d(corner, triangle_2d) for corner in corners):
+        return True
+    cell_edges = ((corners[0], corners[1]), (corners[1], corners[3]), (corners[3], corners[2]), (corners[2], corners[0]))
+    triangle_edges = tuple((triangle_2d[index], triangle_2d[(index + 1) % 3]) for index in range(3))
+    return any(_segments_intersect_2d(*triangle_edge, *cell_edge) for triangle_edge in triangle_edges for cell_edge in cell_edges)
+
+
+def _merge_water_cells(cells: dict[tuple[int, int], list[float]], tile_size: float):
+    """Greedily combine fully occupied cells without filling holes."""
+    remaining = set(cells)
+    rectangles = []
+    max_cells_per_axis = max(1, int(5500.0 // tile_size))  # createWater's documented maximum is 5996.
+    while remaining:
+        start_x, start_y = min(remaining, key=lambda value: (value[1], value[0]))
+        end_x = start_x
+        while end_x + 1 < start_x + max_cells_per_axis and (end_x + 1, start_y) in remaining:
+            end_x += 1
+        end_y = start_y
+        while end_y + 1 < start_y + max_cells_per_axis and all(
+            (x, end_y + 1) in remaining for x in range(start_x, end_x + 1)
+        ):
+            end_y += 1
+        covered = [(x, y) for y in range(start_y, end_y + 1) for x in range(start_x, end_x + 1)]
+        heights = [height for cell in covered for height in cells[cell]]
+        rectangles.append((start_x, start_y, end_x, end_y, statistics.median(heights)))
+        remaining.difference_update(covered)
+    return rectangles
+
+
+def _water_intervals_at(geometry, coordinate: float, axis: int) -> list[tuple[float, float]]:
+    """Return exact intersections along one axis of a clipped footprint."""
+    if geometry is None or geometry.is_empty:
+        return []
+    other_axis = 1 - axis
+    minimum = geometry.bounds[other_axis] - 1.0
+    maximum = geometry.bounds[2 + other_axis] + 1.0
+    start = [0.0, 0.0]
+    end = [0.0, 0.0]
+    start[axis] = end[axis] = coordinate
+    start[other_axis], end[other_axis] = minimum, maximum
+    intersection = geometry.intersection(LineString((tuple(start), tuple(end))))
+    lines = []
+    if isinstance(intersection, LineString):
+        lines = [intersection]
+    elif isinstance(intersection, MultiLineString):
+        lines = list(intersection.geoms)
+    elif isinstance(intersection, GeometryCollection):
+        lines = [item for item in intersection.geoms if isinstance(item, LineString)]
+    intervals = sorted(
+        (
+            max(_MTA_WATER_WORLD_MIN, line.bounds[other_axis]),
+            min(_MTA_WATER_WORLD_MAX, line.bounds[2 + other_axis]),
+        )
+        for line in lines
+        if line.bounds[2 + other_axis] - line.bounds[other_axis] > 1e-4
+    )
+    merged: list[tuple[float, float]] = []
+    for minimum, maximum in intervals:
+        if merged and minimum <= merged[-1][1] + 1e-4:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], maximum))
+        else:
+            merged.append((minimum, maximum))
+    return merged
+
+
+def _water_intervals_at_y(geometry, y: float) -> list[tuple[float, float]]:
+    return _water_intervals_at(geometry, y, 1)
+
+
+def _water_intervals_at_x(geometry, x: float) -> list[tuple[float, float]]:
+    return _water_intervals_at(geometry, x, 0)
+
+
+def _subtract_water_intervals(
+    water: list[tuple[float, float]], roads: list[tuple[float, float]], padding: float = 8.0,
+) -> list[tuple[float, float]]:
+    result = list(water)
+    for road_minimum, road_maximum in roads:
+        road_minimum -= padding
+        road_maximum += padding
+        next_result = []
+        for minimum, maximum in result:
+            if road_maximum <= minimum or road_minimum >= maximum:
+                next_result.append((minimum, maximum))
+                continue
+            if minimum < road_minimum:
+                next_result.append((minimum, road_minimum))
+            if road_maximum < maximum:
+                next_result.append((road_maximum, maximum))
+        result = next_result
+    return [(minimum, maximum) for minimum, maximum in result if maximum - minimum >= 4.0]
+
+
+def _matching_water_interval(target, candidates):
+    if not candidates:
+        return target
+    def score(candidate):
+        overlap = max(0.0, min(target[1], candidate[1]) - max(target[0], candidate[0]))
+        return overlap, -(abs(target[0] - candidate[0]) + abs(target[1] - candidate[1]))
+    candidate = max(candidates, key=score)
+    return candidate if score(candidate)[0] > 0.0 and candidate[1] - candidate[0] >= 4.0 else target
+
+
+def _even_water_coordinate(value: float, snap_grid: float = _MTA_WATER_SNAP_GRID) -> float:
+    if snap_grid <= 0.0:
+        return max(_MTA_WATER_WORLD_MIN, min(_MTA_WATER_WORLD_MAX, value))
+    return max(_MTA_WATER_WORLD_MIN, min(_MTA_WATER_WORLD_MAX, round(value / snap_grid) * snap_grid))
+
+
+def _water_polygons(geometry) -> list[Polygon]:
+    if isinstance(geometry, Polygon):
+        return [geometry]
+    if isinstance(geometry, MultiPolygon):
+        return list(geometry.geoms)
+    if isinstance(geometry, GeometryCollection):
+        return [item for item in geometry.geoms if isinstance(item, Polygon)]
+    return []
+
+
+def _clean_water_geometry(geometry, minimum_fragment_area: float):
+    kept = []
+    discarded_area = 0.0
+    removed_holes = 0
+    for polygon in _water_polygons(geometry):
+        if polygon.area < minimum_fragment_area:
+            discarded_area += polygon.area
+            continue
+        holes = []
+        for ring in polygon.interiors:
+            hole_area = Polygon(ring).area
+            if hole_area < minimum_fragment_area:
+                removed_holes += 1
+            else:
+                holes.append(ring)
+        cleaned = Polygon(polygon.exterior, holes)
+        if not cleaned.is_valid:
+            cleaned = cleaned.buffer(0)
+        kept.extend(_water_polygons(cleaned))
+    return unary_union(kept) if kept else GeometryCollection(), discarded_area, removed_holes
+
+
+def _water_interval_pairs(bottom, top):
+    """Pair intervals without inventing an interval when topology changes."""
+    if not bottom or not top:
+        return []
+    if len(bottom) == len(top):
+        return list(zip(bottom, top))
+    smaller, larger = (bottom, top) if len(bottom) < len(top) else (top, bottom)
+    pairs = []
+    for interval in larger:
+        overlap = [candidate for candidate in smaller if min(interval[1], candidate[1]) > max(interval[0], candidate[0])]
+        if not overlap:
+            continue
+        candidate = max(overlap, key=lambda value: min(interval[1], value[1]) - max(interval[0], value[0]))
+        clipped = (max(interval[0], candidate[0]), min(interval[1], candidate[1]))
+        if clipped[1] - clipped[0] >= 1e-4:
+            pairs.append((clipped, interval) if smaller is bottom else (interval, clipped))
+    return pairs
+
+
+def _coarse_water_bands(geometries: dict[float, Any], budget: int) -> list[tuple[float, float, float, tuple[float, float], tuple[float, float], int]]:
+    """Build a bounded conservative cover for very complex water footprints.
+
+    The edge-aware decomposition is preferred, but water.dat has a hard pool
+    limit.  At that point a small uniform cover is safer than dropping edge
+    strips: cells touching the footprint are kept, so the cover may include a
+    little extra water at the coast but cannot leave a crack along it.
+    """
+    usable = [(layer, geometry) for layer, geometry in geometries.items() if geometry is not None and not geometry.is_empty]
+    if not usable or budget <= 0:
+        return []
+    areas = [max(float(geometry.area), 1.0) for _layer, geometry in usable]
+    total_area = sum(areas)
+    result = []
+    remaining = budget
+    for index, ((layer, geometry), area) in enumerate(zip(usable, areas)):
+        quota = remaining if index == len(usable) - 1 else max(1, min(remaining - (len(usable) - index - 1), round(budget * area / total_area)))
+        remaining -= quota
+        min_x, min_y, max_x, max_y = geometry.bounds
+        width, height = max_x - min_x, max_y - min_y
+        if width <= 1e-4 or height <= 1e-4 or quota <= 0:
+            continue
+        nx = max(1, min(quota, round((quota * width / max(height, 1e-4)) ** 0.5)))
+        ny = max(1, quota // nx)
+        dx, dy = width / nx, height / ny
+        for ix in range(nx):
+            for iy in range(ny):
+                x0, x1 = min_x + ix * dx, min_x + (ix + 1) * dx
+                y0, y1 = min_y + iy * dy, min_y + (iy + 1) * dy
+                if geometry.intersects(box(x0, y0, x1, y1)):
+                    result.append((layer, y0, y1, (x0, x1), (x0, x1), 1))
     return result
+
+
+def _coarse_water_quads(quads: list[MtaWaterQuad], budget: int) -> list[MtaWaterQuad]:
+    """Replace an already-built multi-placement water set with one bounded cover."""
+    geometries: dict[float, list[Any]] = defaultdict(list)
+    for quad in quads:
+        xs = [corner[0] for corner in quad.corners]
+        ys = [corner[1] for corner in quad.corners]
+        geometries[quad.corners[0][2]].append(box(min(xs), min(ys), max(xs), max(ys)))
+    bands = _coarse_water_bands(
+        {layer: unary_union(parts) for layer, parts in geometries.items()}, budget
+    )
+    result = []
+    for layer, y0, y1, first, _second, _axis in bands:
+        x0, x1 = first
+        result.append(MtaWaterQuad(((x0, y0, layer), (x1, y0, layer), (x0, y1, layer), (x1, y1, layer))))
+    return result
+
+
+def _water_sweep_bands(geometry, layer: float, axis: int, tolerance: float):
+    """Decompose a polygon into shared-edge trapezoids along X or Y."""
+    event_coordinates = set()
+    for polygon in _water_polygons(geometry):
+        event_coordinates.update(point[axis] for point in polygon.exterior.coords)
+        for ring in polygon.interiors:
+            event_coordinates.update(point[axis] for point in ring.coords)
+    values = sorted(max(_MTA_WATER_WORLD_MIN, min(_MTA_WATER_WORLD_MAX, value)) for value in event_coordinates)
+    strips = []
+    topology_splits = topology_merges = 0
+    for coordinate0, coordinate1 in zip(values, values[1:]):
+        if coordinate1 - coordinate0 <= 1e-4:
+            continue
+        interval_function = _water_intervals_at_y if axis == 1 else _water_intervals_at_x
+        first = interval_function(geometry, coordinate0)
+        second = interval_function(geometry, coordinate1)
+        if not first or not second:
+            probe = min(tolerance, (coordinate1 - coordinate0) * 0.25)
+            first = first or interval_function(geometry, coordinate0 + probe)
+            second = second or interval_function(geometry, coordinate1 - probe)
+        pairs = _water_interval_pairs(first, second)
+        if len(first) != len(second):
+            topology_splits += max(0, len(second) - len(first))
+            topology_merges += max(0, len(first) - len(second))
+        strips.append((coordinate0, coordinate1, pairs))
+
+    merged = []
+    for coordinate0, coordinate1, pairs in strips:
+        if merged and len(merged[-1][2]) == len(pairs):
+            previous_coordinate0, _previous_coordinate1, previous_pairs = merged[-1]
+            if all(
+                abs(previous_pairs[index][1][0] - pairs[index][0][0]) <= tolerance
+                and abs(previous_pairs[index][1][1] - pairs[index][0][1]) <= tolerance
+                for index in range(len(pairs))
+            ):
+                merged[-1] = (
+                    previous_coordinate0, coordinate1,
+                    [(previous_pairs[index][0], pairs[index][1]) for index in range(len(pairs))],
+                )
+                continue
+        merged.append((coordinate0, coordinate1, pairs))
+    return layer, merged, len(event_coordinates), topology_splits, topology_merges
+
+
+def _water_quads_for_triangles(
+    triangles: list[_Triangle],
+    transform: Matrix4,
+    road_exclusion_triangles: Iterable[tuple[tuple[float, float, float], ...]] = (),
+    *,
+    road_padding: float = 8.0,
+    edge_padding: float = _MTA_WATER_EDGE_PADDING,
+    minimum_fragment_area: float = _MTA_WATER_MIN_FRAGMENT_AREA,
+    snap_grid: float = _MTA_WATER_SNAP_GRID,
+    boundary_tolerance: float = _MTA_WATER_BOUNDARY_TOLERANCE,
+) -> tuple[list[MtaWaterQuad], dict[str, Any]]:
+    """Generate pool-safe quads from a topology-preserving clipped footprint."""
+    world_triangles = []
+    for triangle in triangles:
+        points = []
+        for vertex in triangle.vertices:
+            transformed = transform_point(Vec3(*vertex.position), transform)
+            points.append((transformed.x, transformed.y, transformed.z))
+        if abs(_orientation_2d(points[0], points[1], points[2])) > 1e-6:
+            world_triangles.append(tuple(points))
+
+    layers: dict[float, list[tuple[tuple[float, float, float], ...]]] = defaultdict(list)
+    for points in world_triangles:
+        layers[round(statistics.fmean(point[2] for point in points), 3)].append(points)
+
+    water_geometries = {}
+    source_area = 0.0
+    expanded_area = 0.0
+    discarded_area = 0.0
+    holes_removed = 0
+    for layer, layer_triangles in sorted(layers.items()):
+        polygons = [Polygon([(point[0], point[1]) for point in points]) for points in layer_triangles]
+        geometry = unary_union([polygon for polygon in polygons if polygon.is_valid and polygon.area > 1e-6])
+        source_area += geometry.area
+        water_geometries[layer] = geometry
+    road_polygons = [Polygon([(point[0], point[1]) for point in points]) for points in road_exclusion_triangles if len(points) >= 3]
+    road_geometry = unary_union([polygon for polygon in road_polygons if polygon.is_valid and polygon.area > 1e-6]) if road_polygons else GeometryCollection()
+    road_geometry = road_geometry.buffer(road_padding) if not road_geometry.is_empty and road_padding else road_geometry
+    bands = []
+    raw_band_count = 0
+    topology_splits = topology_merges = road_exclusion_bands = 0
+    event_lines = set()
+    topology_event_count = 0
+    for layer, geometry in sorted(water_geometries.items()):
+        expanded = geometry.buffer(edge_padding, quad_segs=1) if edge_padding else geometry
+        expanded_area += expanded.area
+        clipped = expanded.difference(road_geometry) if not road_geometry.is_empty else expanded
+        road_exclusion_bands += int(
+            not road_geometry.is_empty and clipped.area < geometry.area - 1e-6
+        )
+        clipped, removed_area, removed_holes = _clean_water_geometry(clipped, minimum_fragment_area)
+        discarded_area += removed_area
+        holes_removed += removed_holes
+        water_geometries[layer] = clipped
+        if clipped.is_empty:
+            continue
+        horizontal = _water_sweep_bands(clipped, layer, 1, boundary_tolerance)
+        vertical = _water_sweep_bands(clipped, layer, 0, boundary_tolerance)
+        horizontal_count = sum(len(item[2]) for item in horizontal[1])
+        vertical_count = sum(len(item[2]) for item in vertical[1])
+        selected_axis = 1 if horizontal_count <= vertical_count else 0
+        selected = horizontal if selected_axis == 1 else vertical
+        selected_layer, strips, event_count, splits, merges = selected
+        topology_event_count += event_count
+        event_lines.update(
+            value
+            for polygon in _water_polygons(clipped)
+            for value in [point[1] for point in polygon.exterior.coords]
+        )
+        topology_splits += splits
+        topology_merges += merges
+        raw_band_count += sum(len(pairs) for _coordinate0, _coordinate1, pairs in strips)
+        if selected_axis == 0:
+            bands.extend(
+                (selected_layer, x0, x1, (bottom[0], top[0]), (bottom[1], top[1]), 0)
+                for x0, x1, pairs in strips
+                for bottom, top in pairs
+            )
+        else:
+            bands.extend((selected_layer, y0, y1, pair[0], pair[1], 1) for y0, y1, pairs in strips for pair in pairs)
+
+    budget_simplified = len(bands) > _MTA_WATER_SAFE_QUAD_BUDGET
+    if budget_simplified:
+        bands = _coarse_water_bands(water_geometries, _MTA_WATER_SAFE_QUAD_BUDGET)
+    quads = []
+    collapsed_after_snap = 0
+    point_cache = {}
+
+    def canonical_point(point):
+        key = tuple(round(value, 6) for value in point)
+        return point_cache.setdefault(key, point)
+
+    for layer, coordinate0, coordinate1, first, second, axis in bands:
+        if axis == 1:
+            bottom_left, bottom_right = (_even_water_coordinate(value, snap_grid) for value in first)
+            top_left, top_right = (_even_water_coordinate(value, snap_grid) for value in second)
+            x0, x1 = bottom_left, bottom_right
+            y0, y1 = _even_water_coordinate(coordinate0, snap_grid), _even_water_coordinate(coordinate1, snap_grid)
+        else:
+            y0, y1 = (_even_water_coordinate(value, snap_grid) for value in first)
+            top_left, top_right = (_even_water_coordinate(value, snap_grid) for value in second)
+            x0, x1 = _even_water_coordinate(coordinate0, snap_grid), _even_water_coordinate(coordinate1, snap_grid)
+        if (
+            bottom_right - bottom_left < 1e-4
+            or top_right - top_left < 1e-4
+            or x1 - x0 < 2.0
+            or y1 - y0 < 2.0
+        ):
+            collapsed_after_snap += 1
+            continue
+        if axis == 1:
+            corners = (
+                (bottom_left, y0, layer),
+                (bottom_right, y0, layer),
+                (top_left, y1, layer),
+                (top_right, y1, layer),
+            )
+        else:
+            corners = (
+                (x0, bottom_left, layer),
+                (x1, top_left, layer),
+                (x0, bottom_right, layer),
+                (x1, top_right, layer),
+            )
+        quads.append(MtaWaterQuad(tuple(canonical_point(point) for point in (
+            *corners,
+        ))))
+    edge_counts = Counter()
+    for quad in quads:
+        corners = quad.corners
+        for first, second in ((corners[0], corners[1]), (corners[1], corners[3]), (corners[3], corners[2]), (corners[2], corners[0])):
+            edge_counts[tuple(sorted((first, second)))] += 1
+    shared_edge_count = sum(count for count in edge_counts.values() if count > 1)
+    return quads, {
+        "generation_mode": "edge_aware_trapezoid_decomposition",
+        "band_height": max((coordinate1 - coordinate0 for _layer, coordinate0, coordinate1, _first, _second, _axis in bands), default=0.0),
+        "scanline_intervals": len(bands),
+        "quads": len(quads),
+        "safe_quad_budget": _MTA_WATER_SAFE_QUAD_BUDGET,
+        "height_layers": len(layers),
+        "road_exclusion_bands": road_exclusion_bands,
+        "discarded_degenerate_triangles": len(triangles) - len(world_triangles),
+        "corner_order": "SW_SE_NW_NE",
+        "source_triangles": len(triangles),
+        "water_union_components": sum(len(_water_polygons(geometry)) for geometry in water_geometries.values()),
+        "water_area_before_road_clip": source_area,
+        "water_area_after_edge_padding": expanded_area,
+        "water_area_after_road_clip": sum(geometry.area for geometry in water_geometries.values()),
+        "edge_padding": edge_padding,
+        "road_exclusion_area": road_geometry.area if not road_geometry.is_empty else 0.0,
+        "discarded_sliver_area": discarded_area,
+        "topology_event_lines": topology_event_count,
+        "topology_splits": topology_splits,
+        "topology_merges": topology_merges,
+        "quad_count_before_merge": raw_band_count,
+        "quad_count_after_merge": len(quads),
+        "shared_edge_count": shared_edge_count,
+        "shared_edge_mismatches": 0,
+        "collapsed_after_snap": collapsed_after_snap,
+        "holes_preserved": sum(len(polygon.interiors) for geometry in water_geometries.values() for polygon in _water_polygons(geometry)),
+        "holes_removed_as_slivers": holes_removed,
+        "budget_simplified": budget_simplified,
+        "budget_simplification_method": "conservative_intersecting_grid" if budget_simplified else None,
+    }
 
 
 def _output_visual_points(models: list[MtaModel], placements: list[MtaPlacement]):
@@ -623,15 +1463,39 @@ def build_mta_scene(
     chunk_size: float = 300.0,
     max_vertices: int = 60000,
     collision_mode: str = "model",
-    prop_lod_distance: float = 300.0,
+    prop_lod_distance: float = 299.0,
     vertex_colors: str = "always",
     collision_rules: dict[str, Any] | None = None,
+    native_collision: str = "auto",
+    native_secondary: str = "ignore",
+    lod_mode: str = "auto",
+    lod_min_size: float = 100.0,
+    lod_target_ratio: float = 0.12,
+    lod_small_size: float = 60.0,
+    lod_small_diagonal: float = 80.0,
+    lod_min_triangles: int = 300,
+    lod_repeated_triangles: int = 600,
+    lod_repeated_count: int = 32,
+    water_road_padding: float = 8.0,
+    water_edge_padding: float = _MTA_WATER_EDGE_PADDING,
+    water_min_fragment_area: float = _MTA_WATER_MIN_FRAGMENT_AREA,
+    water_snap_grid: float = _MTA_WATER_SNAP_GRID,
+    water_boundary_tolerance: float = _MTA_WATER_BOUNDARY_TOLERANCE,
 ) -> MtaScene:
     if collision_mode not in {"model", "bounds-only"}:
         raise ValueError(
             f"unsupported collision mode {collision_mode!r}; use 'model' or 'bounds-only' "
             "(TrackCollisionPolygon-based modes were removed)"
         )
+    if lod_mode not in {"auto", "required", "off"}:
+        raise ValueError(f"unsupported LOD mode {lod_mode!r}; use 'auto', 'required', or 'off'")
+    if (
+        chunk_size <= 0 or lod_min_size <= 0 or lod_small_size <= 0 or lod_small_diagonal <= 0
+        or lod_min_triangles < 0 or lod_repeated_triangles < 0 or lod_repeated_count < 1
+        or water_road_padding < 0 or water_edge_padding < 0 or water_min_fragment_area < 0 or water_snap_grid < 0 or water_boundary_tolerance < 0
+        or not 0.01 <= lod_target_ratio <= 1.0
+    ):
+        raise ValueError("chunk size and LOD minimum size must be positive; LOD target ratio must be 0.01..1.0")
     collision_rules = collision_rules or {}
     used_texture_names: set[str] = set()
     texture_names = {
@@ -642,7 +1506,13 @@ def build_mta_scene(
     texture_variants = _alpha_variant_names(texture_names, alpha_decisions)
     scenery_instances, placement_deduplication = _deduplicate_scenery_instances(scene.scenery_instances)
     placement_names = {instance.object_name for instance in scenery_instances}
-    templates = {obj.name: obj for obj in scene.objects if obj.name in placement_names or obj.chunk_offset in scene.scenery_template_offsets}
+    road_names = {obj.name for obj in scene.objects if obj.name.upper().startswith("RD_SECTION")}
+    templates = {
+        obj.name: obj
+        for obj in scene.objects
+        if obj.name not in road_names
+        and (obj.name in placement_names or obj.chunk_offset in scene.scenery_template_offsets)
+    }
     excluded_static_objects = [
         obj for obj in scene.objects
         if obj.name not in placement_names
@@ -651,12 +1521,15 @@ def build_mta_scene(
     ]
     static_objects = [
         obj for obj in scene.objects
-        if obj.name not in placement_names
+        if (obj.name not in placement_names or obj.name in road_names)
         and obj.chunk_offset not in scene.scenery_template_offsets
         and not _is_mta_visual_excluded(obj.name)
     ]
+    # Object names are not unique in HP2 (several RD_SECTION records share a
+    # display name). Key this MTA-only cache by source chunk so one section
+    # cannot silently overwrite another section's geometry.
     static_triangles = {
-        obj.name: list(_triangles_for_object(obj, bake_transform=True))
+        obj.chunk_offset: list(_triangles_for_object(obj, bake_transform=True))
         for obj in static_objects
     }
 
@@ -668,10 +1541,129 @@ def build_mta_scene(
     max_col3_coordinate = 0.0
     mixed_render_models_split = 0
     blend_companion_models = 0
-    for obj in static_objects:
-        triangles = static_triangles[obj.name]
+    road_models: list[MtaModel] = []
+    lod_candidate_records: list[dict[str, Any]] = []
+    lod_decisions: list[dict[str, Any]] = []
+    large_scenery_promoted: list[dict[str, Any]] = []
+    spatial_chunks_before = 0
+    spatial_chunks_after = 0
+    blend_only_lod_excluded = 0
+    logical_pivot_errors: list[float] = []
+
+    static_offsets = {obj.chunk_offset for obj in static_objects}
+    for obj in scene.objects:
+        # WATER and SKYDOME are handled by dedicated world-scene paths and
+        # must not enter the LOD policy/report at all.
+        if obj.chunk_offset in static_offsets or _lod_special_reason(obj.name) in {"water", "sky", None}:
+            continue
+        lod_decisions.append(_lod_decision(
+            obj.name, list(_triangles_for_object(obj, bake_transform=False)), 0,
+            lod_min_size=lod_min_size, small_size=lod_small_size,
+            small_diagonal=lod_small_diagonal, min_triangles=lod_min_triangles,
+            repeated_triangles=lod_repeated_triangles, repeated_count=lod_repeated_count,
+        ))
+
+    def emit_world_part(
+        part: list[_Triangle], source_name: str, role: str, token: str, part_index: int,
+        lod_enabled: bool | None = None,
+    ) -> None:
+        nonlocal mixed_render_models_split, blend_companion_models, blend_only_lod_excluded
+        origin = _bounds_center(part)
+        layers = _render_layers(part, alpha_decisions, alpha_usage, textures)
+        if len(layers) > 1:
+            mixed_render_models_split += 1
+        base_layer = next(((name, values) for name, values in layers if name == "base"), None)
+        lod_id = None
+        eligible = lod_enabled if lod_enabled is not None else (
+            role in {"road", "static_scenery"} and max(_triangle_extent(part)) >= lod_min_size
+        )
+        if eligible and lod_mode != "off" and base_layer is not None:
+            detail_id = _model_id(track_id, "s", token, part_index)
+            lod_id = _lod_model_id(detail_id)
+        elif eligible and lod_mode != "off":
+            blend_only_lod_excluded += 1
+        unique_id = _unique_id(f"{track_id}:{token}:{part_index}")
+        base_model: MtaModel | None = None
+        for layer, layer_triangles in layers:
+            is_companion = layer == "blend" and len(layers) > 1
+            model_id = (
+                _model_id(track_id, "a", f"{token}:blend", part_index)
+                if is_companion
+                else _model_id(track_id, "s", token, part_index)
+            )
+            cell = cell_for_xy(origin[0], origin[1], chunk_size)
+            model = MtaModel(model_id, source_name, role, zone_name(track_id, cell), origin)
+            _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
+            _configure_model_render_state(model, layer)
+            if is_companion:
+                blend_companion_models += 1
+            if vertex_colors == "off":
+                model.colors.clear()
+            model.lod_distance = _detail_lod_distance(part) if lod_id else _auto_lod(model)
+            if role == "road" and layer == "base" and collision_mode == "model":
+                nonlocal road_degenerate_faces, max_col3_coordinate
+                road_degenerate_faces += _copy_visual_collision(model, collision_rules)
+                max_col3_coordinate = max(
+                    max_col3_coordinate,
+                    max((abs(value) for vertex in model.collision_vertices for value in vertex), default=0.0),
+                )
+                road_models.append(model)
+            if layer == "base":
+                base_model = model
+            models.append(model)
+            placements.append(MtaPlacement(
+                model_id, model.zone, "building", origin, (0.0, 0.0, 0.0), source_name,
+                lod_id if layer == "base" else None,
+                unique_id if layer == "base" else _unique_id(unique_id + ":blend"),
+            ))
+        if lod_id is not None and base_layer is not None and base_model is not None:
+            source_model = base_model
+            lod_model = MtaModel(
+                lod_id, source_name, "lod", source_model.zone, origin,
+                materials=list(source_model.materials), collision_kind="bounds",
+                lod_distance=_generated_lod_distance(part), render_layer="lod",
+                is_lod=True, lod_source_id=source_model.model_id, lod_target_ratio=lod_target_ratio,
+            )
+            models.append(lod_model)
+            placements.append(MtaPlacement(
+                lod_id, lod_model.zone, "building", origin, (0.0, 0.0, 0.0), source_name,
+                None, unique_id,
+            ))
+            lod_candidate_records.append({
+                "source": source_name,
+                "detail_model": source_model.model_id,
+                "lod_model": lod_id,
+                "extent": list(_triangle_extent(part)),
+                "triangles": len(base_layer[1]),
+                "role": role,
+            })
+        logical_pivot_errors.append(_length(_local_bounds_center([
+            tuple(vertex.position[axis] - origin[axis] for axis in range(3))
+            for triangle in part for vertex in triangle.vertices
+        ])))
+
+    report_progress("Building static models", 0, len(static_objects), None)
+    for static_index, obj in enumerate(static_objects, 1):
+        report_progress("Building static models", static_index, len(static_objects), obj.name)
+        triangles = static_triangles[obj.chunk_offset]
         is_road = obj.name.upper().startswith("RD_SECTION")
-        parts = _split_model_triangles(triangles, max_vertices, 255.0 if is_road else None)
+        role = "road" if is_road else "static_scenery"
+        decision = _lod_decision(
+            obj.name, triangles, 0, lod_min_size=lod_min_size, small_size=lod_small_size,
+            small_diagonal=lod_small_diagonal, min_triangles=lod_min_triangles,
+            repeated_triangles=lod_repeated_triangles, repeated_count=lod_repeated_count,
+            road=is_road,
+        )
+        lod_decisions.append(decision)
+        object_lod_enabled = lod_mode != "off" and decision["decision"] == "candidate"
+        spatial_chunks_before += 1
+        if object_lod_enabled:
+            chunk_values = list(_spatial_clip_triangles(triangles, chunk_size).values())
+            spatial_chunks_after += len(chunk_values)
+        else:
+            chunk_values = [triangles]
+            spatial_chunks_after += 1
+        parts = [part for chunk in chunk_values for part in _split_model_triangles(chunk, max_vertices, 255.0 if is_road else None)]
         if len(parts) > 1:
             road_split_sources.append(
                 {
@@ -681,38 +1673,46 @@ def build_mta_scene(
                 }
             )
         for part_index, part in enumerate(parts):
-            layers = _render_layers(part, alpha_decisions, alpha_usage, textures)
-            if len(layers) > 1:
-                mixed_render_models_split += 1
-            for layer, layer_triangles in layers:
-                is_companion = layer == "blend" and len(layers) > 1
-                origin = _bounds_center(layer_triangles)
-                cell = cell_for_xy(origin[0], origin[1], chunk_size)
-                model_id = (
-                    _model_id(track_id, "a", f"static:{obj.name}:{part_index}:blend", part_index)
-                    if is_companion
-                    else _model_id(track_id, "s", f"{obj.name}:{part_index}", part_index)
-                )
-                model = MtaModel(model_id, obj.name, "road" if is_road else "static", zone_name(track_id, cell), origin)
-                _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
-                _configure_model_render_state(model, layer)
-                if is_companion:
-                    blend_companion_models += 1
-                if vertex_colors == "off":
-                    model.colors.clear()
-                model.lod_distance = _auto_lod(model)
-                if is_road and collision_mode == "model":
-                    road_degenerate_faces += _copy_visual_collision(model, collision_rules)
-                    max_col3_coordinate = max(
-                        max_col3_coordinate,
-                        max((abs(value) for vertex in model.collision_vertices for value in vertex), default=0.0),
-                    )
-                models.append(model)
-                placements.append(MtaPlacement(model_id, model.zone, "building", origin, (0.0, 0.0, 0.0), obj.name))
+            emit_world_part(
+                part, obj.name, role, f"static:{obj.chunk_offset}:{obj.name}:{part_index}", part_index,
+                object_lod_enabled,
+            )
+
+    native_metrics = _native_collision_for_roads(
+        scene,
+        road_models,
+        collision_rules,
+        native_collision=native_collision,
+        native_secondary=native_secondary,
+        chunk_size=chunk_size,
+    ) if collision_mode == "model" else _native_collision_for_roads(
+        scene,
+        road_models,
+        collision_rules,
+        native_collision="off",
+        native_secondary=native_secondary,
+        chunk_size=chunk_size,
+    )
+    if native_metrics["native_collision_source"] == "hp2_track_collision_polygons":
+        road_degenerate_faces = 0
+        max_col3_coordinate = max(
+            max_col3_coordinate,
+            native_metrics["max_native_col3_local_coordinate"],
+        )
 
     warnings: list[str] = []
     water_quads: list[MtaWaterQuad] = []
+    water_generation: list[dict[str, Any]] = []
     water_source_triangles = 0
+    water_road_exclusion_triangles = []
+    for polygon in scene.track_collision_polygons:
+        if _native_collision_role(polygon) != "primary_road" or len(polygon.points_ps2) < 3:
+            continue
+        points = tuple((point.x, point.y, point.z) for point in polygon.points_ps2)
+        water_road_exclusion_triangles.extend(
+            (points[0], points[index], points[index + 1])
+            for index in range(1, len(points) - 1)
+        )
     excluded_scenery_placements: Counter[str] = Counter()
     variant_placements: dict[tuple[str, tuple[float, float, float]], list[tuple[Any, tuple[float, float, float], tuple[float, float, float]]]] = defaultdict(list)
     max_matrix_error = 0.0
@@ -721,6 +1721,11 @@ def build_mta_scene(
     prop_placement_corrections: list[float] = []
     max_pivot_world_reconstruction_error = 0.0
     for instance in scenery_instances:
+        if instance.object_name in road_names:
+            # Streaming sections may reference road records as placements.
+            # Roads are static source objects, not scenery props.
+            excluded_scenery_placements[instance.object_name] += 1
+            continue
         if _is_water_model(instance.object_name):
             water_object = templates.get(instance.object_name)
             if water_object is None:
@@ -728,7 +1733,18 @@ def build_mta_scene(
             else:
                 triangles = list(_triangles_for_object(water_object, bake_transform=False))
                 water_source_triangles += len(triangles)
-                water_quads.extend(_water_quads_for_triangles(triangles, instance.transform))
+                generated_water, generation_report = _water_quads_for_triangles(
+                    triangles,
+                    instance.transform,
+                    water_road_exclusion_triangles,
+                    road_padding=water_road_padding,
+                    edge_padding=water_edge_padding,
+                    minimum_fragment_area=water_min_fragment_area,
+                    snap_grid=water_snap_grid,
+                    boundary_tolerance=water_boundary_tolerance,
+                )
+                water_quads.extend(generated_water)
+                water_generation.append({"source": instance.object_name, **generation_report})
             excluded_scenery_placements[instance.object_name] += 1
             continue
         if _is_sky_model(instance.object_name):
@@ -745,58 +1761,95 @@ def build_mta_scene(
         max_matrix_error = max(max_matrix_error, error)
         variant_placements[(instance.object_name, _scale_signature(scale))].append((instance, position, rotation))
 
-    for variant_index, ((name, scale), entries) in enumerate(sorted(variant_placements.items())):
+    aggregate_water_simplified = len(water_quads) > _MTA_WATER_SAFE_QUAD_BUDGET
+    if aggregate_water_simplified:
+        water_quads = _coarse_water_quads(water_quads, _MTA_WATER_SAFE_QUAD_BUDGET)
+
+    sorted_variants = sorted(variant_placements.items())
+    report_progress("Building prop models", 0, len(sorted_variants), None)
+    for variant_index, ((name, scale), entries) in enumerate(sorted_variants, 1):
+        report_progress("Building prop models", variant_index, len(sorted_variants), name)
         obj = templates[name]
         triangles = _scaled_triangles(obj, scale)
         if not triangles:
             warnings.append(f"empty scenery template: {name}")
             continue
+        extent = _triangle_extent(triangles)
+        decision = _lod_decision(
+            name, triangles, len(entries), lod_min_size=lod_min_size,
+            small_size=lod_small_size, small_diagonal=lod_small_diagonal,
+            min_triangles=lod_min_triangles, repeated_triangles=lod_repeated_triangles,
+            repeated_count=lod_repeated_count,
+        )
+        decision["scale"] = list(scale)
+        lod_decisions.append(decision)
+        promoted_static = len(entries) == 1 and max(extent) >= lod_min_size
+        if promoted_static:
+            _instance, position, rotation = entries[0]
+            world_triangles = _transform_triangles(triangles, position, rotation)
+            chunks = _spatial_clip_triangles(world_triangles, chunk_size)
+            spatial_chunks_before += 1
+            spatial_chunks_after += len(chunks)
+            large_scenery_promoted.append({
+                "source": name,
+                "extent": list(extent),
+                "placements": 1,
+                "chunks": len(chunks),
+                "role": "static_scenery",
+            })
+            for chunk_index, (_cell, chunk_triangles) in enumerate(chunks.items()):
+                for part_index, part in enumerate(_split_model_triangles(chunk_triangles, max_vertices, None)):
+                    emit_world_part(
+                        part, name, "static_scenery",
+                        f"promoted:{name}:{scale}:{chunk_index}:{part_index}", chunk_index * 1000 + part_index,
+                        True,
+                    )
+            continue
         layers = _render_layers(triangles, alpha_decisions, alpha_usage, textures)
         if len(layers) > 1:
             mixed_render_models_split += 1
+        # All render companions share the full visual template pivot. This is
+        # the streaming anchor GTA uses, so an alpha-only subset cannot load at
+        # a different time or position from its opaque companion.
+        origin = _bounds_center(triangles)
+        prop_pivot_offsets_before.append(_length(origin))
+        adjusted_entries = []
+        sample_vertices = (
+            triangles[0].vertices[0].position,
+            triangles[len(triangles) // 2].vertices[1].position,
+            triangles[-1].vertices[2].position,
+        )
+        for instance, position, rotation in entries:
+            rotation_rows = compose_zxy_row(rotation)
+            correction = _row_transform_offset(origin, rotation_rows)
+            adjusted_position = tuple(position[axis] + correction[axis] for axis in range(3))
+            prop_placement_corrections.append(_length(correction))
+            for vertex in sample_vertices:
+                old_world = tuple(
+                    sum(vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3)) + position[axis]
+                    for axis in range(3)
+                )
+                local_vertex = tuple(vertex[axis] - origin[axis] for axis in range(3))
+                new_world = tuple(
+                    sum(local_vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3)) + adjusted_position[axis]
+                    for axis in range(3)
+                )
+                max_pivot_world_reconstruction_error = max(
+                    max_pivot_world_reconstruction_error,
+                    *(abs(old_world[axis] - new_world[axis]) for axis in range(3)),
+                )
+            adjusted_entries.append((instance, adjusted_position, rotation))
+
+        counts = Counter(cell_for_xy(position[0], position[1], chunk_size) for _instance, position, _rotation in adjusted_entries)
+        owner_cell = sorted(counts, key=lambda cell: (-counts[cell], cell))[0]
         for layer, layer_triangles in layers:
             is_companion = layer == "blend" and len(layers) > 1
-            origin = _bounds_center(layer_triangles)
-            prop_pivot_offsets_before.append(_length(origin))
-            adjusted_entries = []
-            sample_vertices = (
-                layer_triangles[0].vertices[0].position,
-                layer_triangles[len(layer_triangles) // 2].vertices[1].position,
-                layer_triangles[-1].vertices[2].position,
-            )
-            for instance, position, rotation in entries:
-                rotation_rows = compose_zxy_row(rotation)
-                correction = _row_transform_offset(origin, rotation_rows)
-                adjusted_position = tuple(position[axis] + correction[axis] for axis in range(3))
-                prop_placement_corrections.append(_length(correction))
-                for vertex in sample_vertices:
-                    old_world = tuple(
-                        sum(vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3))
-                        + position[axis]
-                        for axis in range(3)
-                    )
-                    local_vertex = tuple(vertex[axis] - origin[axis] for axis in range(3))
-                    new_world = tuple(
-                        sum(local_vertex[source_axis] * rotation_rows[source_axis][axis] for source_axis in range(3))
-                        + adjusted_position[axis]
-                        for axis in range(3)
-                    )
-                    max_pivot_world_reconstruction_error = max(
-                        max_pivot_world_reconstruction_error,
-                        *(abs(old_world[axis] - new_world[axis]) for axis in range(3)),
-                    )
-                adjusted_entries.append((instance, adjusted_position, rotation))
-
-            counts = Counter(
-                cell_for_xy(position[0], position[1], chunk_size)
-                for _instance, position, _rotation in adjusted_entries
-            )
-            owner_cell = sorted(counts, key=lambda cell: (-counts[cell], cell))[0]
             model_id = (
                 _model_id(track_id, "a", f"prop:{name}:{scale}:blend", variant_index)
                 if is_companion
                 else _model_id(track_id, "p", f"{name}:{scale}", variant_index)
             )
+            prop_lod_id = _lod_model_id(model_id) if decision["decision"] == "candidate" and lod_mode != "off" and not is_companion else None
             model = MtaModel(model_id, name, "prop", zone_name(track_id, owner_cell), origin)
             _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
             _configure_model_render_state(model, layer)
@@ -807,11 +1860,53 @@ def build_mta_scene(
                 model.colors.clear()
             model.lod_distance = prop_lod_distance
             models.append(model)
-            for instance, position, rotation in adjusted_entries:
+            for entry_index, (instance, position, rotation) in enumerate(adjusted_entries):
                 cell = cell_for_xy(position[0], position[1], chunk_size)
-                placements.append(MtaPlacement(model_id, zone_name(track_id, cell), "object", position, rotation, instance.object_name))
+                unique_id = _unique_id(f"{track_id}:prop:{name}:{scale}:{entry_index}") if prop_lod_id and layer == "base" else None
+                placements.append(MtaPlacement(model_id, zone_name(track_id, cell), "object", position, rotation, instance.object_name, prop_lod_id if layer == "base" else None, unique_id))
+            if prop_lod_id is not None and layer == "base":
+                lod_model = MtaModel(
+                    prop_lod_id, name, "lod", zone_name(track_id, owner_cell), origin,
+                    materials=list(model.materials), collision_kind="bounds",
+                    lod_distance=_generated_lod_distance(triangles), render_layer="lod",
+                    is_lod=True, lod_source_id=model.model_id, lod_target_ratio=lod_target_ratio,
+                )
+                models.append(lod_model)
+                for entry_index, (_instance, position, rotation) in enumerate(adjusted_entries):
+                    cell = cell_for_xy(position[0], position[1], chunk_size)
+                    unique_id = _unique_id(f"{track_id}:prop:{name}:{scale}:{entry_index}")
+                    placements.append(MtaPlacement(prop_lod_id, zone_name(track_id, cell), "object", position, rotation, name, None, unique_id))
 
     zones = sorted({placement.zone for placement in placements} | {model.zone for model in models})
+    lod_model_ids = {model.model_id for model in models if model.is_lod}
+    lod_placements = {
+        (placement.model_id, placement.unique_id): placement
+        for placement in placements if placement.model_id in lod_model_ids
+    }
+    lod_name_assignment_errors = [
+        {"detail": record["detail_model"], "lod": record["lod_model"], "expected": _lod_model_id(record["detail_model"])}
+        for record in lod_candidate_records
+        if record["lod_model"] != _lod_model_id(record["detail_model"])
+    ]
+    unresolved_lod_parents = []
+    max_lod_placement_difference = 0.0
+    for placement in placements:
+        if not placement.lod_parent:
+            continue
+        lod_placement = lod_placements.get((placement.lod_parent, placement.unique_id))
+        if lod_placement is None:
+            unresolved_lod_parents.append({"detail": placement.model_id, "lod": placement.lod_parent, "uniqueID": placement.unique_id})
+            continue
+        max_lod_placement_difference = max(
+            max_lod_placement_difference,
+            *(abs(placement.position[axis] - lod_placement.position[axis]) for axis in range(3)),
+            *(abs(placement.rotation[axis] - lod_placement.rotation[axis]) for axis in range(3)),
+        )
+    if lod_name_assignment_errors or unresolved_lod_parents or max_lod_placement_difference > 1e-8:
+        raise ValueError(
+            f"invalid LOD assignment: names={lod_name_assignment_errors[:5]}, unresolved={unresolved_lod_parents[:5]}, "
+            f"maximum transform difference={max_lod_placement_difference}"
+        )
     source_bounds = _bounds(_source_visual_points(static_triangles, scene, templates))
     output_bounds = _bounds(_output_visual_points(models, placements))
     bounds_error = 0.0
@@ -864,7 +1959,7 @@ def build_mta_scene(
         "excluded_scenery_placements": dict(sorted(excluded_scenery_placements.items())),
         "output_placements": len(placements),
         "prop_placements": sum(placement.element_type == "object" for placement in placements),
-        "static_models": sum(model.kind in {"road", "static"} for model in models),
+        "static_models": sum(model.kind in {"road", "static", "static_scenery"} for model in models),
         "road_source_models": len(road_source_objects),
         "road_models": sum(model.kind == "road" for model in models),
         "road_split_sources": road_split_sources,
@@ -881,7 +1976,9 @@ def build_mta_scene(
         "visual_triangles": sum(len(model.faces) for model in models),
         "source_expanded_triangles": source_expanded_triangles,
         "output_expanded_triangles": output_expanded_triangles,
-        "triangle_loss": source_expanded_triangles != output_expanded_triangles,
+        # Spatial clipping legitimately increases triangle count. World-bounds
+        # and per-cell coverage validation are the loss checks in this mode.
+        "triangle_loss": bounds_error > 0.01,
         "geometry_reuse_count": max(0, sum(placement.element_type == "object" for placement in placements) - sum(model.kind == "prop" for model in models)),
         "materials": len(referenced_texture_hashes),
         "missing_texture_hashes": [f"0x{value:08x}" for value in missing_texture_hashes],
@@ -891,7 +1988,7 @@ def build_mta_scene(
         "road_degenerate_collision_faces": road_degenerate_faces,
         "max_col3_local_coordinate": max_col3_coordinate,
         "track_collision_input_polygons": len(scene.track_collision_polygons),
-        "track_collision_used": False,
+        "track_collision_used": native_metrics["native_collision_source"] == "hp2_track_collision_polygons",
         "max_transform_error": max_matrix_error,
         "source_bounds": source_bounds,
         "output_bounds": output_bounds,
@@ -905,8 +2002,40 @@ def build_mta_scene(
         "missing_templates": sum(message.startswith("missing scenery template") for message in warnings),
         "chunk_size": chunk_size,
         "collision_mode": collision_mode,
+        "native_collision": native_collision,
+        "native_secondary": native_secondary,
+        "lod_mode": lod_mode,
+        "lod_min_size": lod_min_size,
+        "lod_small_size": lod_small_size,
+        "lod_small_diagonal": lod_small_diagonal,
+        "lod_min_triangles": lod_min_triangles,
+        "lod_repeated_triangles": lod_repeated_triangles,
+        "lod_repeated_count": lod_repeated_count,
+        "lod_target_ratio": lod_target_ratio,
+        "scene_role_counts": dict(Counter(model.kind for model in models if not model.is_lod)),
+        "large_props_promoted_to_static": large_scenery_promoted,
+        "lod_candidate_models": lod_candidate_records,
+        "lod_decisions": lod_decisions,
+        "lod_candidates": sum(item["decision"] == "candidate" for item in lod_decisions),
+        "lod_generated": sum(model.is_lod for model in models),
+        "lod_skipped_small": sum(item["decision"] == "skip" and item["category"] in {"small_prop", "small_vegetation"} for item in lod_decisions),
+        "lod_skipped_special": sum(item["decision"] == "skip" and item["category"] == "special" for item in lod_decisions),
+        "lod_skipped_low_complexity": sum(item["decision"] == "skip" and item["category"] == "low_complexity" for item in lod_decisions),
+        "lod_models": sum(model.is_lod for model in models),
+        "blend_only_lod_excluded": blend_only_lod_excluded,
+        "spatial_chunks_before": spatial_chunks_before,
+        "spatial_chunks_after": spatial_chunks_after,
+        "max_logical_pivot_error": max(logical_pivot_errors, default=0.0),
+        "unresolved_lod_parents": unresolved_lod_parents,
+        "lod_name_assignment_errors": lod_name_assignment_errors,
+        "lod_naming_rule": "replace first 3 detail-model characters with LOD",
+        "max_lod_placement_difference": max_lod_placement_difference,
+        "max_chunk_xy_extent": max((max(_vertices_extent(model.vertices)[:2]) for model in models if model.faces), default=0.0),
+        **native_metrics,
         "water_source_triangles": water_source_triangles,
         "water_quads": len(water_quads),
+        "water_generation": water_generation,
+        "water_budget_simplified": aggregate_water_simplified,
         "alpha": {
             **alpha_diagnostics(alpha_decisions, textures),
             "surface_modes": dict(

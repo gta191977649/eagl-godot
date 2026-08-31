@@ -14,3 +14,6 @@ map-tools-ps2 = "map_tools_ps2.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+map_tools_ps2 = ["_native/*.dll", "_native/*.txt"]

@@ -9,7 +9,7 @@ import pytest
 
 from map_tools_ps2.binary import IDENTITY4, Vec3, transform_point
 from map_tools_ps2.img_archive import ImgEntry, read_img_v2_directory, write_img_v2
-from map_tools_ps2.mta_export import _img_archive_declarations, _write_resource_xml, _write_staging, _write_water_dat
+from map_tools_ps2.mta_export import _img_archive_declarations, _prepare_eagle_lods, _write_resource_xml, _write_staging, _write_water_dat
 from map_tools_ps2.model import DecodedBlock, MeshObject, Scene, SceneryInstance, TrackCollisionPolygon
 from map_tools_ps2.mta_scene import MtaWaterQuad, build_mta_scene, cell_for_xy, compose_zxy_row, decompose_placement
 from map_tools_ps2.mta_txd import build_bgra_mip_chain, build_dxt_mip_chain, dxt_raster_format_flags, mip_dimensions
@@ -240,7 +240,7 @@ def test_mta_creates_txd_variants_for_one_texture_with_multiple_surface_states()
     assert {material.alpha_mode for model in result.models for material in model.materials} == {"MASK", "OPAQUE"}
 
 
-def test_mta_scene_reuses_scaled_prop_and_assigns_road_mesh_collision():
+def test_mta_scene_reuses_scaled_prop_and_assigns_native_road_collision():
     static = _triangle_object("RD_SECTION10_CHOP1", 1)
     prop = _triangle_object("PILLAR", 2)
     placement_a = SceneryInstance(0, "PILLAR", _matrix(rotation=(0, 0, 0), scale=(0.8, 1.2, 1.0), position=(20, 20, 0)), 3, 0)
@@ -269,12 +269,14 @@ def test_mta_scene_reuses_scaled_prop_and_assigns_road_mesh_collision():
     }
     road = next(model for model in result.models if model.kind == "road")
     assert road.collision_kind == "mesh"
-    assert road.collision_vertices == road.vertices
-    assert road.collision_faces == road.faces
+    assert road.collision_vertices == [(-5.0, -5.0, 0.0), (0.0, -5.0, 0.0), (-5.0, 0.0, 0.0)]
+    assert road.collision_faces == [(0, 1, 2)]
     assert prop_models[0].collision_kind == "bounds"
     assert not prop_models[0].collision_faces
     assert result.report["track_collision_input_polygons"] == 1
-    assert result.report["track_collision_used"] is False
+    assert result.report["track_collision_used"] is True
+    assert result.report["native_polygons_assigned"] == 1
+    assert result.report["native_polygons_unassigned"] == 0
     assert result.report["collision_models"] == 0
     assert not any(model.model_id.startswith("t31_c_") for model in result.models)
     assert max(len(model.vertices) for model in result.models) <= 60000
@@ -283,6 +285,107 @@ def test_mta_scene_reuses_scaled_prop_and_assigns_road_mesh_collision():
     assert result.report["prop_pivot_offset_after"]["max"] == pytest.approx(0.0, abs=1e-8)
     assert result.report["max_pivot_world_reconstruction_error"] < 1e-10
     assert result.report["bounds_error"] < 1e-6
+
+
+def test_lod_policy_skips_small_vegetation_and_reports_reason():
+    source = Scene(objects=[_triangle_object("XT_GRASSA_L1_00", 1)])
+    result = build_mta_scene(source, TextureLibrary({}), track_id=31, resource_name="TEST", collision_mode="bounds-only")
+
+    assert not any(model.is_lod for model in result.models)
+    decision = next(item for item in result.report["lod_decisions"] if item["source"] == "XT_GRASSA_L1_00")
+    assert decision["category"] == "small_vegetation"
+    assert decision["decision"] == "skip"
+    assert result.report["lod_skipped_small"] == 1
+
+
+def test_large_tree_vegetation_gets_lod_when_geometry_is_large():
+    tree = _triangle_object("XT_TREE_LARGE", 1)
+    source = Scene(
+        objects=[tree],
+        scenery_instances=[SceneryInstance(0, tree.name, _matrix(scale=(10, 10, 10)), 1, 0)],
+        scenery_template_offsets={1},
+    )
+    result = build_mta_scene(
+        source, TextureLibrary({}), track_id=31, resource_name="TEST",
+        collision_mode="bounds-only", lod_min_triangles=0,
+    )
+
+    decision = next(item for item in result.report["lod_decisions"] if item["source"] == tree.name)
+    assert decision["category"] == "vegetation"
+    assert decision["reason"] == "large_vegetation"
+    assert any(model.is_lod for model in result.models)
+
+
+@pytest.mark.parametrize("name", ["WATER", "SKYDOME", "SKYDOME_ENVMAP"])
+def test_lod_policy_directly_skips_water_and_sky(name):
+    source = Scene(objects=[_triangle_object(name, 1)])
+    result = build_mta_scene(source, TextureLibrary({}), track_id=31, resource_name="TEST", collision_mode="bounds-only")
+
+    assert not any(model.is_lod for model in result.models)
+    assert not any(item["source"] == name for item in result.report["lod_decisions"])
+
+
+@pytest.mark.parametrize("name", ["SHD_S10_CHOP1", "TRACK_HELICOPTER"])
+def test_lod_policy_excludes_other_special_models(name):
+    source = Scene(objects=[_triangle_object(name, 1)])
+    result = build_mta_scene(source, TextureLibrary({}), track_id=31, resource_name="TEST", collision_mode="bounds-only")
+
+    assert not any(model.is_lod for model in result.models)
+    decision = next(item for item in result.report["lod_decisions"] if item["source"] == name)
+    assert decision["category"] == "special"
+    assert decision["decision"] == "skip"
+
+
+def test_repeated_small_prop_does_not_get_lod():
+    prop = _triangle_object("XS_TINY_PROP", 2)
+    placements = [
+        SceneryInstance(0, prop.name, _matrix(scale=(5, 5, 5), position=(index * 100, 0, 0)), 3, index)
+        for index in range(40)
+    ]
+    result = build_mta_scene(
+        Scene(objects=[prop], scenery_instances=placements, scenery_template_offsets={2}),
+        TextureLibrary({}), track_id=31, resource_name="TEST", collision_mode="bounds-only",
+    )
+
+    assert not any(model.is_lod for model in result.models)
+    decision = next(item for item in result.report["lod_decisions"] if item["source"] == prop.name)
+    assert decision["placement_count"] == 40
+    assert decision["category"] == "small_prop"
+
+
+def test_repeated_medium_high_complexity_prop_gets_lod():
+    vertices = []
+    texcoords = []
+    packed_values = []
+    for index in range(600):
+        x = float(index % 20)
+        y = float(index // 20)
+        vertices.extend((Vec3(x, y, 0), Vec3(x + 10, y, 0), Vec3(x, y + 10, 0)))
+        texcoords.extend(((0, 0), (1, 0), (0, 1)))
+        packed_values.extend((0xFFFF, 0xFFFF, 0xFFFF))
+    prop = MeshObject(
+        "XS_REPEATED_COMPLEX", 2, IDENTITY4,
+        (DecodedBlock(VifVertexRun(tuple(vertices), tuple(texcoords), tuple(packed_values), None, None), primitive_mode="triangles"),),
+        (), 123,
+    )
+    placements = [
+        SceneryInstance(0, prop.name, _matrix(scale=(7, 7, 7), position=(index * 100, 0, 0)), 3, index)
+        for index in range(32)
+    ]
+    result = build_mta_scene(
+        Scene(objects=[prop], scenery_instances=placements, scenery_template_offsets={2}),
+        TextureLibrary({}), track_id=31, resource_name="TEST", collision_mode="bounds-only",
+        lod_min_size=1000.0, lod_small_size=60.0,
+    )
+
+    # The 70-unit prop is promoted neither to a static object nor to a LOD by
+    # size alone; the repeated-placement rule is what makes it a candidate.
+    assert any(model.is_lod for model in result.models)
+    decision = next(item for item in result.report["lod_decisions"] if item["source"] == prop.name)
+    assert decision["decision"] == "candidate"
+    assert decision["reason"] == "geometry_or_reuse_threshold"
+    assert all(model.lod_distance == 299.0 for model in result.models if not model.is_lod)
+    assert result.report["lod_generated"] >= 1
 
 
 def test_mta_splits_mixed_blend_model_and_writes_standard_alpha_flags(tmp_path):
@@ -374,6 +477,79 @@ def test_mta_scene_deduplicates_water_before_generating_quads():
     assert result.report["excluded_scenery_placements"] == {"WATER": 1}
     assert result.report["water_source_triangles"] == 1
     assert len(result.water_quads) == 1
+    water_report = result.report["water_generation"][0]
+    assert water_report["source"] == "WATER"
+    assert water_report["generation_mode"] == "edge_aware_trapezoid_decomposition"
+    assert water_report["scanline_intervals"] == 1
+    assert water_report["quads"] == 1
+    assert water_report["safe_quad_budget"] == 120
+    assert water_report["height_layers"] == 1
+    assert water_report["road_exclusion_bands"] == 0
+    assert water_report["shared_edge_mismatches"] == 0
+    assert water_report["edge_padding"] == 8.0
+    assert water_report["water_area_after_edge_padding"] > water_report["water_area_before_road_clip"]
+    assert water_report["corner_order"] == "SW_SE_NW_NE"
+    south_west, south_east, north_west, north_east = result.water_quads[0].corners
+    assert south_west[0:1] == (10.0,)
+    assert south_east[0:1] == (20.0,)
+    assert south_west[1] < -20.0
+    assert north_west[0] < 10.0
+    assert north_east[0] > north_west[0]
+
+
+def test_mta_water_cells_are_removed_when_hp2_primary_road_overlaps_them():
+    water = _triangle_object("WATER", 4)
+    transform = _matrix(rotation=(0, 0, 0), scale=(1, 1, 1))
+    road = TrackCollisionPolygon(
+        0, 0, 1, 0x00, 4,
+        (Vec3(0, -50, 0), Vec3(50, -50, 0), Vec3(50, 0, 0), Vec3(0, 0, 0)),
+        0, 0,
+    )
+    source = Scene(
+        objects=[water],
+        scenery_instances=[SceneryInstance(0, "WATER", transform, 100, 0)],
+        scenery_template_offsets={4},
+        track_collision_polygons=[road],
+    )
+
+    result = build_mta_scene(source, TextureLibrary({}), track_id=31, resource_name="TEST", water_edge_padding=0.0)
+
+    assert result.water_quads == []
+    assert result.report["water_generation"][0]["road_exclusion_bands"] == 1
+    assert result.report["water_generation"][0]["water_area_after_road_clip"] == 0.0
+
+
+def test_mta_water_union_removes_internal_triangle_seam():
+    first = VifVertexRun(
+        vertices=(Vec3(0, 0, 0), Vec3(10, 0, 0), Vec3(0, 10, 0)),
+        texcoords=((0, 0), (1, 0), (0, 1)),
+        packed_values=(0xFFFF, 0x83E0, 0x801F), header=None, tri_cull=None,
+    )
+    second = VifVertexRun(
+        vertices=(Vec3(10, 0, 0), Vec3(10, 10, 0), Vec3(0, 10, 0)),
+        texcoords=((1, 0), (1, 1), (0, 1)),
+        packed_values=(0xFFFF, 0x83E0, 0x801F), header=None, tri_cull=None,
+    )
+    water = MeshObject(
+        "WATER", 4,
+        IDENTITY4,
+        (DecodedBlock(first, primitive_mode="triangles"), DecodedBlock(second, primitive_mode="triangles")),
+        (), 123,
+    )
+    source = Scene(
+        objects=[water],
+        scenery_instances=[SceneryInstance(0, "WATER", _matrix(rotation=(0, 0, 0), scale=(1, 1, 1)), 1, 0)],
+        scenery_template_offsets={4},
+    )
+
+    result = build_mta_scene(source, TextureLibrary({}), track_id=31, resource_name="TEST", water_edge_padding=0.0)
+
+    report = result.report["water_generation"][0]
+    assert len(result.water_quads) == 1
+    assert report["water_union_components"] == 1
+    assert report["water_area_before_road_clip"] == pytest.approx(100.0)
+    assert report["water_area_after_road_clip"] == pytest.approx(100.0)
+    assert report["shared_edge_mismatches"] == 0
 
 
 def test_prop_recentering_preserves_world_vertices_with_negative_nonuniform_scale():
@@ -440,6 +616,20 @@ def test_water_dat_is_generated_from_scene_mesh_with_offset(tmp_path):
     assert values[0:3] == [11, -18, 5]
     assert values[7:10] == [14, -18, 5]
     assert values[-1] == 1
+
+
+def test_water_dat_rejects_invalid_mta_corner_order_and_pool_overflow(tmp_path):
+    scene = build_mta_scene(Scene(), TextureLibrary({}), track_id=31, resource_name="TEST")
+    scene.water_quads = [
+        MtaWaterQuad(((0, 10, 0), (10, 0, 0), (0, 0, 0), (10, 10, 0)))
+    ]
+    with pytest.raises(ValueError, match="SW,SE,NW,NE"):
+        _write_water_dat(tmp_path, None, scene)
+
+    valid = MtaWaterQuad(((0, 0, 0), (10, 0, 0), (0, 10, 0), (10, 10, 0)))
+    scene.water_quads = [valid] * 121
+    with pytest.raises(ValueError, match="safe MTA pool budget is 120"):
+        _write_water_dat(tmp_path, None, scene)
 
 
 def test_resource_xml_uses_global_names_for_default_img_archives(tmp_path):
@@ -553,3 +743,103 @@ def test_legacy_track_collision_modes_are_rejected():
             resource_name="TEST",
             collision_mode="track",
         )
+
+
+def test_large_single_scenery_is_promoted_chunked_and_gets_linked_lod(tmp_path):
+    prop = _triangle_object("MOUNTAIN", 2)
+    placement = SceneryInstance(
+        0,
+        "MOUNTAIN",
+        _matrix(rotation=(0, 0, 0), scale=(80, 80, 1), position=(-50, -50, 0)),
+        3,
+        0,
+    )
+    source = Scene(objects=[prop], scenery_instances=[placement], scenery_template_offsets={2})
+    result = build_mta_scene(
+        source, TextureLibrary({}), track_id=31, resource_name="TEST",
+        collision_mode="bounds-only", chunk_size=300,
+    )
+
+    detail = [model for model in result.models if model.kind == "static_scenery"]
+    lods = [model for model in result.models if model.is_lod]
+    assert detail and lods
+    assert all(model.model_id == "LOD" + model.lod_source_id[3:] for model in lods)
+    assert all(placement.element_type == "building" for placement in result.placements)
+    assert result.report["large_props_promoted_to_static"][0]["source"] == "MOUNTAIN"
+    assert all(model.lod_distance == 299.0 for model in detail)
+    assert result.report["max_chunk_xy_extent"] <= 300.000001
+    assert result.report["max_logical_pivot_error"] <= 0.001
+
+    _write_resource_xml(result, tmp_path, "tester", [tmp_path / "imgs" / "dff.img"], (0, 0, 0))
+    nodes = [
+        node for path in (tmp_path / "zones").rglob("*.map")
+        for node in ET.parse(path).getroot() if node.tag == "building"
+    ]
+    linked = [node for node in nodes if "lodParent" in node.attrib]
+    assert linked
+    by_pair = {(node.attrib["id"], node.attrib.get("uniqueID")): node for node in nodes}
+    for node in linked:
+        assert (node.attrib["lodParent"], node.attrib["uniqueID"]) in by_pair
+        assert node.attrib["lodParent"] == "LOD" + node.attrib["id"][3:]
+    for path in (tmp_path / "zones").rglob("*.definition"):
+        ids = [node.attrib["id"] for node in ET.parse(path).getroot().findall("definition")]
+        first_lod = next((index for index, value in enumerate(ids) if value.startswith("LOD")), len(ids))
+        assert all(not value.startswith("LOD") for value in ids[:first_lod])
+        assert all(value.startswith("LOD") for value in ids[first_lod:])
+
+
+def test_repeated_large_template_remains_reusable_prop():
+    prop = _triangle_object("REPEATED_MOUNTAIN", 2)
+    source = Scene(
+        objects=[prop],
+        scenery_instances=[
+            SceneryInstance(0, prop.name, _matrix(scale=(20, 20, 1), position=(0, 0, 0)), 3, 0),
+            SceneryInstance(0, prop.name, _matrix(scale=(20, 20, 1), position=(500, 0, 0)), 4, 1),
+        ],
+        scenery_template_offsets={2},
+    )
+    result = build_mta_scene(source, TextureLibrary({}), track_id=31, resource_name="TEST", collision_mode="bounds-only")
+    assert len([model for model in result.models if model.kind == "prop"]) == 1
+    assert len([placement for placement in result.placements if placement.element_type == "object"]) == 2
+    assert result.report["large_props_promoted_to_static"] == []
+
+
+def test_mixed_render_companions_share_streaming_pivot():
+    source = Scene(objects=[_mixed_alpha_object()])
+    textures = TextureLibrary({100: _alpha_texture("SOLID", blend=False), 200: _alpha_texture("SHADOW", blend=True)})
+    result = build_mta_scene(source, textures, track_id=31, resource_name="TEST", collision_mode="bounds-only")
+    base = next(model for model in result.models if model.render_layer == "base")
+    blend = next(model for model in result.models if model.render_layer == "blend")
+    assert base.origin == blend.origin
+    positions = {placement.position for placement in result.placements}
+    assert positions == {base.origin}
+
+
+def test_eagle_meshoptimizer_lod_preserves_source_texture_material_and_uv():
+    texture = _alpha_texture("MOUNTAIN_ROCK", blend=False)
+    prop = _triangle_object("MOUNTAIN", 2, texture_hashes=(100,))
+    placement = SceneryInstance(
+        0, prop.name,
+        _matrix(rotation=(0, 0, 0), scale=(80, 80, 1), position=(-50, -50, 0)),
+        3, 0,
+    )
+    result = build_mta_scene(
+        Scene(objects=[prop], scenery_instances=[placement], scenery_template_offsets={2}),
+        TextureLibrary({100: texture}), track_id=31, resource_name="TEST", collision_mode="bounds-only",
+    )
+    _prepare_eagle_lods(result)
+
+    lods = [model for model in result.models if model.is_lod]
+    assert lods
+    sources = {model.model_id: model for model in result.models if not model.is_lod}
+    for lod in lods:
+        source = sources[lod.lod_source_id]
+        assert [material.texture_name for material in lod.materials] == [material.texture_name for material in source.materials]
+        assert set(lod.uvs) <= set(source.uvs)
+        assert all(0 <= material < len(lod.materials) for material in lod.face_materials)
+    assert {entry["algorithm"] for entry in result.report["lod_generation"]} == {
+        "MTA-Eagle-Editor meshoptimizer 0.6.2"
+    }
+    assert {entry["texture_strategy"] for entry in result.report["lod_generation"]} == {
+        "reuse source track TXD with exact material names and UVs"
+    }

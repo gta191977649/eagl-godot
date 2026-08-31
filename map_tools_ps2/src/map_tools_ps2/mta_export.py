@@ -7,11 +7,14 @@ import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .img_archive import ImgEntry, read_img_v2_directory, write_img_v2
-from .mta_scene import MtaScene
+from .mta_scene import MtaScene, _MTA_WATER_SAFE_QUAD_BUDGET
+from .mta_lod import generate_eagle_lod
+from .progress import report_progress
 
 
 DEFAULT_BLENDER_PATHS = (
@@ -108,6 +111,9 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
                 "draw_last": model.draw_last,
                 "additive": model.additive,
                 "no_zbuffer_write": model.no_zbuffer_write,
+                "is_lod": model.is_lod,
+                "lod_source_id": model.lod_source_id,
+                "lod_target_ratio": model.lod_target_ratio,
             }
         )
     manifest = {
@@ -116,10 +122,48 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
         "textures": texture_records,
         "material_catalog": material_catalog,
         "txd_file": f"track{scene.track_id:02d}.txd",
+        "lod_mode": scene.report.get("lod_mode", "off"),
+        "lod_generation": scene.report.get("lod_generation", []),
     }
     path = root / "mta_stage.json"
     path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
     return path
+
+
+def _prepare_eagle_lods(scene: MtaScene) -> None:
+    """Replace LOD placeholders with Eagle Editor meshoptimizer geometry."""
+    source_models = {model.model_id: model for model in scene.models if not model.is_lod}
+    results: list[dict[str, Any]] = []
+    skipped: set[str] = set()
+    for lod_model in [model for model in scene.models if model.is_lod]:
+        source = source_models.get(lod_model.lod_source_id or "")
+        if source is None:
+            raise RuntimeError(f"LOD source model is missing: {lod_model.lod_source_id}")
+        generated, result = generate_eagle_lod(source, lod_model)
+        results.append(result)
+        if not generated:
+            if scene.report.get("lod_mode") == "required":
+                raise RuntimeError(
+                    f"Eagle Editor LOD generation rejected {source.model_id}: {result.get('attempts')}"
+                )
+            skipped.add(lod_model.model_id)
+    if skipped:
+        scene.models[:] = [model for model in scene.models if model.model_id not in skipped]
+        scene.placements[:] = [
+            replace(placement, lod_parent=None) if placement.lod_parent in skipped else placement
+            for placement in scene.placements
+            if placement.model_id not in skipped
+        ]
+        scene.zones[:] = sorted({placement.zone for placement in scene.placements} | {model.zone for model in scene.models})
+    scene.report.update(
+        {
+            "lod_generator": "MTA-Eagle-Editor meshoptimizer 0.6.2 / meshoptimizer 0.25",
+            "lod_texture_strategy": "source track TXD; exact material texture names and source UVs",
+            "lod_generation": results,
+            "lod_models": sum(model.is_lod for model in scene.models),
+            "lod_models_skipped": len(skipped),
+        }
+    )
 
 
 def _run_blender(
@@ -221,6 +265,11 @@ def _write_water_dat(
         target.write_bytes(content)
         return {"status": "copied", "source": str(source), "bytes": len(content)}
     if scene is not None and scene.water_quads:
+        if len(scene.water_quads) > _MTA_WATER_SAFE_QUAD_BUDGET:
+            raise ValueError(
+                f"water.dat would contain {len(scene.water_quads)} quads; "
+                f"safe MTA pool budget is {_MTA_WATER_SAFE_QUAD_BUDGET}"
+            )
         lines = []
         source_points = [
             tuple(corner[axis] + offset[axis] for axis in range(3))
@@ -231,6 +280,7 @@ def _write_water_dat(
         emitted_points: list[tuple[float, float, float]] = []
         for water in scene.water_quads:
             values: list[str] = []
+            emitted_quad: list[tuple[float, float, float]] = []
             for corner in water.corners:
                 source_point = tuple(corner[axis] + offset[axis] for axis in range(3))
                 emitted_point = (
@@ -241,8 +291,20 @@ def _write_water_dat(
                 if emitted_point != source_point:
                     clipped_corners += 1
                 emitted_points.append(emitted_point)
+                emitted_quad.append(emitted_point)
                 values.extend(_number(value) for value in emitted_point)
                 values.extend(("0", "0", "1", "0"))
+            south_west, south_east, north_west, north_east = emitted_quad
+            if not (
+                south_west[0] < south_east[0]
+                and north_west[0] < north_east[0]
+                and south_west[1] < north_west[1]
+                and south_east[1] < north_east[1]
+            ):
+                raise ValueError(
+                    "water.dat contains a quad that MTA CreateQuad would reject; "
+                    f"expected SW,SE,NW,NE but got {emitted_quad}"
+                )
             values.append(str(water.water_type))
             lines.append(" ".join(values))
         content = ("\n".join(lines) + "\n").encode("ascii")
@@ -260,6 +322,8 @@ def _write_water_dat(
             "source_bounds": bounds(source_points),
             "bounds": bounds(emitted_points),
             "clipped_corners": clipped_corners,
+            "safe_quad_budget": _MTA_WATER_SAFE_QUAD_BUDGET,
+            "corner_order": "SW_SE_NW_NE",
         }
     else:
         # EagleLoader probes every map resource for water.dat. A single
@@ -287,7 +351,10 @@ def _write_resource_xml(
         zone_dir = zones_root / zone
         zone_dir.mkdir(parents=True, exist_ok=True)
         definition_root = ET.Element("zoneDefinitions")
-        for model in sorted(definitions_by_zone[zone], key=lambda value: value.model_id):
+        # EagleLoader/GTA convention: register high-detail definitions first,
+        # then their LOD* models. This also keeps the final definition from
+        # accidentally being a detail model while the async loader drains.
+        for model in sorted(definitions_by_zone[zone], key=lambda value: (value.is_lod, value.model_id.lower())):
             attrs = {
                 "id": model.model_id,
                 "dff": model.model_id,
@@ -315,11 +382,11 @@ def _write_resource_xml(
 
         map_root = ET.Element("map")
         ET.SubElement(map_root, "info", {"name": "map_tools_ps2", "author": author, "version": "1.0"})
-        for placement in sorted(placements_by_zone[zone], key=lambda value: (value.model_id, value.position)):
-            ET.SubElement(
-                map_root,
-                placement.element_type,
-                {
+        for placement in sorted(
+            placements_by_zone[zone],
+            key=lambda value: (value.model_id.upper().startswith("LOD"), value.model_id.lower(), value.position),
+        ):
+            placement_attrs = {
                     "id": placement.model_id,
                     "posX": _number(placement.position[0] + offset[0]),
                     "posY": _number(placement.position[1] + offset[1]),
@@ -328,8 +395,12 @@ def _write_resource_xml(
                     "rotY": _number(placement.rotation[1]),
                     "rotZ": _number(placement.rotation[2]),
                     "overrideFlags": "double_sided",
-                },
-            )
+                }
+            if placement.lod_parent:
+                placement_attrs["lodParent"] = placement.lod_parent
+            if placement.unique_id:
+                placement_attrs["uniqueID"] = placement.unique_id
+            ET.SubElement(map_root, placement.element_type, placement_attrs)
         _indent_write(map_root, zone_dir / f"{zone}.map")
 
     zone_lines = []
@@ -399,8 +470,12 @@ def export_mta_resource(
         raise FileExistsError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     blender = find_blender(blender_path)
+    report_progress("Preparing LOD meshes", 0, 4, None)
+    _prepare_eagle_lods(scene)
+    report_progress("Preparing LOD meshes", 1, 4, None)
     stage_dir = Path(tempfile.mkdtemp(prefix=f"{scene.resource_name}_mta_", dir=output_dir.parent))
     try:
+        report_progress("Running Blender export", 2, 4, None)
         loose_dir, blender_log, bridge_report = _run_blender(scene, textures, stage_dir, blender, dragonff_path)
         img_dir = output_dir / "imgs"
         img_dir.mkdir(parents=True, exist_ok=True)
@@ -418,6 +493,11 @@ def export_mta_resource(
             archive_paths.extend(archives)
             archive_report[stem] = stats
         water_report = _write_water_dat(output_dir, water_dat, scene, offset)
+        water_path = output_dir / "water.dat"
+        if not water_path.is_file():
+            raise RuntimeError(f"water.dat was not written to the MTA resource: {water_path}")
+        water_report = {**water_report, "file": "water.dat", "path": str(water_path)}
+        report_progress("Writing MTA resource", 3, 4, None)
         img_declarations = _write_resource_xml(scene, output_dir, author, archive_paths, offset)
 
         dff_entries = {name[:-4] for archive in archive_paths if archive.name.startswith("dff") for _off, _size, name in read_img_v2_directory(archive) if name.endswith(".dff")}
@@ -434,6 +514,9 @@ def export_mta_resource(
             if version_match:
                 dragonff_version = version_match.group(1)
         dff_center_error = float(bridge_report.get("max_prop_local_aabb_center_error", 0.0))
+        lod_readback = bridge_report.get("lod", [])
+        generated_lods = [value for value in lod_readback if value.get("status") == "generated"]
+        skipped_lod_records = [value for value in lod_readback if value.get("status") == "skipped"]
         report = dict(scene.report)
         report.update(
             {
@@ -467,11 +550,26 @@ def export_mta_resource(
                 "blender_status": "ok" if '"status": "ok"' in blender_log else "completed",
                 "dragonff_readback": bridge_report,
                 "dff_prop_local_aabb_center_error": dff_center_error,
+                "dff_max_local_aabb_center_error": bridge_report.get("max_local_aabb_center_error", 0.0),
+                "high_detail_models": sum(not model.is_lod for model in scene.models),
+                "generated_lod_models": len(generated_lods),
+                "skipped_lod_models": len(skipped_lod_records),
+                "lod_generation": lod_readback,
+                "lod_triangle_ratios": [
+                    value["output_triangles"] / value["source_triangles"]
+                    for value in generated_lods if value.get("source_triangles")
+                ],
+                "max_dff_vertices": bridge_report.get("max_dff_vertices", 0),
+                "max_dff_col_bounds_error": max(
+                    float(bridge_report.get("max_bounds_only_col_error", 0.0)),
+                    float(bridge_report.get("max_mesh_col_bounds_error", 0.0)),
+                ),
                 "txd_alpha": bridge_report.get("txd_alpha", {}),
             }
         )
         report_path = output_dir / f"{scene.resource_name}.mta.report.json"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        report_progress("Writing MTA resource", 4, 4, report_path.name)
         if (
             report["missing_dff"]
             or report["missing_col"]
@@ -479,10 +577,11 @@ def export_mta_resource(
             or report["col_without_same_name_dff"]
         ):
             raise RuntimeError(f"MTA archive validation failed; see {report_path}")
-        if dff_center_error > 0.001:
+        logical_center_error = float(scene.report.get("max_logical_pivot_error", 0.0))
+        if logical_center_error > 0.001:
             raise RuntimeError(
-                "DragonFF readback found an off-center prop DFF "
-                f"(maximum local AABB center error {dff_center_error:.9g}); see {report_path}"
+                "MTA scene contains an off-center logical streaming chunk "
+                f"(maximum combined AABB center error {logical_center_error:.9g}); see {report_path}"
             )
         if keep_intermediate:
             # Debug staging must never become part of the MTA resource.

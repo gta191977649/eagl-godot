@@ -4,3 +4,4 @@ Version: 0.1.0
 Summary: Experimental Need for Speed Hot Pursuit 2 PS2 track converter
 Requires-Python: >=3.10
 Requires-Dist: tqdm>=4.0
+Requires-Dist: shapely>=2.0

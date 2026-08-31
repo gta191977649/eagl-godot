@@ -55,6 +55,8 @@ export              Export OBJ or GLB.
 export-dual         Export native-primitive GLB plus ps2mesh debug JSON/BIN.
 export-optimized    Export an optimized GLB and/or Binary FBX.
 export-mta          Export a complete MTA:SA EagleLoader resource.
+export-skybox       Export SKYDOME/SKYBOX textures as PNG files plus a manifest.
+export-route        Export HP2 AI driving waypoints and route branch edges.
 export-godot        Export a Godot-optimized track package.
 export-placement    Export scenery prop placement coordinates to text.
 decompress          Decompress a COMP/LZC bundle.
@@ -213,6 +215,33 @@ Defaults:
   reserved for non-default archive base names.
 - An empty compatibility `water.dat` is generated unless `--water-dat` supplies
   a real EagleLoader water file.
+
+## export-skybox
+
+Exports textures referenced by `SKYDOME*` and `*SKYBOX*` scene objects as PNG
+files and writes `skybox_manifest.json`. The output directory must be new or
+empty.
+
+```powershell
+.\.venv\Scripts\python.exe -m map_tools_ps2 export-skybox `
+  --game-dir D:\ps2_game\GAME `
+  --track 31 `
+  --output D:\dev\eagl-godot\map_tools_ps2\out\HP2_TRACK31\skybox
+```
+
+## export-route
+
+Exports the HP2 `TRACK_ROUTE` AI driving waypoints and
+`TRACK_ROUTE_EDGES` branch graph to a detailed `route.txt`. The primary
+`position=x,y,z` field is directly usable as MTA XYZ coordinates. A companion
+`route.report.json` contains validation counts.
+
+```powershell
+.\.venv\Scripts\python.exe -m map_tools_ps2 export-route `
+  --game-dir D:\ps2_game\GAME `
+  --track 31 `
+  --output D:\dev\eagl-godot\map_tools_ps2\out\HP2_TRACK31\route.txt
+```
 - Model collision is the default: every road DFF receives a same-name COL3
   built from its visible mesh. Props, vegetation, `SKYDOME`, and other distant
   scenery receive a same-name bounds-only COL3 with no physical primitives.
@@ -230,6 +259,16 @@ When requested, debug staging is written beside the resource as
 all physical collision while retaining one streaming-bounds COL per DFF. The
 legacy `track`, `hybrid`, `visual`, and `none` modes are intentionally rejected.
 
+LOD selection is automatic by default. The exporter combines model category,
+placement-scaled bounds, triangle count, and placement reuse. Small props and
+small vegetation are skipped; large structures, trees, and sufficiently
+complex/reused props receive generated LODs. `WATER`, `SKYDOME`, shadow
+helpers, and `TRACK_HELICOPTER` are excluded, while `RD_SECTION*` keeps the
+road-specific LOD path. Tune the policy with `--lod-small-size`,
+`--lod-small-diagonal`, `--lod-min-triangles`, `--lod-repeated-triangles`, and
+`--lod-repeated-count`. The report includes per-model `lod_decisions` with the
+category, reason, dimensions, triangle count, and placement count.
+
 Arguments:
 
 ```text
@@ -241,6 +280,11 @@ input                         TRACKB##.BUN or TRACKB##.LZC path.
 --texture-dir TEXTURE_DIR     Directory containing track texture BIN files.
 --with-placement              Place scenery props using instance coordinate records.
 --vertex-colors always|auto|off
+--lod-small-size N             Small-prop maximum dimension; default 60.
+--lod-small-diagonal N         Small-prop maximum diagonal; default 80.
+--lod-min-triangles N          Minimum triangle count; default 300.
+--lod-repeated-triangles N     Reused-prop triangle threshold; default 600.
+--lod-repeated-count N         Reused-prop placement threshold; default 32.
 ```
 
 Example:
@@ -509,6 +553,19 @@ TEX##LOCATION.BIN
 ```
 
 Pass that directory with `--texture-dir` when exporting textured GLB files.
+
+## SOUND MP3 Export
+
+The GUI SOUND tab scans the complete game `ZZDATA` directory. It exports JBC music,
+speech PCK streams, embedded and raw UI/SFX banks, and `NEWE*.MSB` engine banks as
+MP3 while preserving each source stream's native sample rate.
+
+```powershell
+map-tools-ps2 export-sound --zzdata-dir "D:\ps2_game\GAME\ZZDATA" -o ".\out\SOUND_MP3"
+```
+
+FFmpeg with `libmp3lame` must be available in `PATH`. Export details and failures
+are recorded in `sound_manifest.json`.
 
 For texture BIN layout, PS2 swizzle decode, palette decode, and material alpha rules, see [docs/hp2_ps2_texture_decoding.md](/Users/nurupo/Desktop/dev/eagl-godot/map_tools_ps2/docs/hp2_ps2_texture_decoding.md).
 

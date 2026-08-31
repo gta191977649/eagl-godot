@@ -67,8 +67,11 @@ def load_texture_library_for_track(track_path: Path, texture_dir: Path | None = 
     return TextureLibrary(textures)
 
 
-def read_ps2_tpk(path: Path) -> tuple[Texture, ...]:
-    data = path.read_bytes()
+def read_ps2_tpk(path: Path, *, flip_vertical: bool = False) -> tuple[Texture, ...]:
+    return read_ps2_tpk_bytes(path.read_bytes(), path, flip_vertical=flip_vertical)
+
+
+def read_ps2_tpk_bytes(data: bytes, source_path: Path, *, flip_vertical: bool = False) -> tuple[Texture, ...]:
     chunks = parse_chunks(data)
     entry_chunk = next((chunk for chunk in walk_chunks(chunks) if chunk.chunk_id == 0x30300003), None)
     data_chunk = next((chunk for chunk in walk_chunks(chunks) if chunk.chunk_id == 0x30300004), None)
@@ -120,6 +123,8 @@ def read_ps2_tpk(path: Path) -> tuple[Texture, ...]:
             )
         except ValueError:
             continue
+        if flip_vertical:
+            rgba = _flip_rgba_vertical(rgba, width, height)
         alpha_mode, alpha_cutoff = _material_alpha_properties_for_rgba(rgba, is_any_semitransparency)
         alpha_values = rgba[3::4]
         textures.append(
@@ -132,7 +137,7 @@ def read_ps2_tpk(path: Path) -> tuple[Texture, ...]:
                 palette_offset=palette_offset,
                 data_size=data_size,
                 palette_size=palette_size,
-                source_path=path,
+                source_path=source_path,
                 png=encode_rgba_png(width, height, rgba),
                 has_alpha=alpha_mode is not None,
                 alpha_mode=alpha_mode,
@@ -155,6 +160,14 @@ def read_ps2_tpk(path: Path) -> tuple[Texture, ...]:
             )
         )
     return tuple(textures)
+
+
+def _flip_rgba_vertical(rgba: bytes, width: int, height: int) -> bytes:
+    row_size = width * 4
+    return b"".join(
+        rgba[row * row_size : (row + 1) * row_size]
+        for row in range(height - 1, -1, -1)
+    )
 
 
 def decode_indexed_texture(
