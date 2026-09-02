@@ -74,6 +74,34 @@ def _point_roles(segments: tuple[TrackRouteSegment, ...], edges: tuple[Any, ...]
     return roles
 
 
+def _traffic_candidates(segments: tuple[TrackRouteSegment, ...], edges: tuple[Any, ...], edge_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe, but do not guess, route_type=1 traffic topology."""
+    traffic_routes = {int(segment.route_index) for segment in segments if int(segment.route_type) == 1}
+    source_by_edge = {int(source["edge_index"]): source for source in edge_sources}
+    candidates: list[dict[str, Any]] = []
+    for segment in segments:
+        if int(segment.route_type) != 1:
+            continue
+        links = []
+        for edge_index, edge in enumerate(edges):
+            source = source_by_edge.get(edge_index)
+            if source is None or int(source["route_index"]) != int(segment.route_index):
+                continue
+            if int(edge.target_route_index) in traffic_routes:
+                links.append({
+                    "source_point_index": int(source["point_index"]), "edge_index": edge_index,
+                    "target_route_index": int(edge.target_route_index), "target_point_index": int(edge.target_point_index),
+                    "mode": int(edge.mode), "metadata0": int(edge.metadata0), "metadata1": int(edge.metadata1),
+                })
+        candidates.append({
+            "route_index": int(segment.route_index), "point_count": len(segment.points),
+            "flags": int(segment.flags), "links": links,
+            "left_width_min": min((float(point.left_width) for point in segment.points), default=0.0),
+            "right_width_min": min((float(point.right_width) for point in segment.points), default=0.0),
+        })
+    return candidates
+
+
 def write_route_txt(scene: Scene, output: Path, track: int | str = 0, progress: bool = True) -> Path:
     """Write TRACK_ROUTE data and its edge graph to *output*.
 
@@ -86,6 +114,7 @@ def write_route_txt(scene: Scene, output: Path, track: int | str = 0, progress: 
     radar_points = tuple(scene.route_points)
     invalid_points, duplicate_points, edge_sources = _validate_segments(segments)
     point_roles = _point_roles(segments, edges, edge_sources)
+    traffic_candidates = _traffic_candidates(segments, edges, edge_sources)
     invalid_edges = 0
     edge_records: list[tuple[Any, str]] = []
     segment_by_route = {segment.route_index: segment for segment in segments}
@@ -127,6 +156,7 @@ def write_route_txt(scene: Scene, output: Path, track: int | str = 0, progress: 
                 f"segment_length={_number(point.segment_length)}",
                 f"edge_index={int(point.route_edge_index)}",
                 f"edge_flags={_hex(point.route_edge_flags)}",
+                f"boundary_offsets={','.join(_number(value) for value in point.boundary_offsets)}",
                 f"point_role={point_roles.get((segment.route_index, point.index), 'normal')}",
                 "",
             ])
@@ -153,6 +183,22 @@ def write_route_txt(scene: Scene, output: Path, track: int | str = 0, progress: 
         if progress:
             report_progress("Exporting AI route edges", edge_index + 1, len(edges), f"edge {edge_index}")
 
+    lines.extend(["[TRAFFIC_CANDIDATES]", f"count={len(traffic_candidates)}", ""])
+    for candidate in traffic_candidates:
+        lines.extend([
+            f"TRAFFIC_ROUTE {candidate['route_index']}",
+            "route_type=1",
+            f"point_count={candidate['point_count']}",
+            f"flags={_hex(candidate['flags'])}",
+            f"left_width_min={_number(candidate['left_width_min'])}",
+            f"right_width_min={_number(candidate['right_width_min'])}",
+            f"outgoing_count={len(candidate['links'])}",
+        ])
+        for link in candidate["links"]:
+            lines.append("traffic_link=" + ":".join(str(link[key]) for key in (
+                "source_point_index", "edge_index", "target_route_index", "target_point_index", "mode")))
+        lines.append("")
+
     lines.extend(["[RADAR_POINTS]", f"count={len(radar_points)}", ""])
     for point_index, point in enumerate(radar_points):
         x, z = point.get("position_ps2_2d", (0.0, 0.0))
@@ -178,6 +224,7 @@ def write_route_txt(scene: Scene, output: Path, track: int | str = 0, progress: 
         "start_points": sum(role == "start" for role in point_roles.values()),
         "end_points": sum(role == "end" for role in point_roles.values()),
         "branch_points": sum(role == "branch" for role in point_roles.values()),
+        "traffic_candidates": traffic_candidates,
         "coordinate_system": "MTA_XYZ",
         "ps2_coordinate_system": "PS2_XYZ",
         "output": output.name,

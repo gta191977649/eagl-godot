@@ -10,8 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Polygon, box
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
+from shapely.strtree import STRtree
 
 from .binary import Matrix4, Vec3, transform_point
 from .glb_writer import _decode_vif_color_5551, _indices_for_block
@@ -29,6 +30,8 @@ class MtaMaterial:
     alpha_cutoff: float | None = None
     alpha_reason: str = "opaque_pixels"
     render_flag: int | None = None
+    hp2_material_id: int | None = None
+    surface_category: str | None = None
 
 
 @dataclass
@@ -92,7 +95,7 @@ class MtaScene:
     warnings: list[str]
     report: dict[str, Any]
     water_quads: list[MtaWaterQuad] = field(default_factory=list)
-    texture_variants: dict[tuple[int, str], str] = field(default_factory=dict)
+    texture_variants: dict[tuple[int, str, str | None], str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,8 @@ class _Triangle:
     vertices: tuple[_Vertex, _Vertex, _Vertex]
     texture_hash: int | None
     render_flag: int | None = None
+    hp2_material_id: int | None = None
+    surface_category: str | None = None
 
 
 _VEGETATION_RE = re.compile(r"BUSH|TREE|CONIFER|VINE|GRASS|LEAF|FOLIAGE", re.IGNORECASE)
@@ -120,6 +125,41 @@ _MTA_WATER_MIN_FRAGMENT_AREA = 16.0
 _MTA_WATER_EDGE_PADDING = 8.0
 _MTA_WATER_SNAP_GRID = 0.0
 _MTA_WATER_BOUNDARY_TOLERANCE = 1.0
+
+
+HP2_SURFACE_NAMES = {
+    0: "NONE", 1: "ROAD", 2: "DIRT", 3: "DIRTROAD", 4: "PUDDLE", 5: "DEEP_WATER",
+    6: "GRASS", 7: "SAND", 8: "SNOW", 9: "DIRT_SHOULDER", 10: "SAND_SHOULDER",
+    11: "SNOW_SHOULDER", 12: "SIDEWALK", 13: "SNOW_SIDEWALK", 14: "ROCK",
+    15: "WOOD_WALL", 16: "CACTUS_WALL", 17: "SOLID_WALL", 18: "BOARDWALK",
+    19: "COBBLESTONE", 20: "MUD_PUDDLE", 21: "ROUGH_ROAD", 22: "GRASS_SHOULDER",
+    23: "AUTUMN_LEAVES", 24: "AUTUMN_LEAVES_SHOULDER", 25: "MULCH",
+    26: "MULCH_SHOULDER", 27: "ROAD_AUTUMN", 28: "PLANT", 29: "POST",
+    30: "METAL_GRATE", 31: "POTHOLE", 32: "CAR",
+}
+
+GTA_SURFACE_NAMES = {
+    0: "Default", 1: "Tarmac", 2: "Tarmac (damaged)", 3: "Tarmac (really damaged)",
+    4: "Pavement", 9: "Grass (short lush)", 17: "Steep slidy grass", 22: "Woodland ground",
+    23: "Vegetation", 24: "Mud (wet)", 26: "Dirt", 27: "Dirt track", 30: "Sand (compact)",
+    35: "Rock (dry)", 38: "Water (riverbed)", 39: "Water (shallow)", 43: "Wood (solid)",
+    53: "Lamp post", 63: "Car", 72: "Floorboard", 85: "Roadside", 86: "Roadside desert",
+    89: "Concrete", 124: "Dirt (weeds)", 130: "Forest (leaves)", 132: "Forest (dry)",
+    143: "Cactus dense", 153: "Grass (dirt mix)", 164: "Floor (metal)",
+}
+
+DEFAULT_HP2_TO_GTA_SURFACE = {
+    0: 0, 1: 1, 2: 26, 3: 27, 4: 39, 5: 38, 6: 9, 7: 30, 8: 17, 9: 85,
+    10: 86, 11: 17, 12: 4, 13: 17, 14: 35, 15: 43, 16: 143, 17: 89, 18: 72,
+    19: 4, 20: 24, 21: 3, 22: 153, 23: 130, 24: 132, 25: 22, 26: 124, 27: 2,
+    28: 23, 29: 53, 30: 164, 31: 3, 32: 63,
+}
+
+_SURFACE_PREFIX_CATEGORY = {
+    **{value: "road" for value in (1, 4, 19, 21, 27, 31)},
+    **{value: "dirt" for value in (2, 3, 9)},
+    **{value: "grass" for value in (6, 22)},
+}
 
 
 def _is_water_model(name: str) -> bool:
@@ -392,7 +432,13 @@ def _spatial_clip_triangles(triangles: list[_Triangle], chunk_size: float) -> di
                 polygon = _clip_polygon_axis(polygon, 1, cell_y * chunk_size, True)
                 polygon = _clip_polygon_axis(polygon, 1, (cell_y + 1) * chunk_size, False)
                 for index in range(1, len(polygon) - 1):
-                    clipped = _Triangle((polygon[0], polygon[index], polygon[index + 1]), triangle.texture_hash, triangle.render_flag)
+                    clipped = _Triangle(
+                        (polygon[0], polygon[index], polygon[index + 1]),
+                        triangle.texture_hash,
+                        triangle.render_flag,
+                        triangle.hp2_material_id,
+                        triangle.surface_category,
+                    )
                     if _triangle_area_squared(clipped) > 1e-12:
                         chunks[(cell_x, cell_y)].append(clipped)
     return dict(sorted(chunks.items()))
@@ -411,7 +457,10 @@ def _transform_triangles(
                 for axis in range(3)
             )
             vertices.append(_Vertex(world, vertex.uv, vertex.color))
-        result.append(_Triangle(tuple(vertices), triangle.texture_hash, triangle.render_flag))  # type: ignore[arg-type]
+        result.append(_Triangle(
+            tuple(vertices), triangle.texture_hash, triangle.render_flag,
+            triangle.hp2_material_id, triangle.surface_category,
+        ))  # type: ignore[arg-type]
     return result
 
 
@@ -464,23 +513,26 @@ def _fill_model(
     model: MtaModel,
     triangles: list[_Triangle],
     texture_names: dict[int, str],
-    texture_variants: dict[tuple[int, str], str],
+    texture_variants: dict[tuple[int, str, str | None], str],
     alpha_decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
     alpha_usage: dict[int, frozenset[int | None]],
     textures: Any,
 ) -> None:
-    material_index: dict[tuple[int | None, str], int] = {}
+    material_index: dict[tuple[int | None, str, int | None, str | None], int] = {}
     for triangle in triangles:
         decision = MaterialAlphaDecision("OPAQUE", None, "missing_texture", triangle.render_flag, None, None, None, None)
         if triangle.texture_hash is not None:
             decision = alpha_decisions.get((triangle.texture_hash, triangle.render_flag)) or decide_material_alpha(
                 textures.get(triangle.texture_hash), triangle.render_flag, alpha_usage.get(triangle.texture_hash, ())
             )
-        key = (triangle.texture_hash, decision.mode)
+        key = (triangle.texture_hash, decision.mode, triangle.hp2_material_id, triangle.surface_category)
         if key not in material_index:
             texture_name = None
             if triangle.texture_hash is not None and textures.get(triangle.texture_hash) is not None:
-                texture_name = texture_variants.get(key, texture_names.get(triangle.texture_hash))
+                texture_name = texture_variants.get(
+                    (triangle.texture_hash, decision.mode, triangle.surface_category),
+                    texture_names.get(triangle.texture_hash),
+                )
             material_index[key] = len(model.materials)
             model.materials.append(
                 MtaMaterial(
@@ -491,6 +543,8 @@ def _fill_model(
                     decision.cutoff,
                     decision.reason,
                     triangle.render_flag,
+                    triangle.hp2_material_id,
+                    triangle.surface_category,
                 )
             )
         base = len(model.vertices)
@@ -648,19 +702,23 @@ def _scaled_triangles(obj: MeshObject, scale: tuple[float, float, float]) -> lis
     result = []
     for triangle in _triangles_for_object(obj, bake_transform=False):
         result.append(
-                _Triangle(
+            _Triangle(
                 tuple(
                     _Vertex(tuple(vertex.position[i] * scale[i] for i in range(3)), vertex.uv, vertex.color)
                     for vertex in triangle.vertices
                 ),
                 triangle.texture_hash,
                 triangle.render_flag,
+                triangle.hp2_material_id,
+                triangle.surface_category,
             )
         )
     return result
 
 
 def _collision_surface(material: MtaMaterial, rules: dict[str, Any]) -> int:
+    if material.hp2_material_id is not None:
+        return _native_collision_surface(material.hp2_material_id, rules)
     texture_name = material.texture_name or ""
     exact = rules.get("texture_materials", {})
     if texture_name in exact:
@@ -703,13 +761,174 @@ def _native_collision_role(polygon: TrackCollisionPolygon) -> str:
     return "primary_road"
 
 
-def _native_collision_surface(material_id: int, rules: dict[str, Any]) -> int:
+def _polygon_height_at_xy(polygon: TrackCollisionPolygon, x: float, y: float) -> float:
+    points = polygon.points_ps2
+    if len(points) < 3:
+        return sum(point.z for point in points) / max(1, len(points))
+    origin = points[0]
+    for index in range(1, len(points) - 1):
+        first, second = points[index], points[index + 1]
+        ab = (first.x - origin.x, first.y - origin.y, first.z - origin.z)
+        ac = (second.x - origin.x, second.y - origin.y, second.z - origin.z)
+        normal = (
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        )
+        if abs(normal[2]) > 1e-9:
+            return origin.z - (
+                normal[0] * (x - origin.x) + normal[1] * (y - origin.y)
+            ) / normal[2]
+    return sum(point.z for point in points) / len(points)
+
+
+def _classify_road_triangles(
+    triangles_by_offset: dict[int, list[_Triangle]],
+    road_offsets: set[int],
+    polygons: Iterable[TrackCollisionPolygon],
+) -> dict[str, Any]:
+    primary: list[TrackCollisionPolygon] = []
+    shapes: list[Polygon] = []
+    for polygon in polygons:
+        if _native_collision_role(polygon) != "primary_road":
+            continue
+        shape = Polygon([(point.x, point.y) for point in polygon.points_ps2])
+        if shape.is_valid and shape.area > 1e-9:
+            primary.append(polygon)
+            shapes.append(shape)
+
+    tree = STRtree(shapes) if shapes else None
+    direct_by_offset: dict[int, list[int | None]] = {
+        offset: [None] * len(triangles_by_offset.get(offset, []))
+        for offset in sorted(road_offsets)
+    }
+    categories_by_texture: dict[int, set[str]] = defaultdict(set)
+    materials_by_texture: dict[int, set[int]] = defaultdict(set)
+    matched_materials: Counter[int] = Counter()
+    matched = 0
+    entries: list[tuple[int, int, _Triangle, float, float, float]] = []
+    query_points: list[Point] = []
+    for offset in sorted(road_offsets):
+        for triangle_index, triangle in enumerate(triangles_by_offset.get(offset, [])):
+            x = sum(vertex.position[0] for vertex in triangle.vertices) / 3.0
+            y = sum(vertex.position[1] for vertex in triangle.vertices) / 3.0
+            z = sum(vertex.position[2] for vertex in triangle.vertices) / 3.0
+            entries.append((offset, triangle_index, triangle, x, y, z))
+            query_points.append(Point(x, y))
+
+    candidates_by_triangle: dict[int, list[int]] = defaultdict(list)
+    if tree is not None and query_points:
+        query_indices, polygon_indices = tree.query(query_points, predicate="intersects")
+        for query_index, polygon_index in zip(query_indices, polygon_indices):
+            candidates_by_triangle[int(query_index)].append(int(polygon_index))
+
+    for query_index, (offset, triangle_index, triangle, x, y, z) in enumerate(entries):
+        candidates = candidates_by_triangle.get(query_index, [])
+        if not candidates:
+            continue
+        selected_index = min(
+            candidates,
+            key=lambda index: abs(_polygon_height_at_xy(primary[index], x, y) - z),
+        )
+        material_id = primary[selected_index].material_id
+        direct_by_offset[offset][triangle_index] = material_id
+        matched += 1
+        matched_materials[material_id] += 1
+        if triangle.texture_hash is not None:
+            materials_by_texture[triangle.texture_hash].add(material_id)
+            category = _SURFACE_PREFIX_CATEGORY.get(material_id)
+            if category is not None:
+                categories_by_texture[triangle.texture_hash].add(category)
+
+    inherited = ambiguous = unmatched = 0
+    category_counts: Counter[str] = Counter()
+    for offset in sorted(road_offsets):
+        classified: list[_Triangle] = []
+        for triangle, direct_id in zip(triangles_by_offset.get(offset, []), direct_by_offset.get(offset, [])):
+            material_id = direct_id
+            category = _SURFACE_PREFIX_CATEGORY.get(material_id) if material_id is not None else None
+            if direct_id is None:
+                texture_key = triangle.texture_hash if triangle.texture_hash is not None else -1
+                texture_categories = categories_by_texture.get(texture_key, set())
+                texture_materials = materials_by_texture.get(texture_key, set())
+                if len(texture_categories) == 1:
+                    category = next(iter(texture_categories))
+                    if len(texture_materials) == 1:
+                        material_id = next(iter(texture_materials))
+                    inherited += 1
+                elif len(texture_categories) > 1:
+                    ambiguous += 1
+                else:
+                    unmatched += 1
+            if category is not None:
+                category_counts[category] += 1
+            classified.append(_Triangle(
+                triangle.vertices, triangle.texture_hash, triangle.render_flag,
+                material_id, category,
+            ))
+        triangles_by_offset[offset] = classified
+
+    return {
+        "matched": matched,
+        "inherited": inherited,
+        "ambiguous": ambiguous,
+        "unmatched": unmatched,
+        "matched_hp2_materials": {
+            str(material_id): count for material_id, count in sorted(matched_materials.items())
+        },
+        "prefixed_triangles": dict(sorted(category_counts.items())),
+    }
+
+
+def _hp2_surface_override(material_id: int, rules: dict[str, Any]) -> int | None:
     mapping = rules.get("hp2_materials", {})
-    value = mapping.get(str(material_id), mapping.get(material_id, 0))
+    if not isinstance(mapping, dict):
+        return None
+    value = mapping.get(str(material_id), mapping.get(material_id))
+    if value is None:
+        return None
     try:
-        return max(0, min(255, int(value)))
+        converted = int(value)
     except (TypeError, ValueError):
-        return 0
+        return None
+    return converted if 0 <= converted <= 255 else None
+
+
+def _native_collision_surface(material_id: int, rules: dict[str, Any]) -> int:
+    override = _hp2_surface_override(material_id, rules)
+    return override if override is not None else DEFAULT_HP2_TO_GTA_SURFACE.get(material_id, 0)
+
+
+def _collision_rule_warnings(rules: dict[str, Any]) -> list[str]:
+    mapping = rules.get("hp2_materials", {})
+    if not isinstance(mapping, dict):
+        return ["collision rules hp2_materials must be an object; using built-in HP2 surface mapping"]
+    warnings: list[str] = []
+    for key, value in mapping.items():
+        try:
+            material_id = int(key)
+            gta_surface = int(value)
+        except (TypeError, ValueError):
+            warnings.append(f"invalid hp2_materials entry {key!r}: {value!r}; using built-in mapping")
+            continue
+        if material_id not in HP2_SURFACE_NAMES or not 0 <= gta_surface <= 255:
+            warnings.append(f"invalid hp2_materials entry {key!r}: {value!r}; using built-in mapping")
+    return warnings
+
+
+def _surface_mapping_report(rules: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for material_id, hp2_name in HP2_SURFACE_NAMES.items():
+        override = _hp2_surface_override(material_id, rules)
+        gta_surface = override if override is not None else DEFAULT_HP2_TO_GTA_SURFACE[material_id]
+        result[str(material_id)] = {
+            "hp2_name": hp2_name,
+            "gta_surface": gta_surface,
+            "gta_name": GTA_SURFACE_NAMES.get(gta_surface, "Custom/unknown"),
+            "source": "collision_rules" if override is not None else "built_in",
+            "prefix_category": _SURFACE_PREFIX_CATEGORY.get(material_id),
+        }
+    return result
 
 
 def _polygon_centroid(polygon: TrackCollisionPolygon) -> tuple[float, float, float]:
@@ -906,7 +1125,9 @@ def _native_collision_for_roads(
     result["native_collision_materials"] = {
         material_id: {
             "polygons": count,
+            "hp2_name": HP2_SURFACE_NAMES.get(int(material_id), "UNKNOWN"),
             "gta_surface": material_surfaces[material_id],
+            "gta_name": GTA_SURFACE_NAMES.get(material_surfaces[material_id], "Custom/unknown"),
         }
         for material_id, count in sorted(material_counts.items(), key=lambda item: int(item[0]))
     }
@@ -937,25 +1158,34 @@ def load_collision_rules(path: Path | None) -> dict[str, Any]:
     return value
 
 
-def _alpha_variant_names(
+def _texture_variant_names(
     texture_names: dict[int, str],
     decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
-) -> dict[tuple[int, str], str]:
+    categories_by_hash: dict[int, set[str]],
+) -> dict[tuple[int, str, str | None], str]:
     modes_by_hash: dict[int, set[str]] = defaultdict(set)
     for (texture_hash, _render_flag), decision in decisions.items():
         modes_by_hash[texture_hash].add(decision.mode)
     used: set[str] = set()
-    result: dict[tuple[int, str], str] = {}
+    result: dict[tuple[int, str, str | None], str] = {}
     suffixes = {"OPAQUE": "_o", "MASK": "_m", "BLEND": "_b"}
     for texture_hash, modes in sorted(modes_by_hash.items()):
         base = texture_names.get(texture_hash, f"tex_{texture_hash:08x}")
-        for mode in sorted(modes):
-            candidate = base if len(modes) == 1 else base[: 31 - len(suffixes[mode])] + suffixes[mode]
-            if candidate.lower() in used:
-                suffix = f"_{texture_hash:08x}{suffixes[mode]}"
-                candidate = base[: 31 - len(suffix)] + suffix
-            used.add(candidate.lower())
-            result[(texture_hash, mode)] = candidate
+        categories: list[str | None] = [None, *sorted(categories_by_hash.get(texture_hash, set()))]
+        for category in categories:
+            prefix = f"{category}_" if category else ""
+            for mode in sorted(modes):
+                alpha_suffix = suffixes[mode] if len(modes) > 1 else ""
+                stem = prefix + base
+                candidate = stem[: 31 - len(alpha_suffix)] + alpha_suffix
+                if candidate.lower() in used:
+                    token = hashlib.blake2s(
+                        f"{texture_hash}:{category}:{mode}".encode("utf-8"), digest_size=4
+                    ).hexdigest()
+                    unique_suffix = f"_{token}{alpha_suffix}"
+                    candidate = stem[: 31 - len(unique_suffix)] + unique_suffix
+                used.add(candidate.lower())
+                result[(texture_hash, mode, category)] = candidate
     return result
 
 
@@ -1503,7 +1733,6 @@ def build_mta_scene(
         for tex_hash, texture in sorted(textures.textures.items())
     }
     alpha_decisions, alpha_usage = alpha_decisions_for_scene(scene, textures)
-    texture_variants = _alpha_variant_names(texture_names, alpha_decisions)
     scenery_instances, placement_deduplication = _deduplicate_scenery_instances(scene.scenery_instances)
     placement_names = {instance.object_name for instance in scenery_instances}
     road_names = {obj.name for obj in scene.objects if obj.name.upper().startswith("RD_SECTION")}
@@ -1532,10 +1761,21 @@ def build_mta_scene(
         obj.chunk_offset: list(_triangles_for_object(obj, bake_transform=True))
         for obj in static_objects
     }
+    road_source_objects = [obj for obj in static_objects if obj.name.upper().startswith("RD_SECTION")]
+    road_surface_classification = _classify_road_triangles(
+        static_triangles,
+        {obj.chunk_offset for obj in road_source_objects},
+        scene.track_collision_polygons,
+    )
+    categories_by_hash: dict[int, set[str]] = defaultdict(set)
+    for obj in road_source_objects:
+        for triangle in static_triangles.get(obj.chunk_offset, []):
+            if triangle.texture_hash is not None and triangle.surface_category is not None:
+                categories_by_hash[triangle.texture_hash].add(triangle.surface_category)
+    texture_variants = _texture_variant_names(texture_names, alpha_decisions, categories_by_hash)
 
     models: list[MtaModel] = []
     placements: list[MtaPlacement] = []
-    road_source_objects = [obj for obj in static_objects if obj.name.upper().startswith("RD_SECTION")]
     road_split_sources: list[dict[str, Any]] = []
     road_degenerate_faces = 0
     max_col3_coordinate = 0.0
@@ -1700,7 +1940,16 @@ def build_mta_scene(
             native_metrics["max_native_col3_local_coordinate"],
         )
 
-    warnings: list[str] = []
+    warnings: list[str] = _collision_rule_warnings(collision_rules)
+    unknown_hp2_materials = sorted({
+        polygon.material_id
+        for polygon in scene.track_collision_polygons
+        if polygon.material_id not in DEFAULT_HP2_TO_GTA_SURFACE
+    })
+    warnings.extend(
+        f"unknown HP2 collision material {material_id}; using GTA surface 0"
+        for material_id in unknown_hp2_materials
+    )
     water_quads: list[MtaWaterQuad] = []
     water_generation: list[dict[str, Any]] = []
     water_source_triangles = 0
@@ -1937,7 +2186,7 @@ def build_mta_scene(
     )
     referenced_texture_hashes = {material.texture_hash for model in models for material in model.materials if material.texture_hash is not None}
     referenced_texture_variants = {
-        (material.texture_hash, material.alpha_mode)
+        (material.texture_hash, material.alpha_mode, material.surface_category)
         for model in models
         for material in model.materials
         if material.texture_hash is not None
@@ -1962,6 +2211,7 @@ def build_mta_scene(
         "static_models": sum(model.kind in {"road", "static", "static_scenery"} for model in models),
         "road_source_models": len(road_source_objects),
         "road_models": sum(model.kind == "road" for model in models),
+        "road_surface_classification": road_surface_classification,
         "road_split_sources": road_split_sources,
         "prop_models": sum(model.kind == "prop" for model in models),
         "mixed_render_models_split": mixed_render_models_split,
@@ -2004,6 +2254,8 @@ def build_mta_scene(
         "collision_mode": collision_mode,
         "native_collision": native_collision,
         "native_secondary": native_secondary,
+        "hp2_surface_mapping": _surface_mapping_report(collision_rules),
+        "unknown_hp2_materials": unknown_hp2_materials,
         "lod_mode": lod_mode,
         "lod_min_size": lod_min_size,
         "lod_small_size": lod_small_size,
@@ -2046,7 +2298,10 @@ def build_mta_scene(
                 )
             ),
             "material_modes": dict(Counter(material.alpha_mode for model in models for material in model.materials)),
-            "txd_variant_modes": dict(Counter(mode for _texture_hash, mode in texture_variants)),
+            "txd_variant_modes": dict(Counter(mode for _texture_hash, mode, _category in texture_variants)),
+            "txd_variant_categories": dict(Counter(
+                category or "original" for _texture_hash, _mode, category in texture_variants
+            )),
             "txd_variants": len(texture_variants),
         },
     }

@@ -70,6 +70,7 @@ class SceneryInstance:
     object_hash: int | None = None
     section_index: int | None = None
     section_chunk_offset: int | None = None
+    visibility_flags: int = 0
 
 
 @dataclass(frozen=True)
@@ -371,6 +372,7 @@ def _extract_scenery_sections(
                     object_hash=object_hash,
                     section_index=section_index,
                     section_chunk_offset=chunk.offset,
+                    visibility_flags=int.from_bytes(payload[offset + 0x0E : offset + 0x10], "little"),
                 )
             )
         sections.append(

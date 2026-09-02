@@ -46,17 +46,19 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
     texture_dir.mkdir(parents=True, exist_ok=True)
     texture_records = []
     cutoff_by_variant = {
-        (material.texture_hash, material.alpha_mode): material.alpha_cutoff
+        (material.texture_hash, material.alpha_mode, material.surface_category): material.alpha_cutoff
         for model in scene.models
         for material in model.materials
         if material.texture_hash is not None
     }
     variants = scene.texture_variants or {
-        (tex_hash, (textures.get(tex_hash).alpha_mode or "OPAQUE")): name
+        (tex_hash, (textures.get(tex_hash).alpha_mode or "OPAQUE"), None): name
         for tex_hash, name in scene.texture_names.items()
         if textures.get(tex_hash) is not None
     }
-    for (tex_hash, alpha_mode), texture_name in sorted(variants.items()):
+    for (tex_hash, alpha_mode, surface_category), texture_name in sorted(
+        variants.items(), key=lambda item: (item[0][0], item[0][1], item[0][2] or "")
+    ):
         texture = textures.get(tex_hash)
         if texture is None:
             continue
@@ -68,18 +70,21 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
             "file": f"textures/{filename}",
             "has_alpha": alpha_mode != "OPAQUE",
             "alpha_mode": alpha_mode,
-            "alpha_cutoff": cutoff_by_variant.get((tex_hash, alpha_mode)),
+            "alpha_cutoff": cutoff_by_variant.get((tex_hash, alpha_mode, surface_category)),
             "source_alpha_mode": texture.alpha_mode or "OPAQUE",
         }
         texture_records.append(record)
 
     material_catalog: list[dict[str, Any]] = []
-    material_indices: dict[tuple[int | None, str | None, str], int] = {}
+    material_indices: dict[tuple[int | None, str | None, str, int | None, str | None], int] = {}
     model_records = []
     for model in scene.models:
         model_materials = []
         for material in model.materials:
-            key = (material.texture_hash, material.texture_name, material.alpha_mode)
+            key = (
+                material.texture_hash, material.texture_name, material.alpha_mode,
+                material.hp2_material_id, material.surface_category,
+            )
             if key not in material_indices:
                 material_indices[key] = len(material_catalog)
                 material_catalog.append(
@@ -91,6 +96,8 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
                         "alpha_cutoff": material.alpha_cutoff,
                         "alpha_reason": material.alpha_reason,
                         "render_flag": material.render_flag,
+                        "hp2_material_id": material.hp2_material_id,
+                        "surface_category": material.surface_category,
                     }
                 )
             model_materials.append(material_indices[key])

@@ -52,11 +52,15 @@ def test_write_route_txt_preserves_segments_edges_and_coordinate_conventions(tmp
     assert "point_role=start" in text
     assert "point_role=end" in text
     assert "point_role=branch" in text
+    assert "boundary_offsets=0,0,0,0" in text
+    assert "[TRAFFIC_CANDIDATES]" in text
+    assert "TRAFFIC_ROUTE 7" in text
     assert "[RADAR_POINTS]" in text
     assert report["segments"] == 2
     assert report["waypoints"] == 3
     assert report["edges"] == 1
     assert report["invalid_edges"] == 0
+    assert report["traffic_candidates"][0]["route_index"] == 7
 
 
 def test_write_route_txt_handles_empty_route(tmp_path):

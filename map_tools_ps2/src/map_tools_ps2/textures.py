@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .binary import align
 from .chunks import parse_chunks, walk_chunks
+from .comp import load_bundle_bytes
 from .png import encode_rgba_png
 
 
@@ -44,6 +45,9 @@ class Texture:
 @dataclass
 class TextureLibrary:
     textures: dict[int, Texture]
+    animations: dict[int, "TextureAnimation"] = field(default_factory=dict)
+    source_paths: tuple[Path, ...] = ()
+    global_source: Path | None = None
 
     def get(self, tex_hash: int | None) -> Texture | None:
         if tex_hash is None:
@@ -51,10 +55,21 @@ class TextureLibrary:
         return self.textures.get(tex_hash)
 
 
+@dataclass(frozen=True)
+class TextureAnimation:
+    name: str
+    base_hash: int
+    frame_hashes: tuple[int, ...]
+    frames_per_second: float
+    source_path: Path
+
+
 def load_texture_library_for_track(track_path: Path, texture_dir: Path | None = None) -> TextureLibrary:
     texture_dir = texture_dir or track_path.parent
     track_id = _track_id_from_path(track_path)
     textures: dict[int, Texture] = {}
+    animations: dict[int, TextureAnimation] = {}
+    sources: list[Path] = []
     if track_id is None:
         return TextureLibrary(textures)
 
@@ -64,7 +79,71 @@ def load_texture_library_for_track(track_path: Path, texture_dir: Path | None = 
             continue
         for texture in read_ps2_tpk(path):
             textures.setdefault(texture.tex_hash, texture)
-    return TextureLibrary(textures)
+        sources.append(path)
+
+    global_source = _global_ingame_bundle(track_path, texture_dir)
+    if global_source is not None:
+        data = load_bundle_bytes(global_source)
+        for texture in read_ps2_tpk_bytes(data, global_source):
+            # Track-local texture packs are authoritative when hashes overlap.
+            textures.setdefault(texture.tex_hash, texture)
+        for animation in read_ps2_texture_animations(data, global_source):
+            animations.setdefault(animation.base_hash, animation)
+        sources.append(global_source)
+    return TextureLibrary(textures, animations, tuple(sources), global_source)
+
+
+def _global_ingame_bundle(track_path: Path, texture_dir: Path) -> Path | None:
+    global_dirs: list[Path] = []
+    for tracks_dir in (texture_dir, track_path.parent):
+        candidate = tracks_dir.parent / "GLOBAL"
+        if candidate not in global_dirs:
+            global_dirs.append(candidate)
+    for global_dir in global_dirs:
+        for suffix in (".BUN", ".LZC"):
+            candidate = global_dir / f"INGAMEB{suffix}"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def read_ps2_texture_animations(data: bytes, source_path: Path) -> tuple[TextureAnimation, ...]:
+    chunks = parse_chunks(data)
+    metadata_chunk = next((chunk for chunk in walk_chunks(chunks) if chunk.chunk_id == 0x30300102), None)
+    frames_chunk = next((chunk for chunk in walk_chunks(chunks) if chunk.chunk_id == 0x30300103), None)
+    if metadata_chunk is None or frames_chunk is None:
+        return ()
+
+    metadata = metadata_chunk.payload(data)
+    frame_payload = frames_chunk.payload(data)
+    if len(metadata) % 0x34 != 0 or len(frame_payload) % 0x10 != 0:
+        return ()
+    frame_values = tuple(
+        struct.unpack_from("<I", frame_payload, offset)[0]
+        for offset in range(0, len(frame_payload), 0x10)
+    )
+    animations: list[TextureAnimation] = []
+    frame_offset = 0
+    for offset in range(0, len(metadata), 0x34):
+        record = metadata[offset : offset + 0x34]
+        name = record[:0x18].split(b"\0")[0].decode("ascii", errors="replace")
+        base_hash, frame_count, frames_per_second = struct.unpack_from("<III", record, 0x18)
+        if not name or not base_hash or frame_count <= 0:
+            continue
+        frame_hashes = frame_values[frame_offset : frame_offset + frame_count]
+        frame_offset += frame_count
+        if len(frame_hashes) != frame_count or any(value == 0 for value in frame_hashes):
+            continue
+        animations.append(
+            TextureAnimation(
+                name=name,
+                base_hash=base_hash,
+                frame_hashes=frame_hashes,
+                frames_per_second=float(frames_per_second),
+                source_path=source_path,
+            )
+        )
+    return tuple(animations)
 
 
 def read_ps2_tpk(path: Path, *, flip_vertical: bool = False) -> tuple[Texture, ...]:

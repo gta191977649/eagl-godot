@@ -11,7 +11,15 @@ from map_tools_ps2.binary import IDENTITY4, Vec3, transform_point
 from map_tools_ps2.img_archive import ImgEntry, read_img_v2_directory, write_img_v2
 from map_tools_ps2.mta_export import _img_archive_declarations, _prepare_eagle_lods, _write_resource_xml, _write_staging, _write_water_dat
 from map_tools_ps2.model import DecodedBlock, MeshObject, Scene, SceneryInstance, TrackCollisionPolygon
-from map_tools_ps2.mta_scene import MtaWaterQuad, build_mta_scene, cell_for_xy, compose_zxy_row, decompose_placement
+from map_tools_ps2.mta_scene import (
+    DEFAULT_HP2_TO_GTA_SURFACE,
+    MtaWaterQuad,
+    _native_collision_surface,
+    build_mta_scene,
+    cell_for_xy,
+    compose_zxy_row,
+    decompose_placement,
+)
 from map_tools_ps2.mta_txd import build_bgra_mip_chain, build_dxt_mip_chain, dxt_raster_format_flags, mip_dimensions
 from map_tools_ps2.material_alpha import decide_material_alpha, is_opaque_surface_state
 from map_tools_ps2.textures import TextureLibrary
@@ -106,6 +114,19 @@ def _triangle_object(name, offset, transform=IDENTITY4, texture_hashes=(), rende
         (DecodedBlock(run, primitive_mode="triangles", render_flag=render_flag),),
         texture_hashes,
         123,
+    )
+
+
+def _surface_polygon(index, material_id, x=0.0, y=0.0, z=0.0):
+    return TrackCollisionPolygon(
+        index,
+        0,
+        material_id,
+        0,
+        3,
+        (Vec3(x, y, z), Vec3(x + 10, y, z), Vec3(x, y + 10, z)),
+        4,
+        index * 0x20,
     )
 
 
@@ -236,8 +257,192 @@ def test_mta_creates_txd_variants_for_one_texture_with_multiple_surface_states()
         ]
     )
     result = build_mta_scene(source, TextureLibrary({123: texture}), track_id=31, resource_name="TEST")
-    assert result.texture_variants == {(123, "MASK"): "SHARED_m", (123, "OPAQUE"): "SHARED_o"}
+    assert result.texture_variants == {
+        (123, "MASK", None): "SHARED_m",
+        (123, "OPAQUE", None): "SHARED_o",
+    }
     assert {material.alpha_mode for model in result.models for material in model.materials} == {"MASK", "OPAQUE"}
+
+
+def test_builtin_hp2_surface_mapping_is_complete_and_overrideable():
+    assert set(DEFAULT_HP2_TO_GTA_SURFACE) == set(range(33))
+    assert {material_id: DEFAULT_HP2_TO_GTA_SURFACE[material_id] for material_id in (2, 3, 6, 9, 22)} == {
+        2: 26,
+        3: 27,
+        6: 9,
+        9: 85,
+        22: 153,
+    }
+    assert _native_collision_surface(3, {}) == 27
+    assert _native_collision_surface(3, {"hp2_materials": {"3": 99}}) == 99
+    assert _native_collision_surface(3, {"hp2_materials": {"3": 999}}) == 27
+    assert _native_collision_surface(3, {"hp2_materials": {"3": "bad"}}) == 27
+
+
+def test_surface_prefixes_split_road_dirt_grass_and_shared_nonroad_texture():
+    texture_values = {
+        100: _alpha_texture("SHARED_ROAD", blend=False),
+        200: _alpha_texture("DIRT_TEXTURE", blend=False),
+        300: _alpha_texture("GRASS_TEXTURE", blend=False),
+    }
+    source = Scene(
+        objects=[
+            _triangle_object("RD_SECTION_ROAD", 1, texture_hashes=(100,)),
+            _triangle_object(
+                "RD_SECTION_DIRT", 2,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(20, 0, 0)),
+                texture_hashes=(200,),
+            ),
+            _triangle_object(
+                "RD_SECTION_GRASS", 3,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(40, 0, 0)),
+                texture_hashes=(300,),
+            ),
+            _triangle_object("BUILDING_WITH_SHARED_TEXTURE", 4, texture_hashes=(100,)),
+        ],
+        track_collision_polygons=[
+            _surface_polygon(0, 1, 0),
+            _surface_polygon(1, 3, 20),
+            _surface_polygon(2, 6, 40),
+        ],
+    )
+    result = build_mta_scene(source, TextureLibrary(texture_values), track_id=31, resource_name="TEST")
+    material_names = {
+        model.source_name: {material.texture_name for material in model.materials}
+        for model in result.models
+        if not model.is_lod
+    }
+    assert material_names["RD_SECTION_ROAD"] == {"road_SHARED_ROAD"}
+    assert material_names["RD_SECTION_DIRT"] == {"dirt_DIRT_TEXTURE"}
+    assert material_names["RD_SECTION_GRASS"] == {"grass_GRASS_TEXTURE"}
+    assert material_names["BUILDING_WITH_SHARED_TEXTURE"] == {"SHARED_ROAD"}
+    assert set(result.texture_variants.values()) == {
+        "SHARED_ROAD", "road_SHARED_ROAD", "dirt_DIRT_TEXTURE", "grass_GRASS_TEXTURE",
+    }
+    assert result.report["road_surface_classification"] == {
+        "matched": 3,
+        "inherited": 0,
+        "ambiguous": 0,
+        "unmatched": 0,
+        "matched_hp2_materials": {"1": 1, "3": 1, "6": 1},
+        "prefixed_triangles": {"dirt": 1, "grass": 1, "road": 1},
+    }
+
+
+def test_surface_prefix_composes_with_alpha_and_31_character_limit():
+    texture = SimpleNamespace(
+        name="A_VERY_LONG_ROAD_TEXTURE_NAME_123456789",
+        png=b"png-data",
+        has_alpha=True,
+        alpha_mode="MASK",
+        alpha_cutoff=0.5,
+        alpha_zero_count=10,
+        alpha_opaque_count=20,
+        alpha_intermediate_count=0,
+        is_any_semitransparency=0,
+        alpha_bits=0x0A,
+        alpha_fix=0,
+        texture_fx=0,
+    )
+    source = Scene(
+        objects=[
+            _triangle_object("RD_SECTION_LONG_A", 1, texture_hashes=(100,), render_flag=0x4041),
+            _triangle_object(
+                "RD_SECTION_LONG_B", 2,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(20, 0, 0)),
+                texture_hashes=(100,), render_flag=0x1000,
+            ),
+        ],
+        track_collision_polygons=[_surface_polygon(0, 1), _surface_polygon(1, 1, 20)],
+    )
+    result = build_mta_scene(source, TextureLibrary({100: texture}), track_id=31, resource_name="TEST")
+    names = sorted(result.texture_variants.values())
+    assert len(names) == 2
+    assert all(name.startswith("road_") and len(name) <= 31 for name in names)
+    assert {name[-2:] for name in names} == {"_m", "_o"}
+
+
+def test_surface_prefix_uses_nearest_height_for_overlapping_road_levels():
+    source = Scene(
+        objects=[
+            _triangle_object("RD_SECTION_LOWER", 1, texture_hashes=(100,)),
+            _triangle_object(
+                "RD_SECTION_UPPER", 2,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(0, 0, 10)),
+                texture_hashes=(200,),
+            ),
+        ],
+        track_collision_polygons=[
+            _surface_polygon(0, 1, z=0),
+            _surface_polygon(1, 3, z=10),
+        ],
+    )
+    result = build_mta_scene(
+        source,
+        TextureLibrary({
+            100: _alpha_texture("LOWER", blend=False),
+            200: _alpha_texture("UPPER", blend=False),
+        }),
+        track_id=31,
+        resource_name="TEST",
+    )
+    names = {
+        model.source_name: {material.texture_name for material in model.materials}
+        for model in result.models if model.kind == "road"
+    }
+    assert names["RD_SECTION_LOWER"] == {"road_LOWER"}
+    assert names["RD_SECTION_UPPER"] == {"dirt_UPPER"}
+
+
+def test_unmatched_shared_texture_stays_unprefixed_when_categories_are_ambiguous():
+    source = Scene(
+        objects=[
+            _triangle_object("RD_SECTION_ROAD", 1, texture_hashes=(100,)),
+            _triangle_object(
+                "RD_SECTION_DIRT", 2,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(20, 0, 0)),
+                texture_hashes=(100,),
+            ),
+            _triangle_object(
+                "RD_SECTION_UNKNOWN", 3,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(40, 0, 0)),
+                texture_hashes=(100,),
+            ),
+        ],
+        track_collision_polygons=[_surface_polygon(0, 1), _surface_polygon(1, 3, 20)],
+    )
+    result = build_mta_scene(
+        source,
+        TextureLibrary({100: _alpha_texture("SHARED", blend=False)}),
+        track_id=31,
+        resource_name="TEST",
+    )
+    names = {
+        model.source_name: {material.texture_name for material in model.materials}
+        for model in result.models if model.kind == "road"
+    }
+    assert names["RD_SECTION_ROAD"] == {"road_SHARED"}
+    assert names["RD_SECTION_DIRT"] == {"dirt_SHARED"}
+    assert names["RD_SECTION_UNKNOWN"] == {"SHARED"}
+    assert result.report["road_surface_classification"]["ambiguous"] == 1
+
+
+def test_invalid_hp2_override_warns_and_uses_builtin_mapping():
+    source = Scene(
+        objects=[_triangle_object("RD_SECTION_DIRT", 1)],
+        track_collision_polygons=[_surface_polygon(0, 3)],
+    )
+    result = build_mta_scene(
+        source,
+        TextureLibrary({}),
+        track_id=31,
+        resource_name="TEST",
+        collision_rules={"hp2_materials": {"3": 999}},
+    )
+    road = next(model for model in result.models if model.kind == "road")
+    assert road.collision_materials == [27]
+    assert any("invalid hp2_materials entry" in warning for warning in result.warnings)
+    assert result.report["hp2_surface_mapping"]["3"]["source"] == "built_in"
 
 
 def test_mta_scene_reuses_scaled_prop_and_assigns_native_road_collision():
@@ -271,6 +476,7 @@ def test_mta_scene_reuses_scaled_prop_and_assigns_native_road_collision():
     assert road.collision_kind == "mesh"
     assert road.collision_vertices == [(-5.0, -5.0, 0.0), (0.0, -5.0, 0.0), (-5.0, 0.0, 0.0)]
     assert road.collision_faces == [(0, 1, 2)]
+    assert road.collision_materials == [85]
     assert prop_models[0].collision_kind == "bounds"
     assert not prop_models[0].collision_faces
     assert result.report["track_collision_input_polygons"] == 1

@@ -138,6 +138,7 @@ func _parse_scene_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray
 	asset.allowed_road_areas = _parse_allowed_road_areas(chunks, bundle)
 	asset.track_route_segments = _parse_track_route_segments(chunks, bundle)
 	asset.track_route_edges = _parse_track_route_edges(chunks, bundle)
+	asset.metadata["traffic_candidates"] = _build_traffic_candidates(asset.track_route_segments, asset.track_route_edges)
 	asset.track_collision_polygons = _parse_track_collision_polygons(chunks, bundle)
 	_build_collision_surfaces(asset, chunks, bundle)
 	_parse_route_into(asset, chunks, bundle)
@@ -2069,6 +2070,44 @@ func _parse_track_route_edges(chunks: Array[Dictionary], bundle: PackedByteArray
 			})
 		break
 	return edges
+
+
+# Keep traffic classification advisory.  The original edge modes are retained
+# verbatim; consumers choose which modes mean forward movement.
+func _build_traffic_candidates(segments: Array[Dictionary], edges: Array[Dictionary]) -> Array[Dictionary]:
+	var candidates: Array[Dictionary] = []
+	var traffic_routes := {}
+	for segment in segments:
+		if int(segment.get("route_type", -1)) == 1:
+			traffic_routes[int(segment.get("route_index", -1))] = true
+	for segment in segments:
+		var route_index := int(segment.get("route_index", -1))
+		if not traffic_routes.has(route_index):
+			continue
+		var links: Array[Dictionary] = []
+		for point in segment.get("points", []):
+			var edge_index := int(point.get("route_edge_index", 0xff))
+			if edge_index < 0 or edge_index >= edges.size():
+				continue
+			var edge: Dictionary = edges[edge_index]
+			if traffic_routes.has(int(edge.get("target_route_index", -1))):
+				links.append({
+					"source_point_index": int(point.get("index", -1)),
+					"edge_index": edge_index,
+					"target_route_index": int(edge.get("target_route_index", -1)),
+					"target_point_index": int(edge.get("target_point_index", -1)),
+					"mode": int(edge.get("mode", -1)),
+					"metadata0": int(edge.get("metadata0", 0)),
+					"metadata1": int(edge.get("metadata1", 0)),
+				})
+		candidates.append({
+			"route_index": route_index,
+			"route_type": 1,
+			"point_count": int(segment.get("point_count", 0)),
+			"flags": int(segment.get("flags", 0)),
+			"outgoing_links": links,
+		})
+	return candidates
 
 
 func _parse_route_into(asset, chunks: Array[Dictionary], bundle: PackedByteArray) -> void:

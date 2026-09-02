@@ -242,10 +242,16 @@ Exports the HP2 `TRACK_ROUTE` AI driving waypoints and
   --track 31 `
   --output D:\dev\eagl-godot\map_tools_ps2\out\HP2_TRACK31\route.txt
 ```
-- Model collision is the default: every road DFF receives a same-name COL3
-  built from its visible mesh. Props, vegetation, `SKYDOME`, and other distant
-  scenery receive a same-name bounds-only COL3 with no physical primitives.
-  HP2 `TrackCollisionPolygon` data is not used by the MTA exporter.
+- Model collision is the default. Road COL3 geometry uses HP2
+  `TrackCollisionPolygon` records when available and falls back to the visible
+  road mesh otherwise. The built-in HP2-to-GTA surface table preserves tarmac,
+  dirt, grass, shoulder, water, rock, wood, and metal behavior. Props,
+  vegetation, `SKYDOME`, and other distant scenery receive a same-name
+  bounds-only COL3 with no physical primitives.
+- Road render triangles are matched to HP2 collision surfaces. Their TXD/DFF
+  texture references receive `road_`, `dirt_`, or `grass_` prefixes; ordinary
+  uses of a shared source texture keep the original name. MTA shaders can
+  therefore target `road_*` without also affecting dirt, grass, or scenery.
 - Static models use automatic 500-2000 draw distance and props use 300.
 - Missing textures are warnings and do not abort the export.
 
@@ -258,6 +264,11 @@ When requested, debug staging is written beside the resource as
 `--collision model` is the default. Use `--collision bounds-only` to disable
 all physical collision while retaining one streaming-bounds COL per DFF. The
 legacy `track`, `hybrid`, `visual`, and `none` modes are intentionally rejected.
+`--collision-rules` accepts an optional JSON `hp2_materials` object whose
+numeric keys override individual entries in the built-in HP2 surface table;
+invalid or out-of-range values are reported and fall back to the built-in
+mapping. Existing `texture_materials` and `texture_patterns` rules remain the
+fallback for visual collision faces that have no matched HP2 material ID.
 
 LOD selection is automatic by default. The exporter combines model category,
 placement-scaled bounds, triangle count, and placement reuse. Small props and

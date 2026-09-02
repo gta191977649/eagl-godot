@@ -5,6 +5,7 @@ import json
 import math
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import bpy
@@ -671,6 +672,7 @@ def main() -> None:
     max_bounds_only_col_error = 0.0
     max_mesh_col_bounds_error = 0.0
     mesh_col_face_mismatches = []
+    mesh_col_surface_mismatches = []
     for path in col_dir.glob("*.col"):
         value = col_module.col.coll()
         value.load_file(str(path))
@@ -698,6 +700,17 @@ def main() -> None:
                     mesh_col_face_mismatches.append(
                         {"model": path.stem, "dff": expected_faces, "col": len(model.mesh_faces)}
                     )
+                expected_surfaces = Counter(int(value) for value in expected_model.get("collision_materials", []))
+                actual_surfaces = Counter(
+                    int(face.material if hasattr(face, "material") else face.surface.material)
+                    for face in model.mesh_faces
+                )
+                if expected_surfaces != actual_surfaces:
+                    mesh_col_surface_mismatches.append({
+                        "model": path.stem,
+                        "expected": dict(sorted(expected_surfaces.items())),
+                        "actual": dict(sorted(actual_surfaces.items())),
+                    })
                 # Native road COL geometry intentionally does not have the
                 # same faces or bounds as the visual DFF. Compare the
                 # DragonFF result with the staged collision vertices when
@@ -719,6 +732,8 @@ def main() -> None:
         raise RuntimeError(f"bounds-only COL does not match DFF bounds: {max_bounds_only_col_error}")
     if mesh_col_face_mismatches:
         raise RuntimeError(f"mesh COL face counts do not match staged collision geometry: {mesh_col_face_mismatches}")
+    if mesh_col_surface_mismatches:
+        raise RuntimeError(f"mesh COL surfaces do not match staged collision materials: {mesh_col_surface_mismatches}")
     if max_mesh_col_bounds_error > 0.01:
         raise RuntimeError(f"mesh COL does not match DFF bounds: {max_mesh_col_bounds_error}")
     if dff_texture_mismatches or dff_material_assignment_mismatches:
@@ -761,6 +776,7 @@ def main() -> None:
                 "max_bounds_only_col_error": max_bounds_only_col_error,
                 "max_mesh_col_bounds_error": max_mesh_col_bounds_error,
                 "mesh_col_face_mismatches": mesh_col_face_mismatches,
+                "mesh_col_surface_mismatches": mesh_col_surface_mismatches,
                 "dff_col_name_sets_match": True,
                 "lod": manifest.get("lod_generation", []),
                 "status": "ok",
