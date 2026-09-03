@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .cli import main as cli_main
 from .progress import progress_context
+from .race_catalog import FAMILIES, TRACK_IDS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -94,6 +95,8 @@ class ExportGui:
         self.resource_name = tk.StringVar()
         self.skybox_subdir = tk.StringVar(value="skybox")
         self.export_type = tk.StringVar(value="MTA Resource")
+        # Deliberately not persisted: ordinary Eagle exports are the default.
+        self.export_packed = tk.BooleanVar(value=False)
         self.author = tk.StringVar(value="map_tools_ps2")
         self.collision = tk.StringVar(value="model")
         self.native_collision = tk.StringVar(value="auto")
@@ -237,6 +240,21 @@ class ExportGui:
         self._combo(basic, 4, "Native Road Collision", self.native_collision, ("auto", "required", "off"))
         self._combo(basic, 5, "Vertex Colors", self.vertex_colors, ("always", "auto", "off"))
         self._field(basic, 6, "Spatial Chunk Size", self.chunk_size)
+        packed_check = ttk.Checkbutton(basic, text="Export Packed", variable=self.export_packed)
+        packed_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(
+            basic,
+            text="Packed: exports all 6 variants of the selected family for track_manager. "
+                 "Uses hp2_<family>_pack and fixed family export settings; Resource Name, "
+                 "collision, vertex color, chunk and LOD options above do not apply. "
+                 "Unchecked: standalone standard Eagle map, without effect scripts/plugins.",
+            foreground="#666", wraplength=700,
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        def update_packed_state(*_args):
+            packed_check.configure(state="normal" if self.export_type.get() == "MTA Resource" else "disabled")
+        self.export_type.trace_add("write", update_packed_state)
+        update_packed_state()
+
 
         self._combo(lod, 0, "LOD Mode", self.lod_mode, ("auto", "required", "off"))
         self._field(lod, 1, "LOD Main Size Threshold", self.lod_min_size)
@@ -596,6 +614,17 @@ class ExportGui:
         if track_number is None:
             raise ValueError(f"Invalid track selection: {self.track.get()!r}")
         number = track_number.group(0)
+        if self.export_type.get() == "MTA Resource" and self.export_packed.get():
+            if int(number) not in TRACK_IDS:
+                raise ValueError(f"Unsupported packed track: {number}")
+            family = FAMILIES[int(number) // 10 * 10]
+            root = Path(self.output_dir.get().strip())
+            target = root / f"hp2_{family}_pack"
+            if target.exists() and (not target.is_dir() or any(target.iterdir())):
+                raise ValueError(f"Packed output must be a new or empty directory: {target}")
+            return ["export-mta-families", "--game-dir", self.game_dir.get().strip(),
+                    "--output", str(root), "--family", family,
+                    "--author", self.author.get().strip() or "map_tools_ps2"], target
         target, resource_name = self._prepare_output(number)
         texture_dir = str(Path(self.game_dir.get().strip()) / "ZZDATA" / "TRACKS")
         export_type = self.export_type.get()

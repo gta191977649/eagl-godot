@@ -622,6 +622,16 @@ def build_parser() -> argparse.ArgumentParser:
     mta_parser.add_argument("--img-rollover-bytes", type=int, default=1_500_000_000)
     mta_parser.set_defaults(func=_cmd_export_mta)
 
+    from .managed_export import command as export_family_command
+    family_parser = subparsers.add_parser("export-mta-families", help="export shared, runtime-managed HP2 Eagle family packs")
+    family_parser.add_argument("--game-dir", required=True)
+    family_parser.add_argument("-o", "--output", required=True)
+    family_parser.add_argument("--family", choices=("all", "parkland", "desert", "medit", "alpine", "tropic"), default="all")
+    family_parser.add_argument("--blender")
+    family_parser.add_argument("--dragonff-path")
+    family_parser.add_argument("--author", default="map_tools_ps2")
+    family_parser.set_defaults(func=export_family_command)
+
     skybox_parser = subparsers.add_parser(
         "export-skybox",
         help="export textures referenced by SKYDOME/SKYBOX objects as PNG files",

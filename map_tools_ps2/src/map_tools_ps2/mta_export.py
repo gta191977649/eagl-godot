@@ -23,6 +23,26 @@ DEFAULT_BLENDER_PATHS = (
     Path(r"C:\Program Files\Blender Foundation\Blender 4.3\blender.exe"),
 )
 
+_BARRIER_ANIMATION_FX = """texture gAnimTexture;
+
+technique hp2BarrierNeon
+{
+    pass P0
+    {
+        Texture[0] = gAnimTexture;
+        ColorOp[0] = Modulate;
+        ColorArg1[0] = Texture;
+        ColorArg2[0] = Diffuse;
+        AlphaOp[0] = SelectArg1;
+        AlphaArg1[0] = Texture;
+        AlphaBlendEnable = true;
+        SrcBlend = One;
+        DestBlend = One;
+        ZWriteEnable = false;
+    }
+}
+"""
+
 
 def find_blender(explicit: Path | None) -> Path:
     if explicit is not None:
@@ -442,19 +462,6 @@ def _write_resource_xml(
     for archive in archive_paths:
         ET.SubElement(meta, "file", {"src": f"imgs/{archive.name}", "type": "client"})
     _indent_write(meta, root / "meta.xml")
-    eagle_scene = {
-        "format": "EagleScene",
-        "revision": 2,
-        "sections": {
-            "lights": {"lights": [], "version": 1},
-            "materialClasses": {"materials": [], "version": 2},
-            "materialEmitters": {"emitters": [], "version": 2},
-            "safeCollisions": {"safeCollisions": [], "version": 1},
-            "shadowCasters": {"overrides": [], "version": 1},
-        },
-        "version": 1,
-    }
-    (root / "EagleScene.eaglescne").write_text(json.dumps(eagle_scene, indent=2), encoding="utf-8")
     return archive_declarations
 
 
@@ -505,6 +512,8 @@ def export_mta_resource(
             raise RuntimeError(f"water.dat was not written to the MTA resource: {water_path}")
         water_report = {**water_report, "file": "water.dat", "path": str(water_path)}
         report_progress("Writing MTA resource", 3, 4, None)
+        # Standalone maps use native IDE flags; animation belongs to the managed runtime.
+        animation_assets = {"status": "disabled", "reason": "standard Eagle export", "files": []}
         img_declarations = _write_resource_xml(scene, output_dir, author, archive_paths, offset)
 
         dff_entries = {name[:-4] for archive in archive_paths if archive.name.startswith("dff") for _off, _size, name in read_img_v2_directory(archive) if name.endswith(".dff")}
@@ -553,6 +562,7 @@ def export_mta_resource(
                     "actual_files": [archive.name for archive in archive_paths],
                 },
                 "water_dat": water_report,
+                "texture_animation_assets": animation_assets,
                 "warnings": scene.warnings,
                 "blender_status": "ok" if '"status": "ok"' in blender_log else "completed",
                 "dragonff_readback": bridge_report,

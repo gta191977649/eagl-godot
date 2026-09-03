@@ -3,13 +3,20 @@ import math
 import struct
 import xml.etree.ElementTree as ET
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from map_tools_ps2.binary import IDENTITY4, Vec3, transform_point
 from map_tools_ps2.img_archive import ImgEntry, read_img_v2_directory, write_img_v2
-from map_tools_ps2.mta_export import _img_archive_declarations, _prepare_eagle_lods, _write_resource_xml, _write_staging, _write_water_dat
+from map_tools_ps2.mta_export import (
+    _img_archive_declarations,
+    _prepare_eagle_lods,
+    _write_resource_xml,
+    _write_staging,
+    _write_water_dat,
+)
 from map_tools_ps2.model import DecodedBlock, MeshObject, Scene, SceneryInstance, TrackCollisionPolygon
 from map_tools_ps2.mta_scene import (
     DEFAULT_HP2_TO_GTA_SURFACE,
@@ -22,7 +29,7 @@ from map_tools_ps2.mta_scene import (
 )
 from map_tools_ps2.mta_txd import build_bgra_mip_chain, build_dxt_mip_chain, dxt_raster_format_flags, mip_dimensions
 from map_tools_ps2.material_alpha import decide_material_alpha, is_opaque_surface_state
-from map_tools_ps2.textures import TextureLibrary
+from map_tools_ps2.textures import TextureAnimation, TextureLibrary
 from map_tools_ps2.vif import VifVertexRun
 
 
@@ -1049,3 +1056,118 @@ def test_eagle_meshoptimizer_lod_preserves_source_texture_material_and_uv():
     assert {entry["texture_strategy"] for entry in result.report["lod_generation"]} == {
         "reuse source track TXD with exact material names and UVs"
     }
+
+
+def _animated_barrier_scene():
+    frame_hash = 0x2413C4C4
+    neon_hashes = (0x1861DE29, 0xB85212CA, 0xB85212CB, 0xB85212CC)
+
+    def block(x, texture_index):
+        run = VifVertexRun(
+            vertices=(Vec3(x, 0, 0), Vec3(x + 1, 0, 0), Vec3(x, 0, 2)),
+            texcoords=((0, 0), (1, 0), (0, 1)),
+            packed_values=(0xFFFF,) * 3,
+            header=None,
+            tri_cull=None,
+        )
+        return DecodedBlock(run, primitive_mode="triangles", texture_index=texture_index)
+
+    low_back = _triangle_object("XS_TRACK_BARRIERBBW_1A_", 10, texture_hashes=(frame_hash,))
+    low_forward = _triangle_object("XS_TRACK_BARRIERBFW_1A_", 11, texture_hashes=(frame_hash,))
+    full_blocks = tuple(block(index * 2, index) for index in range(5))
+    full_back = MeshObject(
+        "XS_TRACK_BARRIERBW_1A_0", 12, IDENTITY4, full_blocks,
+        (frame_hash, *neon_hashes), 0x100,
+    )
+    full_forward = MeshObject(
+        "XS_TRACK_BARRIERFW_1A_0", 13, IDENTITY4, full_blocks,
+        (frame_hash, *neon_hashes), 0x101,
+    )
+    transform = _matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(20, 30, 0))
+    scene = Scene(
+        objects=[low_back, low_forward, full_back, full_forward],
+        scenery_instances=[
+            SceneryInstance(0, low_back.name, transform, 100, 0, visibility_flags=0x08),
+            SceneryInstance(1, low_forward.name, transform, 100, 1, visibility_flags=0x04),
+        ],
+        scenery_template_offsets={10, 11, 12, 13},
+    )
+    texture_values = {frame_hash: _alpha_texture("TRACK_BARRIER_FRAME", blend=False)}
+    texture_values.update({value: _alpha_texture(f"TRACK_BARRIER_NEON{index}", blend=True) for index, value in enumerate(neon_hashes)})
+    animation = TextureAnimation(
+        "TRACK_BARRIER_NEON", neon_hashes[0], neon_hashes, 4.0,
+        Path("INGAMEB.BUN"),
+    )
+    return scene, TextureLibrary(texture_values, {animation.base_hash: animation}), neon_hashes
+
+
+def test_mta_upgrades_track_barrier_and_deduplicates_direction_variants():
+    source, textures, neon_hashes = _animated_barrier_scene()
+    result = build_mta_scene(
+        source, textures, track_id=31, resource_name="TEST",
+        collision_mode="bounds-only", lod_mode="off",
+    )
+
+    report = result.report["track_barriers"]
+    assert report["upgraded_instances"] == 2
+    assert report["equivalent_barrier_duplicates_removed"] == 1
+    assert report["animated_instances"] == 1
+    assert report["visibility_flags"] == {"0x0004": 1, "0x0008": 1}
+    assert report["resolved_templates"] == {"XS_TRACK_BARRIERBW_1A_0": 1}
+    assert [binding.phase for binding in result.texture_animations] == [0, 1, 2, 3]
+    assert all(binding.frame_hashes == neon_hashes for binding in result.texture_animations)
+    assert all(binding.frames_per_second == 4.0 for binding in result.texture_animations)
+    assert len([placement for placement in result.placements if placement.element_type == "object"]) == 2
+    assert {model.render_layer for model in result.models} == {"base", "blend"}
+    assert next(model for model in result.models if model.render_layer == "blend").additive is True
+    assert sum(len(model.faces) for model in result.models) == 5
+
+
+def test_standalone_barriers_use_native_flags_without_effects_or_plugins(tmp_path):
+    source, textures, _neon_hashes = _animated_barrier_scene()
+    result = build_mta_scene(
+        source, textures, track_id=31, resource_name="TEST",
+        collision_mode="bounds-only", lod_mode="off",
+    )
+    (tmp_path / "imgs").mkdir()
+    archive = tmp_path / "imgs" / "dff.img"
+    archive.write_bytes(b"")
+    _write_resource_xml(result, tmp_path, "tester", [archive], (0, 0, 0))
+
+    meta = ET.parse(tmp_path / "meta.xml").getroot()
+    assert not meta.findall("script")
+    assert not any("effects/" in node.get("src", "") for node in meta)
+    assert not (tmp_path / "effects").exists()
+    assert not (tmp_path / "EagleScene.eaglescne").exists()
+    assert (tmp_path / "eagleZones.txt").is_file()
+    definitions = [node for path in tmp_path.glob("zones/*/*.definition")
+                   for node in ET.parse(path).getroot()]
+    blend_ids = {model.model_id for model in result.models if model.additive}
+    assert blend_ids
+    for node in definitions:
+        if node.get("id") in blend_ids:
+            assert {"draw_last", "additive", "no_zbuffer_write"} <= set(node.get("flags", "").split(","))
+
+
+def test_standalone_export_does_not_emit_animation_assets(tmp_path, monkeypatch):
+    import map_tools_ps2.mta_export as exporter
+    source, textures, _ = _animated_barrier_scene()
+    scene = build_mta_scene(source, textures, track_id=31, resource_name="TEST",
+                            collision_mode="bounds-only", lod_mode="off")
+    def fake_blender(scene, textures, stage_dir, blender, dragonff):
+        for extension in ("dff", "col"):
+            folder = stage_dir / extension
+            folder.mkdir()
+            for model in scene.models:
+                (folder / f"{model.model_id}.{extension}").write_bytes(b"fixture")
+        (stage_dir / "track31.txd").write_bytes(b"fixture")
+        return stage_dir, 'Blender fixture {"status": "ok"}', {}
+    monkeypatch.setattr(exporter, "find_blender", lambda _: Path("blender"))
+    monkeypatch.setattr(exporter, "_run_blender", fake_blender)
+    output = tmp_path / "map"
+    report_path = exporter.export_mta_resource(scene, textures, output, author="tester")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["texture_animation_assets"]["status"] == "disabled"
+    assert not (output / "effects").exists()
+    assert not (output / "EagleScene.eaglescne").exists()
+    assert not ET.parse(output / "meta.xml").getroot().findall("script")

@@ -128,11 +128,13 @@ def read_ps2_texture_animations(data: bytes, source_path: Path) -> tuple[Texture
         record = metadata[offset : offset + 0x34]
         name = record[:0x18].split(b"\0")[0].decode("ascii", errors="replace")
         base_hash, frame_count, frames_per_second = struct.unpack_from("<III", record, 0x18)
-        if not name or not base_hash or frame_count <= 0:
-            continue
         frame_hashes = frame_values[frame_offset : frame_offset + frame_count]
         frame_offset += frame_count
-        if len(frame_hashes) != frame_count or any(value == 0 for value in frame_hashes):
+        if (
+            not name or not base_hash or frame_count <= 0
+            or len(frame_hashes) != frame_count
+            or any(value == 0 for value in frame_hashes)
+        ):
             continue
         animations.append(
             TextureAnimation(

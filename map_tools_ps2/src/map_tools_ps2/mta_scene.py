@@ -6,7 +6,7 @@ import math
 import re
 import statistics
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -84,6 +84,15 @@ class MtaWaterQuad:
     water_type: int = 1
 
 
+@dataclass(frozen=True)
+class MtaTextureAnimationBinding:
+    animation_name: str
+    target_texture_name: str
+    frame_hashes: tuple[int, ...]
+    frames_per_second: float
+    phase: int
+
+
 @dataclass
 class MtaScene:
     track_id: int
@@ -96,6 +105,7 @@ class MtaScene:
     report: dict[str, Any]
     water_quads: list[MtaWaterQuad] = field(default_factory=list)
     texture_variants: dict[tuple[int, str, str | None], str] = field(default_factory=dict)
+    texture_animations: list[MtaTextureAnimationBinding] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -125,6 +135,11 @@ _MTA_WATER_MIN_FRAGMENT_AREA = 16.0
 _MTA_WATER_EDGE_PADDING = 8.0
 _MTA_WATER_SNAP_GRID = 0.0
 _MTA_WATER_BOUNDARY_TOLERANCE = 1.0
+_TRACK_BARRIER_TEMPLATE_UPGRADES = {
+    "XS_TRACK_BARRIERBBW_1A_": "XS_TRACK_BARRIERBW_1A_0",
+    "XS_TRACK_BARRIERBFW_1A_": "XS_TRACK_BARRIERFW_1A_0",
+}
+_TRACK_BARRIER_ANIMATION_NAME = "TRACK_BARRIER_NEON"
 
 
 HP2_SURFACE_NAMES = {
@@ -278,6 +293,80 @@ def _deduplicate_scenery_instances(
         "duplicate_placements_removed": sum(count - 1 for count in duplicate_counts),
         "max_duplicate_placement_multiplicity": max(duplicate_counts, default=1),
     }
+
+
+def _mesh_visual_fingerprint(obj: MeshObject) -> str:
+    values: list[object] = [obj.texture_hashes]
+    for block in obj.blocks:
+        values.append((block.texture_index, block.render_flag, block.primitive_mode))
+        values.extend(tuple(round(value, 4) for value in vertex) for vertex in block.run.vertices)
+        values.extend(tuple(round(value, 4) for value in uv) for uv in block.run.texcoords)
+    return hashlib.blake2s(repr(values).encode("utf-8"), digest_size=12).hexdigest()
+
+
+def _resolve_mta_scenery_instances(
+    scene: Scene,
+) -> tuple[list[SceneryInstance], dict[str, Any], list[str]]:
+    source_instances, base_report = _deduplicate_scenery_instances(scene.scenery_instances)
+    objects_by_name = {obj.name: (index, obj) for index, obj in enumerate(scene.objects)}
+    resolved: list[SceneryInstance] = []
+    upgraded = 0
+    missing_targets: set[str] = set()
+    source_counts: Counter[str] = Counter()
+    resolved_counts: Counter[str] = Counter()
+    visibility_flags: Counter[str] = Counter()
+    barrier_occurrences: Counter[tuple[str, tuple[tuple[float, ...], ...]]] = Counter()
+    barrier_duplicates_removed = 0
+
+    for instance in source_instances:
+        target_name = _TRACK_BARRIER_TEMPLATE_UPGRADES.get(instance.object_name, instance.object_name)
+        is_track_barrier = (
+            instance.object_name in _TRACK_BARRIER_TEMPLATE_UPGRADES
+            or target_name in _TRACK_BARRIER_TEMPLATE_UPGRADES.values()
+        )
+        if is_track_barrier:
+            source_counts[instance.object_name] += 1
+            visibility_flags[f"0x{instance.visibility_flags:04x}"] += 1
+        target_entry = objects_by_name.get(target_name)
+        if target_entry is None:
+            if target_name != instance.object_name:
+                missing_targets.add(target_name)
+            resolved_instance = instance
+            target_obj = objects_by_name.get(instance.object_name, (None, None))[1]
+        else:
+            target_index, target_obj = target_entry
+            resolved_instance = replace(
+                instance,
+                object_index=target_index,
+                object_name=target_name,
+                object_hash=target_obj.name_hash,
+            )
+            if target_name != instance.object_name:
+                upgraded += 1
+
+        if target_obj is not None and target_name in set(_TRACK_BARRIER_TEMPLATE_UPGRADES.values()):
+            transform_key = tuple(tuple(round(value, 5) for value in row) for row in instance.transform)
+            key = (_mesh_visual_fingerprint(target_obj), transform_key)
+            barrier_occurrences[key] += 1
+            if barrier_occurrences[key] > 1:
+                barrier_duplicates_removed += 1
+                continue
+        resolved.append(resolved_instance)
+        if is_track_barrier:
+            resolved_counts[resolved_instance.object_name] += 1
+
+    report = {
+        **base_report,
+        "source_templates": dict(sorted(source_counts.items())),
+        "resolved_templates": dict(sorted(resolved_counts.items())),
+        "visibility_flags": dict(sorted(visibility_flags.items())),
+        "upgraded_instances": upgraded,
+        "equivalent_barrier_duplicates_removed": barrier_duplicates_removed,
+        "resolved_placements": len(resolved),
+        "missing_upgrade_targets": sorted(missing_targets),
+    }
+    warnings = [f"missing complete track-barrier template: {name}" for name in sorted(missing_targets)]
+    return resolved, report, warnings
 
 
 def zone_name(track_id: int, cell: tuple[int, int]) -> str:
@@ -597,6 +686,16 @@ def _configure_model_render_state(model: MtaModel, layer: str) -> None:
         model.draw_last = True
         model.no_zbuffer_write = True
         model.additive = False
+
+
+def _configure_animated_material_render_state(model: MtaModel, animated_hashes: set[int]) -> None:
+    material_hashes = {material.texture_hash for material in model.materials if material.texture_hash is not None}
+    if material_hashes and material_hashes <= animated_hashes:
+        # Preserve a usable static fallback if the client shader cannot be
+        # created. HP2 neon frames use black as zero contribution.
+        model.draw_last = True
+        model.no_zbuffer_write = True
+        model.additive = True
 
 
 def _triangle_bounds(triangles: list[_Triangle]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -964,6 +1063,7 @@ def _native_collision_for_roads(
     native_collision: str,
     native_secondary: str,
     chunk_size: float,
+    overflow_models: list[MtaModel] | None = None,
 ) -> dict[str, Any]:
     """Replace only road COL geometry with HP2-native collision polygons.
 
@@ -1078,20 +1178,36 @@ def _native_collision_for_roads(
             road_z = nearest_height(center[0], center[1])
             native_min = min(point[2] for point in source_points)
             native_max = max(point[2] for point in source_points)
-            # Select by the wall's XY position before clipping its vertical
-            # span. The model origin is part of the COL3 representability
-            # constraint, so the final Z interval is model-specific.
-            model = min(model_bounds, key=lambda item: _xy_aabb_distance(center, item[1]))[0]
-            # Keep the wall above the road and inside the COL3 local range.
-            lower = max(native_min, road_z - 255.0, model.origin[2] - 255.0)
-            upper = min(native_max, road_z + 255.0, model.origin[2] + 255.0)
-            points_world = [
-                (endpoint_a[0], endpoint_a[1], lower),
-                (endpoint_a[0], endpoint_a[1], upper),
-                (endpoint_b[0], endpoint_b[1], upper),
-                (endpoint_b[0], endpoint_b[1], lower),
-            ]
-            if native_min < lower or native_max > upper:
+            # The model origin is part of the COL3 representability constraint
+            # and the wall's vertical span is clipped against it, so a model can
+            # only be judged after its own clip. Walk candidates by XY distance
+            # and take the first whose origin can represent the whole quad --
+            # the same "first that fits" rule choose_model() uses. Taking the
+            # nearest bounding box outright handed walls to models whose origin
+            # was too far to encode them, which failed the +/-255 check below
+            # and aborted the export on tracks with long roadside barriers.
+            def wall_quad(candidate: MtaModel) -> list[tuple[float, float, float]]:
+                low = max(native_min, road_z - 255.0, candidate.origin[2] - 255.0)
+                high = min(native_max, road_z + 255.0, candidate.origin[2] + 255.0)
+                return [
+                    (endpoint_a[0], endpoint_a[1], low),
+                    (endpoint_a[0], endpoint_a[1], high),
+                    (endpoint_b[0], endpoint_b[1], high),
+                    (endpoint_b[0], endpoint_b[1], low),
+                ]
+
+            ordered = sorted(model_bounds, key=lambda item: _xy_aabb_distance(center, item[1]))
+            points_world = wall_quad(ordered[0][0])
+            for candidate, _candidate_bounds in ordered:
+                candidate_points = wall_quad(candidate)
+                if all(
+                    abs(point[axis] - candidate.origin[axis]) <= 255.0 + 1e-5
+                    for point in candidate_points
+                    for axis in range(3)
+                ):
+                    model, points_world = candidate, candidate_points
+                    break
+            if native_min < points_world[0][2] or native_max > points_world[1][2]:
                 result["native_wall_vertices_clipped"] += 4
             faces = [(0, 1, 2), (0, 2, 3)]
         else:
@@ -1099,6 +1215,19 @@ def _native_collision_for_roads(
             faces = [(0, index, index + 1) for index in range(1, len(points_world) - 1)]
         if model is None:
             model = choose_model(center, points_world)
+        if model is None and overflow_models is not None:
+            from .managed_collision import add_carrier_faces
+            if role == "wall_barrier":
+                # The rejected candidate's origin must not clip this wall.
+                low, high = max(native_min, road_z - 255.0), min(native_max, road_z + 255.0)
+                points_world = [(endpoint_a[0], endpoint_a[1], low), (endpoint_a[0], endpoint_a[1], high),
+                                (endpoint_b[0], endpoint_b[1], high), (endpoint_b[0], endpoint_b[1], low)]
+            surface = _native_collision_surface(polygon.material_id, rules)
+            add_carrier_faces(overflow_models, points_world, faces, surface)
+            assigned_indices.add(polygon.index)
+            material_counts[str(polygon.material_id)] += 1
+            material_surfaces[str(polygon.material_id)] = surface
+            continue
         if model is None:
             result["native_polygons_unassigned"] += 1
             continue
@@ -1135,7 +1264,8 @@ def _native_collision_for_roads(
         2 for polygon in walls if polygon.index in assigned_indices
     )
     result["native_secondary_ignored"] = len(secondary) if native_secondary == "ignore" else 0
-    result["road_collision_faces_after"] = sum(len(model.collision_faces) for model in target_models)
+    result["native_collision_carriers"] = len(overflow_models or [])
+    result["road_collision_faces_after"] = sum(len(model.collision_faces) for model in [*target_models, *(overflow_models or [])])
     result["edge_wall_models"] = sum(
         1 for model in target_models if model.model_id in wall_model_ids
     )
@@ -1203,13 +1333,17 @@ def _bounds(points: Iterable[tuple[float, float, float]]) -> dict[str, list[floa
     return {"min": minimum, "max": maximum}
 
 
-def _source_visual_points(static_objects: dict[str, list[_Triangle]], scene: Scene, templates: dict[str, MeshObject]):
+def _source_visual_points(
+    static_objects: dict[Any, list[_Triangle]],
+    instances: Iterable[SceneryInstance],
+    templates: dict[str, MeshObject],
+):
     for triangles in static_objects.values():
         for triangle in triangles:
             for vertex in triangle.vertices:
                 yield vertex.position
     triangle_cache = {name: list(_triangles_for_object(obj, bake_transform=False)) for name, obj in templates.items()}
-    for instance in scene.scenery_instances:
+    for instance in instances:
         if _is_mta_visual_excluded(instance.object_name):
             continue
         for triangle in triangle_cache.get(instance.object_name, ()):
@@ -1605,9 +1739,14 @@ def _water_quads_for_triangles(
             x0, x1 = bottom_left, bottom_right
             y0, y1 = _even_water_coordinate(coordinate0, snap_grid), _even_water_coordinate(coordinate1, snap_grid)
         else:
-            y0, y1 = (_even_water_coordinate(value, snap_grid) for value in first)
+            # Mirror of the axis==1 case with the roles of x and y swapped:
+            # the strip runs along x, so `first`/`second` are the y spans at
+            # its two ends.  The corner block below already reads them under
+            # the bottom_*/top_* names.
+            bottom_left, bottom_right = (_even_water_coordinate(value, snap_grid) for value in first)
             top_left, top_right = (_even_water_coordinate(value, snap_grid) for value in second)
             x0, x1 = _even_water_coordinate(coordinate0, snap_grid), _even_water_coordinate(coordinate1, snap_grid)
+            y0, y1 = bottom_left, bottom_right
         if (
             bottom_right - bottom_left < 1e-4
             or top_right - top_left < 1e-4
@@ -1698,6 +1837,7 @@ def build_mta_scene(
     collision_rules: dict[str, Any] | None = None,
     native_collision: str = "auto",
     native_secondary: str = "ignore",
+    native_collision_overflow: bool = False,
     lod_mode: str = "auto",
     lod_min_size: float = 100.0,
     lod_target_ratio: float = 0.12,
@@ -1732,8 +1872,54 @@ def build_mta_scene(
         tex_hash: _texture_name(texture.name, tex_hash, used_texture_names)
         for tex_hash, texture in sorted(textures.textures.items())
     }
+    barrier_source_present = any(
+        instance.object_name in _TRACK_BARRIER_TEMPLATE_UPGRADES
+        or instance.object_name in _TRACK_BARRIER_TEMPLATE_UPGRADES.values()
+        for instance in scene.scenery_instances
+    )
+    texture_animations = tuple(getattr(textures, "animations", {}).values())
+    barrier_animation = next(
+        (animation for animation in texture_animations if animation.name.upper() == _TRACK_BARRIER_ANIMATION_NAME),
+        None,
+    )
+    animated_texture_hashes = set(barrier_animation.frame_hashes) if barrier_animation is not None else set()
+    if barrier_source_present:
+        barrier_templates = {
+            obj.name: obj for obj in scene.objects
+            if obj.name in _TRACK_BARRIER_TEMPLATE_UPGRADES.values()
+        }
+        missing_templates = sorted(set(_TRACK_BARRIER_TEMPLATE_UPGRADES.values()) - set(barrier_templates))
+        required_hashes = {
+            texture_hash
+            for obj in barrier_templates.values()
+            for texture_hash in obj.texture_hashes
+        }
+        missing_hashes = sorted(value for value in required_hashes if textures.get(value) is None)
+        if missing_templates or barrier_animation is None or missing_hashes:
+            global_source = getattr(textures, "global_source", None)
+            detail = []
+            if missing_templates:
+                detail.append(f"templates={missing_templates}")
+            if barrier_animation is None:
+                detail.append(f"animation={_TRACK_BARRIER_ANIMATION_NAME}")
+            if missing_hashes:
+                detail.append("textures=" + ",".join(f"0x{value:08x}" for value in missing_hashes))
+            source_hint = str(global_source) if global_source is not None else "ZZDATA/GLOBAL/INGAMEB.BUN"
+            raise ValueError(
+                "complete HP2 track-barrier assets are unavailable (" + "; ".join(detail) + "); "
+                f"expected global texture bundle: {source_hint}"
+            )
+        for phase, texture_hash in enumerate(barrier_animation.frame_hashes):
+            texture_names[texture_hash] = _texture_name(
+                f"hp2_t{track_id:02d}_barneon{phase}", texture_hash, used_texture_names
+            )
     alpha_decisions, alpha_usage = alpha_decisions_for_scene(scene, textures)
-    scenery_instances, placement_deduplication = _deduplicate_scenery_instances(scene.scenery_instances)
+    scenery_instances, placement_deduplication, scenery_resolution_warnings = _resolve_mta_scenery_instances(scene)
+    if placement_deduplication["missing_upgrade_targets"]:
+        raise ValueError(
+            "complete HP2 track-barrier templates are missing: "
+            + ", ".join(placement_deduplication["missing_upgrade_targets"])
+        )
     placement_names = {instance.object_name for instance in scenery_instances}
     road_names = {obj.name for obj in scene.objects if obj.name.upper().startswith("RD_SECTION")}
     templates = {
@@ -1835,6 +2021,7 @@ def build_mta_scene(
             model = MtaModel(model_id, source_name, role, zone_name(track_id, cell), origin)
             _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
             _configure_model_render_state(model, layer)
+            _configure_animated_material_render_state(model, animated_texture_hashes)
             if is_companion:
                 blend_companion_models += 1
             if vertex_colors == "off":
@@ -1918,6 +2105,7 @@ def build_mta_scene(
                 object_lod_enabled,
             )
 
+    overflow_models: list[MtaModel] = []
     native_metrics = _native_collision_for_roads(
         scene,
         road_models,
@@ -1925,6 +2113,7 @@ def build_mta_scene(
         native_collision=native_collision,
         native_secondary=native_secondary,
         chunk_size=chunk_size,
+        overflow_models=overflow_models if native_collision_overflow else None,
     ) if collision_mode == "model" else _native_collision_for_roads(
         scene,
         road_models,
@@ -1939,8 +2128,12 @@ def build_mta_scene(
             max_col3_coordinate,
             native_metrics["max_native_col3_local_coordinate"],
         )
+    for model in overflow_models:
+        models.append(model)
+        placements.append(MtaPlacement(model.model_id, model.zone, "building", model.origin,
+                                       (0.0, 0.0, 0.0), model.source_name))
 
-    warnings: list[str] = _collision_rule_warnings(collision_rules)
+    warnings: list[str] = [*_collision_rule_warnings(collision_rules), *scenery_resolution_warnings]
     unknown_hp2_materials = sorted({
         polygon.material_id
         for polygon in scene.track_collision_polygons
@@ -2102,6 +2295,7 @@ def build_mta_scene(
             model = MtaModel(model_id, name, "prop", zone_name(track_id, owner_cell), origin)
             _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
             _configure_model_render_state(model, layer)
+            _configure_animated_material_render_state(model, animated_texture_hashes)
             if is_companion:
                 blend_companion_models += 1
             prop_pivot_offsets_after.append(_length(_local_bounds_center(model.vertices)))
@@ -2156,8 +2350,9 @@ def build_mta_scene(
             f"invalid LOD assignment: names={lod_name_assignment_errors[:5]}, unresolved={unresolved_lod_parents[:5]}, "
             f"maximum transform difference={max_lod_placement_difference}"
         )
-    source_bounds = _bounds(_source_visual_points(static_triangles, scene, templates))
-    output_bounds = _bounds(_output_visual_points(models, placements))
+    source_bounds = _bounds(_source_visual_points(static_triangles, scenery_instances, templates))
+    visual_ids = {model.model_id for model in models if model.kind != "native_collision"}
+    output_bounds = _bounds(_output_visual_points(models, [p for p in placements if p.model_id in visual_ids]))
     bounds_error = 0.0
     if source_bounds and output_bounds:
         bounds_error = max(
@@ -2199,11 +2394,51 @@ def build_mta_scene(
     }
     missing_texture_hashes = sorted(value for value in referenced_texture_hashes if value not in texture_names)
     warnings.extend(f"missing texture hash: 0x{value:08x}" for value in missing_texture_hashes)
+    animation_bindings: list[MtaTextureAnimationBinding] = []
+    if barrier_animation is not None:
+        for phase, texture_hash in enumerate(barrier_animation.frame_hashes):
+            target_names = sorted({
+                material.texture_name
+                for model in models
+                for material in model.materials
+                if material.texture_hash == texture_hash and material.texture_name is not None
+            })
+            animation_bindings.extend(
+                MtaTextureAnimationBinding(
+                    animation_name=barrier_animation.name,
+                    target_texture_name=target_name,
+                    frame_hashes=barrier_animation.frame_hashes,
+                    frames_per_second=barrier_animation.frames_per_second,
+                    phase=phase,
+                )
+                for target_name in target_names
+            )
+    animation_report = {
+        "name": barrier_animation.name if barrier_animation is not None else None,
+        "frame_hashes": [f"0x{value:08x}" for value in barrier_animation.frame_hashes]
+        if barrier_animation is not None else [],
+        "frames_per_second": barrier_animation.frames_per_second if barrier_animation is not None else 0.0,
+        "bindings": [
+            {"target_texture": binding.target_texture_name, "phase": binding.phase}
+            for binding in animation_bindings
+        ],
+    }
     report = {
         "source_objects": len(scene.objects),
         "static_source_objects": len(static_objects),
         "source_placements": len(scene.scenery_instances),
         **placement_deduplication,
+        "track_barriers": {
+            **placement_deduplication,
+            "animated_instances": sum(
+                count for name, count in placement_deduplication["resolved_templates"].items()
+                if name in _TRACK_BARRIER_TEMPLATE_UPGRADES.values()
+            ),
+            "animation": animation_report,
+        },
+        "texture_sources": [str(path) for path in getattr(textures, "source_paths", ())],
+        "global_texture_source": str(getattr(textures, "global_source", None))
+        if getattr(textures, "global_source", None) is not None else None,
         "excluded_static_models": [obj.name for obj in excluded_static_objects],
         "excluded_scenery_placements": dict(sorted(excluded_scenery_placements.items())),
         "output_placements": len(placements),
@@ -2307,5 +2542,5 @@ def build_mta_scene(
     }
     return MtaScene(
         track_id, resource_name, models, placements, zones, texture_names, warnings, report,
-        water_quads, texture_variants,
+        water_quads, texture_variants, animation_bindings,
     )
