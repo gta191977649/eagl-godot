@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+import random
 import struct
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -987,6 +988,60 @@ def test_cell_uses_floor_for_negative_coordinates():
     assert cell_for_xy(-0.1, -300.0, 300.0) == (-1, -1)
 
 
+@pytest.mark.parametrize("palette", [False, True])
+def test_road_instance_replaces_authoring_transform_like_placed_glb(tmp_path, palette):
+    from map_tools_ps2.glb_writer import write_glb
+
+    road = _triangle_object("RD_SECTION10_CHOP3", 418,
+                            transform=_matrix(rotation=(0, 0, 0), scale=(0.3937,) * 3))
+    placement = _matrix(rotation=(0, 0, 30), scale=(1, 1, 1), position=(300, -400, 12))
+    source = Scene(objects=[road], scenery_instances=[
+        SceneryInstance(0, road.name, placement, 100, 0),
+        SceneryInstance(0, road.name, placement, 200, 0),
+    ], scenery_template_offsets={418} if palette else set())
+    result = build_mta_scene(source, TextureLibrary({}), track_id=25, resource_name="TEST",
+                             collision_mode="bounds-only", lod_mode="off")
+    # Read the actual GLB POSITION accessor, undo its axis conversion, then
+    # compare to the placed MTA vertices. Counts alone missed this regression.
+    path = tmp_path / "reference.glb"
+    write_glb(source, path, expand_instances=True)
+    data = path.read_bytes()
+    json_size = struct.unpack_from("<I", data, 12)[0]
+    gltf = json.loads(data[20:20 + json_size])
+    accessor = gltf["accessors"][gltf["meshes"][0]["primitives"][0]["attributes"]["POSITION"]]
+    view = gltf["bufferViews"][accessor["bufferView"]]
+    offset = 28 + json_size + view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+    expected = [(x, -z, y) for x, y, z in struct.iter_unpack("<fff", data[offset:offset + 12 * accessor["count"]])]
+    assert len(result.models) == 1
+    model = result.models[0]
+    actual = [tuple(v[i] + model.origin[i] for i in range(3)) for v in model.vertices]
+    for got, want in zip(actual, expected):
+        assert got == pytest.approx(want, abs=2e-5)
+    assert len(model.faces) == 1
+    assert result.report["road_transforms"][0]["object_transform_replaced"]
+    assert result.report["road_transforms"][0]["placements"] == 1
+    assert road.transform[0][0] == pytest.approx(0.3937)  # input was not mutated
+
+
+def test_road_distinct_placements_and_unplaced_object_transform_are_preserved():
+    first = _triangle_object("RD_SECTION_SAME_NAME", 1, transform=_matrix(scale=(0.4,) * 3))
+    second = _triangle_object("RD_SECTION_SAME_NAME", 2,
+                             transform=_matrix(rotation=(0, 0, 0), scale=(2,) * 3, position=(500, 0, 0)))
+    source = Scene(objects=[first, second], scenery_instances=[
+        SceneryInstance(0, first.name, IDENTITY4, 100, 0),
+        SceneryInstance(0, first.name, _matrix(rotation=(0, 0, 0), scale=(1,) * 3,
+                                             position=(100, 0, 0)), 100, 1),
+    ])
+    result = build_mta_scene(source, TextureLibrary({}), track_id=25, resource_name="TEST",
+                             collision_mode="bounds-only", lod_mode="off")
+    assert sum(len(m.faces) for m in result.models) == 3
+    records = {r["source_offset"]: r for r in result.report["road_transforms"]}
+    assert records[1]["source_world_bounds"] == {"min": [0, 0, 0], "max": [110, 10, 0]}
+    assert records[1]["placements"] == 2
+    assert records[2]["source_world_bounds"] == {"min": [500, 0, 0], "max": [520, 20, 0]}
+    assert records[2]["transform_source"] == "object"
+
+
 def test_oversized_road_splits_visible_dff_and_matching_mesh_col():
     source = Scene(objects=[_two_cluster_road()])
     result = build_mta_scene(source, TextureLibrary({}), track_id=31, resource_name="TEST")
@@ -1588,3 +1643,81 @@ def test_cutout_tolerates_a_few_antialiased_edge_texels():
     # A handful of soft edge texels must not flip a genuine cutout to opaque.
     leaves = _pixel_texture("ST_LEAVES6", zero=40000, opaque=25000, intermediate=200)
     assert decide_material_alpha(leaves, None, ()).mode == "MASK"
+
+
+def test_cli_progress_context_yields_to_an_existing_consumer():
+    # The GUI calls the CLI entry point directly with its output redirected, so
+    # the CLI must not take the callback over: that would freeze the GUI's
+    # progress bar and draw tqdm escape codes into its log pane.
+    from map_tools_ps2.progress import cli_progress_context, progress_context, report_progress
+
+    seen = []
+    with progress_context(lambda stage, current, total, item: seen.append((stage, current))):
+        with cli_progress_context():
+            report_progress("Writing DFF/COL", 3, 10, None)
+    assert seen == [("Writing DFF/COL", 3)]
+
+
+def test_swizzle_plan_is_cached_and_decode_is_unchanged():
+    # The GS address walk depends only on the buffer shape, never on pixel data,
+    # so it is memoised. Two different images through the same shape must still
+    # decode independently and correctly.
+    from map_tools_ps2.textures import _legacy_ps2_rw_buffer, _legacy_ps2_rw_plan
+
+    _legacy_ps2_rw_plan.cache_clear()
+    shape = ("read", 0, 32, 8, 8)
+    first = _legacy_ps2_rw_buffer(list(range(64)), *shape)
+    hits_after_first = _legacy_ps2_rw_plan.cache_info().misses
+    second = _legacy_ps2_rw_buffer([v * 3 + 1 for v in range(64)], *shape)
+    assert _legacy_ps2_rw_plan.cache_info().misses == hits_after_first  # plan reused
+    assert first != second and len(first) == len(second)
+    # A repeat of the very same input must reproduce the very same output.
+    assert _legacy_ps2_rw_buffer(list(range(64)), *shape) == first
+
+
+def test_bounds_matches_a_naive_reference_including_signed_zero():
+    from map_tools_ps2.mta_scene import _bounds
+
+    def reference(points):
+        points = list(points)
+        if not points:
+            return None
+        minimum, maximum = list(points[0]), list(points[0])
+        for point in points[1:]:
+            for axis in range(3):
+                minimum[axis] = min(minimum[axis], point[axis])
+                maximum[axis] = max(maximum[axis], point[axis])
+        return {"min": minimum, "max": maximum}
+
+    random.seed(7)
+    cases = [
+        [],
+        [(0.0, -0.0, 0.0)],
+        [(-0.0, 0.0, -0.0), (0.0, -0.0, 0.0)],
+        [(1e308, -1e308, 5e-324), (-1e308, 1e308, -5e-324)],
+    ]
+    for _ in range(60):
+        cases.append([tuple(random.uniform(-4000, 4000) for _ in range(3))
+                      for _ in range(random.randint(1, 200))])
+    for points in cases:
+        got, want = _bounds(iter(points)), reference(points)
+        if want is None:
+            assert got is None
+            continue
+        # Compare bit patterns: min/max must pick the identical float object.
+        assert [struct.pack("<d", v) for v in got["min"]] == [struct.pack("<d", v) for v in want["min"]]
+        assert [struct.pack("<d", v) for v in got["max"]] == [struct.pack("<d", v) for v in want["max"]]
+
+
+def test_alpha_channel_stats_matches_the_scans_it_replaces():
+    from map_tools_ps2.textures import _alpha_channel_stats
+
+    random.seed(11)
+    for values in (b"", bytes([0]), bytes([255]), bytes([0, 1, 249, 250, 255]),
+                   bytes(random.randrange(256) for _ in range(1000))):
+        got = _alpha_channel_stats(values)
+        want = (
+            min(values, default=255), max(values, default=255), values.count(0),
+            sum(1 for a in values if a >= 250), sum(1 for a in values if 0 < a < 250),
+        )
+        assert got == want, values[:16]

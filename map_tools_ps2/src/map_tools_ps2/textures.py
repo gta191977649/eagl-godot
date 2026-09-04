@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import struct
+from array import array
+from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from .binary import align
@@ -207,7 +210,7 @@ def read_ps2_tpk_bytes(data: bytes, source_path: Path, *, flip_vertical: bool = 
         if flip_vertical:
             rgba = _flip_rgba_vertical(rgba, width, height)
         alpha_mode, alpha_cutoff = _material_alpha_properties_for_rgba(rgba, is_any_semitransparency)
-        alpha_values = rgba[3::4]
+        alpha_stats = _alpha_channel_stats(rgba[3::4])
         textures.append(
             Texture(
                 name=name,
@@ -233,11 +236,11 @@ def read_ps2_tpk_bytes(data: bytes, source_path: Path, *, flip_vertical: bool = 
                 alpha_bits=alpha_bits,
                 alpha_fix=alpha_fix,
                 is_any_semitransparency=is_any_semitransparency,
-                alpha_min=min(alpha_values, default=255),
-                alpha_max=max(alpha_values, default=255),
-                alpha_zero_count=alpha_values.count(0),
-                alpha_opaque_count=sum(alpha >= 250 for alpha in alpha_values),
-                alpha_intermediate_count=sum(0 < alpha < 250 for alpha in alpha_values),
+                alpha_min=alpha_stats[0],
+                alpha_max=alpha_stats[1],
+                alpha_zero_count=alpha_stats[2],
+                alpha_opaque_count=alpha_stats[3],
+                alpha_intermediate_count=alpha_stats[4],
             )
         )
     return tuple(textures)
@@ -390,14 +393,22 @@ def _u32_words(data: bytes) -> list[int]:
     return [struct.unpack_from("<I", padded, offset)[0] for offset in range(0, len(padded), 4)]
 
 
-def _legacy_ps2_rw_buffer(
-    image_data: list[int],
+@lru_cache(maxsize=64)
+def _legacy_ps2_rw_plan(
     mode: str,
     pixel_storage_mode: int,
     bit_depth: int,
     width: int,
     height: int,
-) -> list[int]:
+) -> tuple[array, array, array, array, int]:
+    """Precompute the GS address walk for one buffer shape.
+
+    Every address here is derived from the loop index and the buffer geometry,
+    never from pixel data, so the walk is identical for every texture that
+    shares these parameters. HP2 uses only a couple of dozen shapes per track
+    but hundreds of textures, so recomputing page/block/column addresses per
+    pixel dominated texture decoding.
+    """
     scale = 32 // bit_depth
     scale_mask = scale - 1
     scale_x = (_adjust_with_mask(scale_mask, 1, 2, 1) | _adjust_with_mask(scale_mask, 1, 0, 0)) + 1
@@ -409,7 +420,7 @@ def _legacy_ps2_rw_buffer(
     physical_buffer_height = _align_power_of_two_max(physical_height)
     buffer_width = _align_power_of_two_max(width)
     buffer_height = _align_power_of_two_max(height)
-    data = [0] * (physical_buffer_width * physical_buffer_height)
+    output_length = physical_buffer_width * physical_buffer_height
 
     type_index = _adjust_with_mask(pixel_storage_mode, 3, 0)
     type_mode = _adjust_with_mask(pixel_storage_mode, 2, 4)
@@ -428,9 +439,14 @@ def _legacy_ps2_rw_buffer(
     if texture_buffer_width <= 0:
         texture_buffer_width = 1
 
+    if mode not in ("read", "write"):
+        raise ValueError(f"unsupported PS2 buffer mode {mode}")
+
     swizzle_function = _LEGACY_SWIZZLE_FUNCTIONS[bit_depth]
     input_address = 0
     from_offset_w = 0
+    targets, sources = array("i"), array("i")
+    source_shifts, target_shifts = array("i"), array("i")
 
     for index in range(buffer_width * buffer_height):
         y = index // buffer_width
@@ -466,22 +482,46 @@ def _legacy_ps2_rw_buffer(
             address_a, address_b = input_address, output_address
             source_shift = bit_depth * offset
             target_shift = bit_depth * from_offset_w
-        elif mode == "write":
+        else:
             address_a, address_b = output_address, input_address
             source_shift = bit_depth * from_offset_w
             target_shift = bit_depth * offset
-        else:
-            raise ValueError(f"unsupported PS2 buffer mode {mode}")
 
-        input_value = image_data[address_b] if 0 <= address_b < len(image_data) else 0
-        pixel_data = _adjust_with_mask(input_value, bit_depth, source_shift, target_shift)
-        if 0 <= address_a < len(data):
-            data[address_a] |= pixel_data
+        targets.append(address_a)
+        sources.append(address_b)
+        source_shifts.append(source_shift)
+        target_shifts.append(target_shift)
 
         from_offset_w += 1
         if from_offset_w > 0 and (from_offset_w & scale_mask) == 0:
             input_address += 1
         from_offset_w &= scale_mask
+
+    return targets, sources, source_shifts, target_shifts, output_length
+
+
+def _legacy_ps2_rw_buffer(
+    image_data: list[int],
+    mode: str,
+    pixel_storage_mode: int,
+    bit_depth: int,
+    width: int,
+    height: int,
+) -> list[int]:
+    targets, sources, source_shifts, target_shifts, output_length = _legacy_ps2_rw_plan(
+        mode, pixel_storage_mode, bit_depth, width, height
+    )
+    data = [0] * output_length
+    mask = (1 << bit_depth) - 1
+    available = len(image_data)
+    for address_a, address_b, source_shift, target_shift in zip(
+        targets, sources, source_shifts, target_shifts
+    ):
+        if not 0 <= address_a < output_length:
+            continue
+        input_value = image_data[address_b] if 0 <= address_b < available else 0
+        data[address_a] |= ((input_value >> source_shift) & mask) << target_shift
+    return data
 
     return data
 
@@ -646,8 +686,23 @@ def _decode_ps2_alpha(value: int) -> int:
     return value
 
 
+def _alpha_channel_stats(alpha_values: bytes) -> tuple[int, int, int, int, int]:
+    """min, max, zero, opaque and intermediate counts in one histogram pass.
+
+    Counter over a bytes object uses the C fast path, replacing five separate
+    Python-level scans of every texel.
+    """
+    if not alpha_values:
+        return 255, 255, 0, 0, 0
+    histogram = Counter(alpha_values)
+    zero = histogram.get(0, 0)
+    opaque = sum(count for value, count in histogram.items() if value >= 250)
+    intermediate = sum(count for value, count in histogram.items() if 0 < value < 250)
+    return min(histogram), max(histogram), zero, opaque, intermediate
+
+
 def _alpha_properties_for_rgba(rgba: bytes) -> tuple[str | None, float | None]:
-    alphas = {rgba[offset + 3] for offset in range(0, len(rgba), 4)}
+    alphas = set(rgba[3::4])
     non_opaque = {alpha for alpha in alphas if alpha < 250}
     if not non_opaque:
         return None, None
@@ -672,7 +727,7 @@ def _material_alpha_properties_for_rgba(
     # even when the TPK entry says the texture is not semitransparent. Treat
     # those high values as opaque for material mode selection to avoid
     # unnecessary transparent sorting.
-    alphas = {rgba[offset + 3] for offset in range(0, len(rgba), 4)}
+    alphas = set(rgba[3::4])
     if alphas and all(alpha == 0 or alpha >= 0x80 for alpha in alphas):
         if 0 in alphas:
             return "MASK", 0.5

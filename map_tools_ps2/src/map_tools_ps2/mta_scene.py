@@ -5,6 +5,7 @@ import json
 import math
 import re
 import statistics
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1224,10 +1225,49 @@ def _native_collision_for_roads(
     material_surfaces: dict[str, int] = {}
     primary_centroids = [_polygon_centroid(polygon) for polygon in primary]
 
+    # Scanning every road centroid per query was the hottest line in the whole
+    # build. Sort them by x once, then walk outwards from the query's x and stop
+    # each side as soon as its x gap alone exceeds the best distance found. This
+    # has no empty-space blowup: a grid needs unboundedly many rings when the
+    # query sits far from every centroid, which HP2 tracks do produce.
+    centroid_order = sorted(range(len(primary_centroids)), key=lambda i: primary_centroids[i][0])
+    centroid_xs = [primary_centroids[i][0] for i in centroid_order]
+    centroid_count = len(centroid_order)
+
     def nearest_height(x: float, y: float) -> float:
         if not primary_centroids:
             return 0.0
-        return min(primary_centroids, key=lambda point: (point[0] - x) ** 2 + (point[1] - y) ** 2)[2]
+        best_index, best_distance = -1, math.inf
+        high = bisect_left(centroid_xs, x)
+        low = high - 1
+        low_open = high_open = True
+        while low_open or high_open:
+            for forward in (True, False):
+                if forward and not high_open:
+                    continue
+                if not forward and not low_open:
+                    continue
+                cursor = high if forward else low
+                if not 0 <= cursor < centroid_count:
+                    low_open, high_open = (low_open, False) if forward else (False, high_open)
+                    continue
+                gap = centroid_xs[cursor] - x if forward else x - centroid_xs[cursor]
+                # Keep equal gaps: a point exactly at the bound can tie on
+                # distance and win on the lower source index.
+                if best_index >= 0 and gap * gap > best_distance:
+                    low_open, high_open = (low_open, False) if forward else (False, high_open)
+                    continue
+                index = centroid_order[cursor]
+                point = primary_centroids[index]
+                distance = (point[0] - x) ** 2 + (point[1] - y) ** 2
+                # min() keeps the first minimum in source order; match that.
+                if distance < best_distance or (distance == best_distance and index < best_index):
+                    best_index, best_distance = index, distance
+                if forward:
+                    high += 1
+                else:
+                    low -= 1
+        return primary_centroids[best_index][2]
 
     def choose_model(point: tuple[float, float, float], points: list[tuple[float, float, float]]) -> MtaModel | None:
         candidates = sorted(model_bounds, key=lambda item: _xy_aabb_distance(point, item[1]))
@@ -1431,12 +1471,26 @@ def _bounds(points: Iterable[tuple[float, float, float]]) -> dict[str, list[floa
         first = next(iterator)
     except StopIteration:
         return None
-    minimum, maximum = list(first), list(first)
-    for point in iterator:
-        for axis in range(3):
-            minimum[axis] = min(minimum[axis], point[axis])
-            maximum[axis] = max(maximum[axis], point[axis])
-    return {"min": minimum, "max": maximum}
+    # Unpacked locals and elif instead of six builtin calls per point: this runs
+    # over millions of points and was a measurable share of every build.
+    # `elif` is safe because low <= high always holds, and the comparisons are
+    # the same predicates min()/max() use, so -0.0 and NaN behave identically.
+    low_x, low_y, low_z = first
+    high_x, high_y, high_z = first
+    for x, y, z in iterator:
+        if x < low_x:
+            low_x = x
+        elif x > high_x:
+            high_x = x
+        if y < low_y:
+            low_y = y
+        elif y > high_y:
+            high_y = y
+        if z < low_z:
+            low_z = z
+        elif z > high_z:
+            high_z = z
+    return {"min": [low_x, low_y, low_z], "max": [high_x, high_y, high_z]}
 
 
 def _source_visual_points(
@@ -2052,6 +2106,12 @@ def build_mta_scene(
         for instance in scenery_instances
         if 0 <= instance.object_index < len(object_offsets)
     }
+    road_instances: dict[int, list[SceneryInstance]] = defaultdict(list)
+    for instance in scenery_instances:
+        if 0 <= instance.object_index < len(scene.objects):
+            obj = scene.objects[instance.object_index]
+            if _is_road_name(obj.name):
+                road_instances[obj.chunk_offset].append(instance)
     template_candidates = [
         obj for obj in scene.objects
         if not _is_road_name(obj.name)
@@ -2073,14 +2133,27 @@ def build_mta_scene(
     static_objects = [
         obj for obj in scene.objects
         if (obj.chunk_offset not in placement_offsets or _is_road_name(obj.name))
-        and obj.chunk_offset not in scene.scenery_template_offsets
+        and (obj.chunk_offset not in scene.scenery_template_offsets or obj.chunk_offset in road_instances)
         and not _is_mta_visual_excluded(obj.name)
     ]
     # Object names are not unique in HP2 (several RD_SECTION records share a
     # display name). Key this MTA-only cache by source chunk so one section
     # cannot silently overwrite another section's geometry.
     static_triangles = {
-        obj.chunk_offset: list(_triangles_for_object(obj, bake_transform=True))
+        # Static describes MTA streaming, not the HP2 transform source. Like
+        # GLB's placed export, an instance replaces the object's transform.
+        # Some roads retain an authoring scale (e.g. 0.3937) on the object even
+        # though their placed vertices are already in world units. Baking that
+        # matrix shrinks/moves the road away from the surrounding terrain.
+        # Keep every distinct placement; section duplicates were removed above.
+        obj.chunk_offset: [
+            triangle
+            for transform in (
+                [instance.transform for instance in road_instances[obj.chunk_offset]]
+                if obj.chunk_offset in road_instances else [obj.transform]
+            )
+            for triangle in _triangles_for_object(replace(obj, transform=transform), bake_transform=True)
+        ]
         for obj in static_objects
     }
     road_source_objects = [obj for obj in static_objects if _is_road_name(obj.name)]
@@ -2321,8 +2394,8 @@ def build_mta_scene(
             else None
         )
         if _is_road_name(instance.object_name):
-            # Streaming sections may reference road records as placements.
-            # Roads are static source objects, not scenery props.
+            # The placement has already been baked into static_triangles.
+            # Do not also emit a scenery copy of the road.
             excluded_scenery_placements[instance.object_name] += 1
             classified_instances += 1
             continue
@@ -2601,6 +2674,35 @@ def build_mta_scene(
             f"{lost} triangles; first offenders {triangle_loss_by_source[:5]}"
         )
 
+    road_transform_records = []
+    for obj in road_source_objects:
+        road_source_bounds = _bounds(v.position for t in static_triangles[obj.chunk_offset] for v in t.vertices)
+        emitted = [model for model in models if not model.is_lod and model.source_offset == obj.chunk_offset]
+        emitted_bounds = _bounds(
+            tuple(vertex[axis] + model.origin[axis] for axis in range(3))
+            for model in emitted for vertex in model.vertices
+        )
+        error = max(
+            (abs(road_source_bounds[side][axis] - emitted_bounds[side][axis])
+             for side in ("min", "max") for axis in range(3)), default=0.0,
+        ) if road_source_bounds is not None and emitted_bounds is not None else None
+        if road_source_bounds is not None and (error is None or error > 1e-4):
+            raise ValueError(f"MTA road world bounds changed: {obj.name} (0x{obj.chunk_offset:08x}), error={error}")
+        instances = road_instances.get(obj.chunk_offset, [])
+        road_transform_records.append({
+            "source": obj.name,
+            "source_offset": obj.chunk_offset,
+            "transform_source": "scenery_instance" if instances else "object",
+            "placements": len(instances) if instances else 1,
+            "object_transform": obj.transform,
+            "world_transforms": [instance.transform for instance in instances] if instances else [obj.transform],
+            "object_transform_replaced": any(instance.transform != obj.transform for instance in instances),
+            "source_world_bounds": road_source_bounds,
+            "output_world_bounds": emitted_bounds,
+            "bounds_error": error,
+            "output_models": [model.model_id for model in emitted],
+        })
+
     # Model ids are a 32-bit digest and uniqueIDs 31 bits, with no collision
     # check anywhere else in the pipeline; a collision silently overwrites a
     # DFF/COL on disk and the set-based archive validation cannot see it.
@@ -2700,6 +2802,7 @@ def build_mta_scene(
         "prop_placements": sum(placement.element_type == "object" for placement in placements),
         "static_models": sum(model.kind in {"road", "static", "static_scenery"} for model in models),
         "road_source_models": len(road_source_objects),
+        "road_transforms": road_transform_records,
         "road_models": sum(model.kind == "road" for model in models),
         "road_surface_classification": road_surface_classification,
         "road_split_sources": road_split_sources,

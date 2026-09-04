@@ -147,6 +147,9 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
         model_records.append(
             {
                 "model_id": model.model_id,
+                "source_name": model.source_name,
+                "source_offset": model.source_offset,
+                "origin": model.origin,
                 "vertices": model.vertices,
                 "faces": model.faces,
                 "uvs": model.uvs,
