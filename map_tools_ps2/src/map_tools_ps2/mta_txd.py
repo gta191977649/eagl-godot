@@ -78,13 +78,67 @@ def _downsample_bgra(data: bytes, width: int, height: int, mode: str) -> bytes:
     return bytes(output)
 
 
-def build_bgra_mip_chain(base: bytes, width: int, height: int, mode: str) -> list[bytes]:
+def _alpha_coverage(data: bytes, cutoff: int) -> float:
+    total = len(data) // 4
+    if not total:
+        return 0.0
+    return sum(1 for offset in range(3, len(data), 4) if data[offset] >= cutoff) / total
+
+
+def _match_alpha_coverage(data: bytes, target: float, cutoff: int) -> bytes:
+    """Rescale alpha so the share of texels surviving `cutoff` matches `target`.
+
+    A cutout is resolved by a hard threshold, but downsampling averages alpha,
+    so every level loses a little coverage and thin structures erode until they
+    disappear entirely a few mips in. Rescaling alpha to hold the base level's
+    coverage keeps a fence or a cactus present at distance instead of dissolving.
+    """
+    pixels = bytearray(data)
+    count = len(pixels) // 4
+    if not count or target <= 0.0:
+        return bytes(pixels)
+    alphas = sorted((pixels[offset] for offset in range(3, len(pixels), 4)), reverse=True)
+    # Coverage is a step function of the scale -- every texel sharing an alpha
+    # value crosses the cutoff together -- so evaluate it at each step and take
+    # the one closest to the target instead of interpolating a percentile.
+    best_value = best_error = None
+    for index, value in enumerate(alphas):
+        if value <= 0:
+            break
+        if index + 1 < count and alphas[index + 1] == value:
+            continue  # a run of equal alphas all cross together, at its end
+        error = abs((index + 1) / count - target)
+        if best_error is None or error < best_error:
+            best_value, best_error = value, error
+    if best_value is None:
+        return bytes(pixels)
+    scale = cutoff / best_value
+    if 0.999 < scale < 1.001:
+        return bytes(pixels)
+    # Round half UP here: round() is half-to-even, which drops a texel sitting
+    # exactly on the cutoff and silently empties the whole level.
+    for offset in range(3, len(pixels), 4):
+        pixels[offset] = min(255, int(pixels[offset] * scale + 0.5))
+    return bytes(pixels)
+
+
+def build_bgra_mip_chain(
+    base: bytes, width: int, height: int, mode: str, alpha_cutoff: float | None = None
+) -> list[bytes]:
     if len(base) != width * height * 4:
         raise ValueError(f"BGRA8888 base level has {len(base)} bytes, expected {width * height * 4}")
     levels = [_normalized_bgra(base, mode)]
+    # Only a cutout mode re-thresholds alpha per level, so only it can lose
+    # coverage. BLEND keeps the averaged alpha and OPAQUE has none.
+    preserve = mode.upper() == "MASK" and alpha_cutoff is not None
+    cutoff = max(0, min(255, round((alpha_cutoff or 0.5) * 255)))
+    target = _alpha_coverage(levels[0], cutoff) if preserve else 0.0
     level_width, level_height = width, height
     while level_width > 1 or level_height > 1:
-        levels.append(_downsample_bgra(levels[-1], level_width, level_height, mode.upper()))
+        level = _downsample_bgra(levels[-1], level_width, level_height, mode.upper())
+        if preserve:
+            level = _match_alpha_coverage(level, target, cutoff)
+        levels.append(level)
         level_width, level_height = max(1, level_width // 2), max(1, level_height // 2)
     return levels
 
@@ -198,9 +252,9 @@ def build_dxt_mip_chain(
     mode: str,
     alpha_cutoff: float | None = None,
 ) -> list[bytes]:
-    rgba_levels = build_bgra_mip_chain(base, width, height, mode)
-    dimensions = mip_dimensions(width, height)
     cutoff = 0.5 if alpha_cutoff is None else alpha_cutoff
+    rgba_levels = build_bgra_mip_chain(base, width, height, mode, cutoff)
+    dimensions = mip_dimensions(width, height)
     return [
         compress_bgra_level(level, level_width, level_height, mode, cutoff)
         for level, (level_width, level_height) in zip(rgba_levels, dimensions)

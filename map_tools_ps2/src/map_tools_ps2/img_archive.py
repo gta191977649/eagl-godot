@@ -21,8 +21,11 @@ def _validate_name(name: str) -> bytes:
         encoded = name.encode("ascii")
     except UnicodeEncodeError as exc:
         raise ValueError(f"IMG entry name is not ASCII: {name!r}") from exc
-    if not encoded or len(encoded) > 24:
-        raise ValueError(f"IMG entry name must be 1..24 ASCII bytes: {name!r}")
+    # The directory entry holds the name in a 24-byte field that GTA reads as a
+    # C string, so a 24-byte name leaves no room for the terminator and the
+    # reader runs into the next entry.
+    if not encoded or len(encoded) > 23:
+        raise ValueError(f"IMG entry name must be 1..23 ASCII bytes: {name!r}")
     if any(value < 0x20 for value in encoded):
         raise ValueError(f"IMG entry name contains control bytes: {name!r}")
     return encoded

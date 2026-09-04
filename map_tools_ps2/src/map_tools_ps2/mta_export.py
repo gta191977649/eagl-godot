@@ -16,6 +16,22 @@ from .mta_scene import MtaScene, _MTA_WATER_SAFE_QUAD_BUDGET
 from .mta_lod import generate_eagle_lod
 from .progress import report_progress
 
+_BLENDER_PROGRESS_PREFIX = "MTA_PROGRESS "
+
+
+def parse_blender_progress(line: str) -> tuple[str, int, int] | None:
+    """Read one "MTA_PROGRESS <stage>, <current>, <total>" tab-separated line.
+
+    Blender writes plenty of unrelated output, so anything that does not match
+    the exact shape is ordinary log text and must be left alone.
+    """
+    if not line.startswith(_BLENDER_PROGRESS_PREFIX):
+        return None
+    fields = line[len(_BLENDER_PROGRESS_PREFIX) :].rstrip("\n").split("\t")
+    if len(fields) != 3 or not fields[1].isdigit() or not fields[2].isdigit():
+        return None
+    return fields[0], int(fields[1]), int(fields[2])
+
 
 DEFAULT_BLENDER_PATHS = (
     Path(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"),
@@ -76,12 +92,19 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
         for tex_hash, name in scene.texture_names.items()
         if textures.get(tex_hash) is not None
     }
+    emitted_texture_names: set[str] = set()
     for (tex_hash, alpha_mode, surface_category), texture_name in sorted(
         variants.items(), key=lambda item: (item[0][0], item[0][1], item[0][2] or "")
     ):
         texture = textures.get(tex_hash)
         if texture is None:
             continue
+        # Several variant keys can share one name: wet-road textures collapse
+        # their surface categories into a single "refl_" entry. The TXD holds
+        # one raster per name.
+        if texture_name in emitted_texture_names:
+            continue
+        emitted_texture_names.add(texture_name)
         filename = f"{texture_name}.png"
         (texture_dir / filename).write_bytes(texture.png)
         record = {
@@ -214,11 +237,25 @@ def _run_blender(
         str(loose_dir),
         str(dragonff_path or ""),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    log = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    # Stream instead of buffering: this step writes thousands of DFF/COL files
+    # and is by far the longest part of an export, so its progress has to reach
+    # the terminal while it runs. stderr is merged so the log stays complete.
+    lines: list[str] = []
+    with subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    ) as process:
+        for line in process.stdout or ():
+            lines.append(line)
+            parsed = parse_blender_progress(line)
+            if parsed is not None:
+                stage, current, total = parsed
+                report_progress(f"Blender: {stage}", current, total, None)
+        returncode = process.wait()
+    log = "".join(lines)
     (stage_dir / "blender.log").write_text(log, encoding="utf-8")
-    if result.returncode != 0 or '"status": "ok"' not in log:
-        raise RuntimeError(f"Blender/DragonFF export failed ({result.returncode}); see {stage_dir / 'blender.log'}")
+    if returncode != 0 or '"status": "ok"' not in log:
+        raise RuntimeError(f"Blender/DragonFF export failed ({returncode}); see {stage_dir / 'blender.log'}")
     marker = next((line[len("MTA_EXPORT ") :] for line in log.splitlines() if line.startswith("MTA_EXPORT ")), None)
     bridge_report = json.loads(marker) if marker else {}
     return loose_dir, log, bridge_report

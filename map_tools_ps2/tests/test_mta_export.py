@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import struct
@@ -11,17 +12,26 @@ import pytest
 from map_tools_ps2.binary import IDENTITY4, Vec3, transform_point
 from map_tools_ps2.img_archive import ImgEntry, read_img_v2_directory, write_img_v2
 from map_tools_ps2.mta_export import (
+    parse_blender_progress,
     _img_archive_declarations,
     _prepare_eagle_lods,
     _write_resource_xml,
     _write_staging,
     _write_water_dat,
 )
-from map_tools_ps2.model import DecodedBlock, MeshObject, Scene, SceneryInstance, TrackCollisionPolygon
+from map_tools_ps2.model import (DecodedBlock, MeshObject, Scene, SceneryInstance,
+                                TrackCollisionPolygon, TrackRoutePoint, TrackRouteSegment)
+from map_tools_ps2.route_export import write_route_txt
 from map_tools_ps2.mta_scene import (
     DEFAULT_HP2_TO_GTA_SURFACE,
     MtaWaterQuad,
+    _REFLECTIVE_MASK_MARKER,
+    _REFLECTIVE_TEXTURE_MARKER,
+    _deduplicate_scenery_instances,
+    _lod_model_id,
+    _model_id,
     _native_collision_surface,
+    _resolve_mta_scenery_instances,
     build_mta_scene,
     cell_for_xy,
     compose_zxy_row,
@@ -102,8 +112,11 @@ def test_txd_alpha_aware_mips_and_mask_dxt1_transparency():
 def test_img_rejects_duplicate_and_long_names(tmp_path):
     with pytest.raises(ValueError, match="duplicate"):
         write_img_v2(tmp_path / "dup.img", [ImgEntry("a.dff", b"1"), ImgEntry("A.DFF", b"2")])
-    with pytest.raises(ValueError, match="1..24"):
-        write_img_v2(tmp_path / "long.img", [ImgEntry("x" * 25, b"1")])
+    # 24 bytes fills the directory's name field with no room for the C-string
+    # terminator, so GTA's reader runs into the next entry.
+    with pytest.raises(ValueError, match=r"1\.\.23"):
+        write_img_v2(tmp_path / "long.img", [ImgEntry("x" * 24, b"1")])
+    write_img_v2(tmp_path / "ok.img", [ImgEntry("x" * 23, b"1")])
 
 
 def _triangle_object(name, offset, transform=IDENTITY4, texture_hashes=(), render_flag=None):
@@ -165,7 +178,16 @@ def _mixed_alpha_object(name="MIXED_MODEL"):
     return MeshObject(name, 1, IDENTITY4, (block(0, 0), block(30, 1)), (100, 200), 123)
 
 
-def _alpha_texture(name, *, blend):
+def _alpha_texture(name, *, blend, additive=False):
+    # alpha_bits is the PS2 GS ALPHA register byte: 0x0a does not blend, 0x44 is
+    # (Cs - Cd) * As + Cd, and 0x48 is Cs * As + Cd (additive).
+    blend = blend or additive
+    if additive:
+        alpha_bits = 0x48
+    elif blend:
+        alpha_bits = 0x44
+    else:
+        alpha_bits = 0x0A
     return SimpleNamespace(
         name=name,
         png=b"png-data",
@@ -176,10 +198,55 @@ def _alpha_texture(name, *, blend):
         alpha_opaque_count=1,
         alpha_intermediate_count=1 if blend else 0,
         is_any_semitransparency=1 if blend else 0,
-        alpha_bits=0x44 if blend else 0x0A,
+        alpha_bits=alpha_bits,
         alpha_fix=0,
         texture_fx=0,
     )
+
+
+def _three_layer_object(name="LAYERED_MODEL"):
+    """One mesh whose three blocks are opaque, source-alpha and additive."""
+    def block(x, texture_index):
+        run = VifVertexRun(
+            vertices=(Vec3(x, 0, 0), Vec3(x + 10, 0, 0), Vec3(x, 10, 0)),
+            texcoords=((0, 0), (1, 0), (0, 1)),
+            packed_values=(0xFFFF,) * 3,
+            header=None,
+            tri_cull=None,
+        )
+        return DecodedBlock(run, primitive_mode="triangles", texture_index=texture_index)
+
+    return MeshObject(
+        name, 1, IDENTITY4, (block(0, 0), block(30, 1), block(60, 2)), (100, 200, 300), 123
+    )
+
+
+def _named_pair_scene(name="TRN_SECTION70__TUNNELS_"):
+    """Two distinct meshes that HP2's 23-character name field collapses onto one name.
+
+    The second object carries twice the geometry so the two are trivially
+    distinguishable in the output.
+    """
+    def mesh(offset, count, name_hash):
+        vertices = []
+        texcoords = []
+        for index in range(count):
+            base = offset + index * 40.0
+            vertices.extend((Vec3(base, 0, 0), Vec3(base + 10, 0, 0), Vec3(base, 10, 0)))
+            texcoords.extend(((0, 0), (1, 0), (0, 1)))
+        run = VifVertexRun(
+            vertices=tuple(vertices),
+            texcoords=tuple(texcoords),
+            packed_values=(0xFFFF,) * (count * 3),
+            header=None,
+            tri_cull=None,
+        )
+        return MeshObject(
+            name, offset, IDENTITY4,
+            (DecodedBlock(run, primitive_mode="triangles"),), (), name_hash,
+        )
+
+    return mesh(1, 1, 0xAAAA0001), mesh(2, 2, 0xAAAA0002)
 
 
 def test_mta_staging_preserves_texture_alpha_metadata(tmp_path):
@@ -455,8 +522,10 @@ def test_invalid_hp2_override_warns_and_uses_builtin_mapping():
 def test_mta_scene_reuses_scaled_prop_and_assigns_native_road_collision():
     static = _triangle_object("RD_SECTION10_CHOP1", 1)
     prop = _triangle_object("PILLAR", 2)
-    placement_a = SceneryInstance(0, "PILLAR", _matrix(rotation=(0, 0, 0), scale=(0.8, 1.2, 1.0), position=(20, 20, 0)), 3, 0)
-    placement_b = SceneryInstance(0, "PILLAR", _matrix(rotation=(0, 0, 90), scale=(0.8, 1.2, 1.0), position=(320, 20, 0)), 3, 1)
+    # object_index must address PILLAR (objects[1]); the parser resolves it
+    # from the unique name_hash, and the scene builder keys templates by it.
+    placement_a = SceneryInstance(1, "PILLAR", _matrix(rotation=(0, 0, 0), scale=(0.8, 1.2, 1.0), position=(20, 20, 0)), 3, 0)
+    placement_b = SceneryInstance(1, "PILLAR", _matrix(rotation=(0, 0, 90), scale=(0.8, 1.2, 1.0), position=(320, 20, 0)), 3, 1)
     collision = TrackCollisionPolygon(0, 0, 9, 0, 3, (Vec3(0, 0, 0), Vec3(5, 0, 0), Vec3(0, 5, 0)), 4, 0)
     source = Scene(
         objects=[static, prop],
@@ -901,8 +970,8 @@ def test_water_and_skydome_are_excluded_from_visual_models():
     source = Scene(
         objects=[road, sky, sky_prop, water],
         scenery_instances=[
-            SceneryInstance(0, "SKYDOME_ENVMAP", _matrix(rotation=(0, 0, 0), scale=(1, 1, 1)), 3, 0),
-            SceneryInstance(0, "WATER", _matrix(rotation=(0, 0, 0), scale=(1, 1, 1)), 4, 1),
+            SceneryInstance(2, "SKYDOME_ENVMAP", _matrix(rotation=(0, 0, 0), scale=(1, 1, 1)), 3, 0),
+            SceneryInstance(3, "WATER", _matrix(rotation=(0, 0, 0), scale=(1, 1, 1)), 4, 1),
         ],
         scenery_template_offsets={3, 4},
     )
@@ -1171,3 +1240,351 @@ def test_standalone_export_does_not_emit_animation_assets(tmp_path, monkeypatch)
     assert not (output / "effects").exists()
     assert not (output / "EagleScene.eaglescne").exists()
     assert not ET.parse(output / "meta.xml").getroot().findall("script")
+
+
+def test_colliding_source_names_keep_both_meshes():
+    # HP2 truncates object names to the 23 characters its name field holds, so
+    # distinct meshes share a display name. Neither may be dropped or swapped.
+    first, second = _named_pair_scene()
+    source = Scene(
+        objects=[first, second],
+        scenery_instances=[
+            SceneryInstance(0, first.name, _matrix(position=(0, 0, 0)), 10, 0),
+            SceneryInstance(1, second.name, _matrix(position=(400, 0, 0)), 10, 1),
+        ],
+        scenery_template_offsets={1, 2},
+    )
+    result = build_mta_scene(
+        source, TextureLibrary({}), track_id=41, resource_name="TEST", collision_mode="bounds-only"
+    )
+
+    props = [model for model in result.models if model.kind == "prop"]
+    assert sorted(len(model.faces) for model in props) == [1, 2]
+    assert len({model.model_id for model in props}) == 2
+    assert {model.source_offset for model in props} == {1, 2}
+    assert result.report["triangle_loss_by_source"] == []
+    assert result.report["duplicate_source_names"] == {first.name: 2}
+
+
+def test_colliding_source_names_do_not_substitute_geometry():
+    first, second = _named_pair_scene()
+    source = Scene(
+        objects=[first, second],
+        scenery_instances=[
+            SceneryInstance(0, first.name, _matrix(position=(0, 0, 0)), 10, 0),
+            SceneryInstance(1, second.name, _matrix(position=(400, 0, 0)), 10, 1),
+        ],
+        scenery_template_offsets={1, 2},
+    )
+    result = build_mta_scene(
+        source, TextureLibrary({}), track_id=41, resource_name="TEST", collision_mode="bounds-only"
+    )
+
+    faces_by_model = {model.model_id: len(model.faces) for model in result.models}
+    placements = sorted(
+        (placement for placement in result.placements if placement.element_type == "object"),
+        key=lambda placement: placement.position[0],
+    )
+    assert [faces_by_model[placement.model_id] for placement in placements] == [1, 2]
+    assert placements[0].model_id != placements[1].model_id
+
+
+def test_resolve_scenery_instances_keeps_parse_time_object_identity():
+    # Only a barrier upgrade may rebind an instance. Rebinding by name would
+    # repoint every colliding placement at whichever object was parsed last.
+    first, second = _named_pair_scene()
+    scene = Scene(
+        objects=[first, second],
+        scenery_instances=[SceneryInstance(0, first.name, _matrix(position=(0, 0, 0)), 10, 0)],
+        scenery_template_offsets={1, 2},
+    )
+    resolved, _report, _warnings = _resolve_mta_scenery_instances(scene)
+    assert [instance.object_index for instance in resolved] == [0]
+
+
+def test_scenery_dedup_keys_on_object_identity_not_name():
+    first, second = _named_pair_scene()
+    transform = _matrix(position=(0, 0, 0))
+    unique, report = _deduplicate_scenery_instances([
+        SceneryInstance(0, first.name, transform, 100, 0),
+        SceneryInstance(1, second.name, transform, 200, 1),
+        SceneryInstance(0, first.name, transform, 300, 2),
+    ])
+    assert [instance.object_index for instance in unique] == [0, 1]
+    assert report["duplicate_placements_removed"] == 1
+
+
+def test_mta_splits_additive_faces_into_their_own_model(tmp_path):
+    source = Scene(objects=[_three_layer_object()])
+    textures = TextureLibrary({
+        100: _alpha_texture("SOLID", blend=False),
+        200: _alpha_texture("SHADOW", blend=True),
+        300: _alpha_texture("RD_PUDDLE_MASK", blend=True, additive=True),
+    })
+
+    result = build_mta_scene(
+        source, textures, track_id=41, resource_name="TEST", collision_mode="bounds-only"
+    )
+
+    assert len(result.models) == 3
+    layers = {model.render_layer: model for model in result.models}
+    assert set(layers) == {"base", "blend", "additive"}
+    base, blend, additive = layers["base"], layers["blend"], layers["additive"]
+    assert not base.draw_last and not base.no_zbuffer_write and not base.additive
+    assert blend.draw_last and blend.no_zbuffer_write and not blend.additive
+    assert additive.draw_last and additive.no_zbuffer_write and additive.additive
+    # Additive is a model draw state, not a storage format: the texture still
+    # travels as BLEND so the DXT5/raster path is untouched.
+    assert {material.alpha_mode for material in additive.materials} == {"BLEND"}
+    assert {material.alpha_reason for material in additive.materials} == {"tpk_additive_blend"}
+    assert result.report["additive_models"] == 1
+    assert result.report["additive_companion_models"] == 1
+    assert result.report["blend_companion_models"] == 1
+    assert result.report["render_layer_models"] == {"additive": 1, "base": 1, "blend": 1}
+    assert len({placement.unique_id for placement in result.placements}) == 3
+
+    _write_resource_xml(result, tmp_path, "tester", [tmp_path / "imgs" / "dff.img"], (0.0, 0.0, 0.0))
+    definitions = {
+        node.attrib["id"]: node.attrib
+        for path in (tmp_path / "zones").rglob("*.definition")
+        for node in ET.parse(path).getroot().findall("definition")
+    }
+    assert definitions[additive.model_id]["flags"] == (
+        "disable_backface_culling,draw_last,additive,no_zbuffer_write"
+    )
+    assert definitions[additive.model_id]["additive"] == "true"
+    assert "additive" not in definitions[blend.model_id]
+
+
+def test_additive_only_model_is_primary_not_a_companion():
+    source = Scene(objects=[_triangle_object("GLOW", 1, texture_hashes=(300,))])
+    textures = TextureLibrary({300: _alpha_texture("SUNHALO", blend=True, additive=True)})
+
+    result = build_mta_scene(
+        source, textures, track_id=41, resource_name="TEST", collision_mode="bounds-only"
+    )
+
+    assert len(result.models) == 1
+    model = result.models[0]
+    assert model.render_layer == "additive" and model.additive
+    # A companion id would use the "a" category and a ":layer" unique_id suffix.
+    assert model.model_id.startswith("t41_s_")
+    assert result.report["additive_companion_models"] == 0
+    assert result.report["blend_companion_models"] == 0
+
+
+def test_source_alpha_blend_model_stays_non_additive():
+    source = Scene(objects=[_mixed_alpha_object()])
+    textures = TextureLibrary({
+        100: _alpha_texture("SOLID", blend=False),
+        200: _alpha_texture("SHADOW", blend=True),
+    })
+
+    result = build_mta_scene(
+        source, textures, track_id=31, resource_name="TEST", collision_mode="bounds-only"
+    )
+
+    assert {model.render_layer for model in result.models} == {"base", "blend"}
+    assert result.report["additive_models"] == 0
+    assert result.report["additive_companion_models"] == 0
+
+
+def test_wet_road_textures_carry_a_shader_marker_after_the_surface_prefix():
+    # MTA binds shaders to world textures by glob, and no GTA blend mode can
+    # reproduce HP2's puddle reflection, so the names have to be targetable.
+    source = Scene(
+        objects=[
+            _triangle_object("RD_SECTION_ROAD", 1, texture_hashes=(100,)),
+            _triangle_object(
+                "RD_SECTION_ROAD2", 2,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(20, 0, 0)),
+                texture_hashes=(200,),
+            ),
+            _triangle_object("SOME_BUILDING", 3, texture_hashes=(200,)),
+            _triangle_object(
+                "RD_SECTION_ROAD3", 4,
+                transform=_matrix(rotation=(0, 0, 0), scale=(1, 1, 1), position=(40, 0, 0)),
+                texture_hashes=(300,),
+            ),
+        ],
+        track_collision_polygons=[
+            _surface_polygon(0, 1, 0), _surface_polygon(1, 1, 20), _surface_polygon(2, 1, 40),
+        ],
+    )
+    textures = TextureLibrary({
+        100: _alpha_texture("RD_SHLDR1", blend=False),
+        200: _alpha_texture("RD_PUDDLE2_MASK", blend=True, additive=True),
+        300: _alpha_texture("RD_PUDDLE2", blend=True),
+    })
+
+    result = build_mta_scene(source, textures, track_id=41, resource_name="TEST")
+    names = set(result.texture_variants.values())
+
+    # The marker REPLACES the surface category. A roadshine shader bound to
+    # "road_*" must not pick these up, so no road_ variant may survive, and
+    # every surface category collapses onto the one name. The mask gets its own
+    # namespace because its RGB is empty and only its alpha carries the shape.
+    assert "reflmask_RD_PUDDLE2_MASK" in names
+    assert "refl_RD_PUDDLE2" in names
+    assert not any(name.startswith("road_") and "PUDDLE" in name for name in names)
+    assert {
+        name for key, name in result.texture_variants.items() if key[0] == 200
+    } == {"reflmask_RD_PUDDLE2_MASK"}
+    assert "road_RD_SHLDR1" in names
+    assert not any(
+        name.startswith((_REFLECTIVE_TEXTURE_MARKER, _REFLECTIVE_MASK_MARKER))
+        for name in names if "PUDDLE" not in name
+    )
+    assert result.report["reflective_textures"] == [
+        "refl_RD_PUDDLE2", "reflmask_RD_PUDDLE2_MASK",
+    ]
+
+
+def test_model_ids_fit_the_img_directory_name_field():
+    # "<id>.dff" must fit the IMG directory's 24-byte name field with a
+    # terminator, and the variant suffix is dropped rather than truncated
+    # because truncating two different variants would alias them.
+    short = _model_id(41, "s", "token", 7)
+    assert short == "t41_s_" + hashlib.blake2s(b"token", digest_size=4).hexdigest() + "_07"
+    assert len(short) == 17
+    # 4 digits is the widest variant that still fits.
+    assert len(_model_id(41, "s", "token", 9999)) == 19
+
+    dropped = _model_id(41, "s", "token", 93000)
+    assert len(dropped) == 14
+    assert not dropped.endswith("93000")
+    assert dropped != _model_id(41, "s", "other-token", 93000)
+
+    for model_id in (short, dropped, _lod_model_id(short), _lod_model_id(dropped)):
+        assert len(model_id) <= 19
+        write_img_v2  # the archive writer enforces the matching 23-byte limit
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ("MTA_PROGRESS Writing DFF/COL\t17\t4878\n", ("Writing DFF/COL", 17, 4878)),
+        ("MTA_PROGRESS Writing TXD\t0\t330", ("Writing TXD", 0, 330)),
+        # Ordinary Blender log output must pass through untouched.
+        ("Blender quit\n", None),
+        ("MTA_EXPORT {\"status\": \"ok\"}\n", None),
+        ("MTA_PROGRESS missing counts\n", None),
+        ("MTA_PROGRESS stage\tnot-a-number\t10\n", None),
+    ],
+)
+def test_blender_progress_lines_are_parsed_and_log_text_is_ignored(line, expected):
+    assert parse_blender_progress(line) == expected
+
+
+def test_cli_progress_context_forwards_stages_without_a_terminal():
+    from map_tools_ps2.progress import cli_progress_context, report_progress
+
+    # tqdm disables itself when stderr is not a TTY, so this only asserts the
+    # context installs a callback and tears it down again.
+    with cli_progress_context():
+        report_progress("Writing DFF/COL", 1, 2, None)
+        report_progress("Writing DFF/COL", 2, 2, None)
+    report_progress("after teardown", 1, 1, None)
+
+
+def test_route_waypoint_progress_counts_every_point_once(tmp_path):
+    # The stage name is shared across segments, so the counter has to be global
+    # or the bar stalls after the first segment.
+    from map_tools_ps2.progress import progress_context
+
+    def point(index):
+        return TrackRoutePoint(
+            index=index, position_ps2=Vec3(index, 0, 0), forward_ps2_2d=(1.0, 0.0),
+            segment_length=1.0, left_width=5.0, right_width=5.0, route_edge_index=-1,
+            route_edge_flags=0, boundary_offsets_raw=(0, 0, 0, 0),
+            boundary_offsets=(0.0, 0.0, 0.0, 0.0), source_record_offset=index,
+        )
+
+    def segment(index, count):
+        return TrackRouteSegment(
+            index=index, route_index=index, route_type=1, flags=0,
+            points=tuple(point(i) for i in range(count)),
+            source_chunk_offset=0, source_record_offset=index,
+        )
+
+    reports = []
+    # Two segments of different lengths: the second used to restart at 1.
+    scene = Scene(track_route_segments=[segment(0, 3), segment(1, 4)])
+    with progress_context(lambda stage, current, total, item: reports.append((stage, current, total))):
+        write_route_txt(scene, tmp_path / "route.txt", track=41, progress=True)
+
+    waypoints = [r for r in reports if r[0] == "Exporting AI route waypoints"]
+    total_points = sum(len(segment.points) for segment in scene.track_route_segments)
+    assert [r[1] for r in waypoints] == list(range(1, total_points + 1))
+    assert {r[2] for r in waypoints} == {total_points}
+
+
+def test_mask_mipmaps_preserve_alpha_coverage():
+    # A one-in-four checkerboard cutout. Averaging alpha and re-thresholding it
+    # erodes thin structures until the texture is fully transparent a few mips
+    # down, which makes fences and foliage vanish at distance.
+    opaque = (255, 255, 255, 255)
+    clear = (0, 0, 0, 0)
+    # Thin vertical bars, the shape that erodes fastest under averaging.
+    pattern = [opaque if (x % 4) < 1 else clear for _y in range(32) for x in range(32)]
+    base = bytes(channel for pixel in pattern for channel in pixel)
+
+    def opaque_fraction(level):
+        alphas = [level[offset] for offset in range(3, len(level), 4)]
+        return sum(1 for value in alphas if value >= 128) / len(alphas)
+
+    eroded = build_bgra_mip_chain(base, 32, 32, "MASK")          # no cutoff: unchanged behaviour
+    levels = build_bgra_mip_chain(base, 32, 32, "MASK", 0.5)
+    target = opaque_fraction(levels[0])
+    assert target == pytest.approx(0.25)
+
+    # Without coverage matching the bars erode away entirely.
+    assert min(opaque_fraction(level) for level in eroded) == 0.0
+    # With it, no level empties out and the coverage stays in the same ballpark.
+    # Halving the resolution of a 1-in-4 bar pattern necessarily doubles its
+    # duty cycle, so the guarantee is that coverage never erodes, not that it
+    # is held exactly.
+    for index, level in enumerate(levels):
+        assert opaque_fraction(level) >= target, f"mip {index} eroded"
+
+
+def test_mask_mip_coverage_survives_half_to_even_rounding():
+    # A texel scaled exactly onto the cutoff must survive: banker's rounding
+    # turns 126.5 into 126 and would empty the level.
+    base = bytes((255, 255, 255, 200)) * 4
+    levels = build_bgra_mip_chain(base, 2, 2, "MASK", 0.5)
+    assert all(level[3] >= 128 for level in levels)
+
+
+def _pixel_texture(name, *, zero, opaque, intermediate):
+    return SimpleNamespace(
+        name=name, png=b"png-data", has_alpha=True, alpha_mode="BLEND", alpha_cutoff=0.5,
+        alpha_zero_count=zero, alpha_opaque_count=opaque, alpha_intermediate_count=intermediate,
+        is_any_semitransparency=0, alpha_bits=0x0A, alpha_fix=0, texture_fx=0,
+    )
+
+
+def test_soft_alpha_gradient_is_opaque_not_a_cutout():
+    # HP2 road transitions (MEDIAN, SHOULDER_*, T_RD2*) fade one surface into
+    # another with a gradient. alpha_bits 0x0a means the PS2 never blends them
+    # and the TPK does not flag semitransparency, so alpha could only drive an
+    # alpha test -- a binary decision a gradient is not. Punching them into a
+    # cutout puts see-through holes in roads and medians.
+    median = _pixel_texture("MEDIAN", zero=40685, opaque=11732, intermediate=13119)
+    decision = decide_material_alpha(median, None, ())
+    assert decision.mode == "OPAQUE"
+    assert decision.reason == "intermediate_alpha_without_tpk_semitransparency"
+
+
+def test_binary_cutout_with_both_endpoints_stays_a_mask():
+    # Real foliage masks measured exactly zero intermediate alpha.
+    leaves = _pixel_texture("1_BIRCH", zero=40000, opaque=25536, intermediate=0)
+    decision = decide_material_alpha(leaves, None, ())
+    assert decision.mode == "MASK"
+    assert decision.reason == "pixel_cutout_endpoints"
+
+
+def test_cutout_tolerates_a_few_antialiased_edge_texels():
+    # A handful of soft edge texels must not flip a genuine cutout to opaque.
+    leaves = _pixel_texture("ST_LEAVES6", zero=40000, opaque=25000, intermediate=200)
+    assert decide_material_alpha(leaves, None, ()).mode == "MASK"

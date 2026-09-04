@@ -134,6 +134,11 @@ def write_route_txt(scene: Scene, output: Path, track: int | str = 0, progress: 
         f"edges={len(edges)}",
         "",
     ]
+    # Progress is reported against every waypoint in the route, not per
+    # segment: the stage name is shared, so a per-segment counter would restart
+    # and stall the bar after the first segment.
+    total_waypoints = sum(len(segment.points) for segment in segments)
+    exported_waypoints = 0
     for segment_index, segment in enumerate(segments):
         lines.extend([
             f"[SEGMENT {segment_index}]",
@@ -160,8 +165,12 @@ def write_route_txt(scene: Scene, output: Path, track: int | str = 0, progress: 
                 f"point_role={point_roles.get((segment.route_index, point.index), 'normal')}",
                 "",
             ])
+            exported_waypoints += 1
             if progress:
-                report_progress("Exporting AI route waypoints", point_number, len(segment.points), f"route {segment.route_index}")
+                report_progress(
+                    "Exporting AI route waypoints", exported_waypoints, total_waypoints,
+                    f"route {segment.route_index}",
+                )
 
     lines.extend(["[EDGES]", f"count={len(edges)}", ""])
     for edge_index, edge in enumerate(edges):

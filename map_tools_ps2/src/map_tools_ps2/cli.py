@@ -27,7 +27,7 @@ from .mta_scene import build_mta_scene, load_collision_rules
 from .obj_writer import write_obj
 from .primitive_probe import probe_primitive_rule
 from .progress import progress_iter
-from .progress import report_progress
+from .progress import cli_progress_context, report_progress
 from .route_export import write_route_txt
 from .sound_extract import export_sound
 from .textures import load_texture_library_for_track
@@ -801,6 +801,7 @@ def main(argv: list[str] | None = None) -> int:
         argv = ["export", *argv]
     args = parser.parse_args(argv)
     if hasattr(args, "func"):
-        return args.func(args)
+        with cli_progress_context():
+            return args.func(args)
     parser.print_help()
     return 2

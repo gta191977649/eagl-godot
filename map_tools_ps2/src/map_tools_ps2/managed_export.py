@@ -17,6 +17,7 @@ from .model import parse_scene
 from .mta_export import (_prepare_eagle_lods, _run_blender, _indent_write,
                          find_blender, _BARRIER_ANIMATION_FX)
 from .mta_scene import MtaScene, build_mta_scene
+from .progress import report_progress
 from .race_catalog import FAMILIES, load_profiles, validate_profile
 from .route_export import write_route_txt
 from .textures import TextureLibrary, load_texture_library_for_track
@@ -55,8 +56,12 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
     models, geom_names, geometry_by_id, texture_keys, tracks = {}, {}, {}, {}, {}
     original_models = original_textures = original_texture_bytes = 0
     model_occurrences = Counter()
-    for track_id in range(base + 1, base + 7):
-        print(f"family {base}: preparing track {track_id}", flush=True)
+    family = FAMILIES[base]
+    track_ids = list(range(base + 1, base + 7))
+    prepare_stage = f"Family {family}: preparing tracks"
+    report_progress(prepare_stage, 0, len(track_ids), None)
+    for track_index, track_id in enumerate(track_ids, 1):
+        report_progress(prepare_stage, track_index - 1, len(track_ids), f"track {track_id}")
         source = game_dir / "ZZDATA" / "TRACKS" / f"TRACKB{track_id}.LZC"
         if not source.exists():
             source = source.with_suffix(".BUN")
@@ -86,7 +91,11 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
         (track_dir / "scene.report.json").write_text(json.dumps(mta.report, indent=2) + "\n", encoding="utf-8")
         texture_remap = {}
         original_textures += len(mta.texture_variants)
-        for (tex_hash, alpha, category), name in sorted(mta.texture_variants.items(), key=lambda item: str(item[0])):
+        texture_items = sorted(mta.texture_variants.items(), key=lambda item: str(item[0]))
+        texture_stage = f"Family {family}: sharing textures (track {track_id})"
+        report_progress(texture_stage, 0, len(texture_items), None)
+        for texture_index, ((tex_hash, alpha, category), name) in enumerate(texture_items, 1):
+            report_progress(texture_stage, texture_index, len(texture_items), name)
             texture = textures.get(tex_hash)
             if texture is None:
                 raise ValueError(f"track {track_id}: missing texture {tex_hash:x}")
@@ -108,7 +117,10 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
             texture_keys[key] = len(texture.png)
         remap = {}
         original_models += len(mta.models)
-        for model in mta.models:
+        model_stage = f"Family {family}: sharing models (track {track_id})"
+        report_progress(model_stage, 0, len(mta.models), None)
+        for model_index, model in enumerate(mta.models, 1):
+            report_progress(model_stage, model_index, len(mta.models), model.model_id)
             model.materials = [replace(material, texture_hash=texture_remap[material.texture_name][0],
                 texture_name=texture_remap[material.texture_name][1]) if material.texture_name in texture_remap
                 else material for material in model.materials]
@@ -169,27 +181,45 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
         route = next(r for r in scene.track_route_segments if r.route_index == profile["spawn"]["route"])
         pos = route.points[profile["spawn"]["point"]].position_ps2
         tracks[str(track_id)]["grid"] = [pos.x, pos.y, pos.z]
-    print(f"family {base}: exporting {len(models)} shared definitions", flush=True)
+    report_progress(prepare_stage, len(track_ids), len(track_ids), None)
     # meta.xml is published last, so incomplete exports cannot become available.
     with tempfile.TemporaryDirectory(prefix=f"hp2_{base}_", dir=output.parent) as temp:
         loose, log, report = _run_blender(merged, library, Path(temp), find_blender(blender), dragonff)
         (output / "blender.log").write_text(log, encoding="utf-8")
-        dff_entries = [ImgEntry(name + ".dff", (loose / "dff" / (name + ".dff")).read_bytes())
-                       for name in sorted(set(geom_names.values()))]
+        geom_entry_names = sorted(set(geom_names.values()))
+        dff_stage = f"Family {family}: packing DFF archive"
+        report_progress(dff_stage, 0, len(geom_entry_names), None)
+        dff_entries = []
+        for dff_index, name in enumerate(geom_entry_names, 1):
+            report_progress(dff_stage, dff_index, len(geom_entry_names), name)
+            dff_entries.append(ImgEntry(name + ".dff", (loose / "dff" / (name + ".dff")).read_bytes()))
         cols, col_for = {}, {}
-        for name in sorted(models):
+        model_names = sorted(models)
+        col_stage = f"Family {family}: deduplicating COL meshes"
+        report_progress(col_stage, 0, len(model_names), None)
+        for col_index, name in enumerate(model_names, 1):
+            report_progress(col_stage, col_index, len(model_names), name)
             payload = (loose / "col" / (name + ".col")).read_bytes()
             # COL header embeds an arbitrary model name and model ID.
             key = hashlib.sha256(payload[:8] + bytes(24) + payload[32:]).hexdigest()
             col_name = "c" + key[:18]
             cols.setdefault(col_name, payload)
             col_for[name] = col_name
+        archive_stage = f"Family {family}: writing IMG archives"
+        report_progress(archive_stage, 0, 3, "dff.img")
         write_img_v2(output / "imgs" / "dff.img", dff_entries)
+        report_progress(archive_stage, 1, 3, "col.img")
         write_img_v2(output / "imgs" / "col.img", [ImgEntry(n + ".col", b) for n, b in sorted(cols.items())])
         txd_bytes = (loose / f"track{base:02d}.txd").read_bytes()
+        report_progress(archive_stage, 2, 3, "txd.img")
         write_img_v2(output / "imgs" / "txd.img", [ImgEntry(f"family{base}.txd", txd_bytes)])
+        report_progress(archive_stage, 3, 3, None)
         definitions = ET.Element("zoneDefinitions")
-        for name, model in sorted(models.items()):
+        definition_items = sorted(models.items())
+        definition_stage = f"Family {family}: writing shared definitions"
+        report_progress(definition_stage, 0, len(definition_items), None)
+        for definition_index, (name, model) in enumerate(definition_items, 1):
+            report_progress(definition_stage, definition_index, len(definition_items), name)
             flags = ["disable_backface_culling"]
             for flag in ("draw_last", "additive", "no_zbuffer_write"):
                 if getattr(model, flag):
@@ -217,7 +247,11 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
     ET.SubElement(meta, "script", {"src": "pack_server.lua", "type": "server"})
     for function in ("getHP2TrackManifest", "getHP2RouteText"):
         ET.SubElement(meta, "export", {"function": function, "type": "server"})
-    for path in sorted(output.rglob("*")):
+    resource_files = sorted(output.rglob("*"))
+    meta_stage = f"Family {family}: listing resource files"
+    report_progress(meta_stage, 0, len(resource_files), None)
+    for path_index, path in enumerate(resource_files, 1):
+        report_progress(meta_stage, path_index, len(resource_files), path.name)
         if path.is_file() and path.suffix not in {".log", ".lua"} and path.name != "meta.xml":
             ET.SubElement(meta, "file", {"src": path.relative_to(output).as_posix()})
     _indent_write(meta, output / "meta.xml")

@@ -16,7 +16,13 @@ from shapely.strtree import STRtree
 
 from .binary import Matrix4, Vec3, transform_point
 from .glb_writer import _decode_vif_color_5551, _indices_for_block
-from .material_alpha import MaterialAlphaDecision, alpha_decisions_for_scene, alpha_diagnostics, decide_material_alpha
+from .material_alpha import (
+    MaterialAlphaDecision,
+    alpha_decisions_for_scene,
+    alpha_diagnostics,
+    decide_material_alpha,
+    is_additive_blend,
+)
 from .model import MeshObject, Scene, SceneryInstance, TrackCollisionPolygon, transformed_block_vertices
 from .progress import report_progress
 
@@ -59,6 +65,10 @@ class MtaModel:
     is_lod: bool = False
     lod_source_id: str | None = None
     lod_target_ratio: float = 0.12
+    # chunk_offset of the HP2 object this model's geometry came from. Names are
+    # not unique in HP2, so this is the only stable way to account for a source
+    # object's triangles across the split/clip pipeline.
+    source_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +137,25 @@ class _Triangle:
 _VEGETATION_RE = re.compile(r"BUSH|TREE|CONIFER|VINE|GRASS|LEAF|FOLIAGE", re.IGNORECASE)
 _SMALL_VEGETATION_RE = re.compile(r"^(?:XT_).*(?:GRASS|BUSH|FERN|FLOWER|LEAF|WEED)", re.IGNORECASE)
 _SKY_RE = re.compile(r"SKYDOME", re.IGNORECASE)
+# Wet-road surfaces. HP2 draws these as a source-alpha base pass plus an
+# additive mask, but the masks carry their shape in alpha and no colour at all
+# (RD_PUDDLE_MASK's whole palette is black; RD_PUDDLE2_MASK's white entries are
+# alpha 0), so no GTA blend mode can reproduce the reflection. Marking the names
+# gives an MTA shader a stable glob to bind to. The marker follows the surface
+# category, so an existing "road_*" shader keeps matching.
+_REFLECTIVE_TEXTURE_RE = re.compile(r"PUDDLE", re.IGNORECASE)
+# The base pass and its mask are not interchangeable: the base carries the
+# visible wet colour, the mask carries only a shape in its alpha channel and is
+# pure black in RGB. A shader that samples them the same way paints dead colour,
+# so they get separate namespaces.
+_REFLECTIVE_MASK_RE = re.compile(r"_MASK$", re.IGNORECASE)
+_REFLECTIVE_TEXTURE_MARKER = "refl_"
+_REFLECTIVE_MASK_MARKER = "reflmask_"
+# A model id becomes "<id>.dff" / "<id>.col" in the IMG directory, whose name
+# field is 24 bytes read as a C string -- 23 usable characters, so the id has
+# 19. Texture names inside the TXD are a separate, larger budget (31).
+_MODEL_ID_MAX_LENGTH = 19
+_TEXTURE_NAME_MAX_LENGTH = 31
 _MTA_WATER_WORLD_MIN = -3000.0
 _MTA_WATER_WORLD_MAX = 3000.0
 _MTA_WATER_SAFE_QUAD_BUDGET = 120
@@ -175,6 +204,15 @@ _SURFACE_PREFIX_CATEGORY = {
     **{value: "dirt" for value in (2, 3, 9)},
     **{value: "grass" for value in (6, 22)},
 }
+
+
+def _reflective_marker(name: str) -> str | None:
+    """Shader namespace for a wet-road texture, or None when it is not one."""
+    if not _REFLECTIVE_TEXTURE_RE.search(name):
+        return None
+    if _REFLECTIVE_MASK_RE.search(name):
+        return _REFLECTIVE_MASK_MARKER
+    return _REFLECTIVE_TEXTURE_MARKER
 
 
 def _is_water_model(name: str) -> bool:
@@ -262,6 +300,22 @@ def _lod_decision(
     }
 
 
+def _object_at(scene: Scene, object_index: int) -> MeshObject | None:
+    """Resolve a scenery instance's source object by its parse-time index."""
+    if 0 <= object_index < len(scene.objects):
+        return scene.objects[object_index]
+    return None
+
+
+def _is_road_name(name: str) -> bool:
+    """HP2 road sections are identified by name prefix, not by object identity.
+
+    This is a class test, not a lookup: several RD_SECTION records share a
+    truncated display name, so the result must never be used to key a dict.
+    """
+    return name.upper().startswith("RD_SECTION")
+
+
 def _deduplicate_scenery_instances(
     instances: Iterable[SceneryInstance],
 ) -> tuple[list[SceneryInstance], dict[str, Any]]:
@@ -271,17 +325,18 @@ def _deduplicate_scenery_instances(
     sections are streamed independently. MTA loads the exported scene globally,
     so retaining every section copy renders the same model multiple times.
 
-    Keep this deliberately exact: two records are duplicates only when their
-    resolved model name and complete source transform are identical. The
-    original Scene and its section metadata are never modified.
+    Keep this deliberately exact: two records are duplicates only when they
+    reference the same source object and their complete source transforms are
+    identical. The original Scene and its section metadata are never modified.
     """
     unique: list[SceneryInstance] = []
-    occurrences: Counter[tuple[str, Matrix4]] = Counter()
+    occurrences: Counter[tuple[int, Matrix4]] = Counter()
     for instance in instances:
-        # MTA templates are resolved by object_name. Some overlapping HP2
-        # section records carry different object_hash metadata even though they
-        # resolve to the same named template and exact transform.
-        key = (instance.object_name, instance.transform)
+        # Key on object_index, not object_name. HP2 truncates object names to
+        # the 23 characters its name field holds, so distinct meshes collide on
+        # a shared display name; object_index is resolved from the unique
+        # per-object name_hash when the section records are parsed.
+        key = (instance.object_index, instance.transform)
         occurrences[key] += 1
         if occurrences[key] == 1:
             unique.append(instance)
@@ -308,7 +363,20 @@ def _resolve_mta_scenery_instances(
     scene: Scene,
 ) -> tuple[list[SceneryInstance], dict[str, Any], list[str]]:
     source_instances, base_report = _deduplicate_scenery_instances(scene.scenery_instances)
-    objects_by_name = {obj.name: (index, obj) for index, obj in enumerate(scene.objects)}
+    # Only the barrier upgrade targets are looked up by name. HP2 names are
+    # truncated to 23 characters and collide, so an ambiguous target would
+    # silently resolve to whichever object happened to be parsed last.
+    upgrade_targets = set(_TRACK_BARRIER_TEMPLATE_UPGRADES.values())
+    objects_by_name: dict[str, list[tuple[int, MeshObject]]] = defaultdict(list)
+    for index, obj in enumerate(scene.objects):
+        if obj.name in upgrade_targets:
+            objects_by_name[obj.name].append((index, obj))
+    ambiguous_targets = sorted(name for name, entries in objects_by_name.items() if len(entries) > 1)
+    if ambiguous_targets:
+        raise ValueError(
+            "ambiguous HP2 track-barrier upgrade targets (several objects share the truncated "
+            f"name): {ambiguous_targets}"
+        )
     resolved: list[SceneryInstance] = []
     upgraded = 0
     missing_targets: set[str] = set()
@@ -319,32 +387,37 @@ def _resolve_mta_scenery_instances(
     barrier_duplicates_removed = 0
 
     for instance in source_instances:
-        target_name = _TRACK_BARRIER_TEMPLATE_UPGRADES.get(instance.object_name, instance.object_name)
+        upgrade_name = _TRACK_BARRIER_TEMPLATE_UPGRADES.get(instance.object_name)
+        target_name = upgrade_name if upgrade_name is not None else instance.object_name
         is_track_barrier = (
             instance.object_name in _TRACK_BARRIER_TEMPLATE_UPGRADES
-            or target_name in _TRACK_BARRIER_TEMPLATE_UPGRADES.values()
+            or target_name in upgrade_targets
         )
         if is_track_barrier:
             source_counts[instance.object_name] += 1
             visibility_flags[f"0x{instance.visibility_flags:04x}"] += 1
-        target_entry = objects_by_name.get(target_name)
-        if target_entry is None:
-            if target_name != instance.object_name:
-                missing_targets.add(target_name)
+        target_entries = objects_by_name.get(target_name)
+        if upgrade_name is None:
+            # Not an upgrade. Preserve the identity the parser resolved from the
+            # unique name_hash; rebinding by name would silently repoint this
+            # placement at whichever same-named object was parsed last.
             resolved_instance = instance
-            target_obj = objects_by_name.get(instance.object_name, (None, None))[1]
+            target_obj = _object_at(scene, instance.object_index)
+        elif not target_entries:
+            missing_targets.add(target_name)
+            resolved_instance = instance
+            target_obj = _object_at(scene, instance.object_index)
         else:
-            target_index, target_obj = target_entry
+            target_index, target_obj = target_entries[0]
             resolved_instance = replace(
                 instance,
                 object_index=target_index,
                 object_name=target_name,
                 object_hash=target_obj.name_hash,
             )
-            if target_name != instance.object_name:
-                upgraded += 1
+            upgraded += 1
 
-        if target_obj is not None and target_name in set(_TRACK_BARRIER_TEMPLATE_UPGRADES.values()):
+        if target_obj is not None and target_name in upgrade_targets:
             transform_key = tuple(tuple(round(value, 5) for value in row) for row in instance.transform)
             key = (_mesh_visual_fingerprint(target_obj), transform_key)
             barrier_occurrences[key] += 1
@@ -392,8 +465,14 @@ def _model_id(track_id: int, category: str, token: str, variant: int = 0) -> str
     digest = hashlib.blake2s(token.encode("utf-8"), digest_size=4).hexdigest()
     value = f"t{track_id:02d}_{category}_{digest}"
     if variant:
-        value += f"_{variant:02d}"
-    return value[:20]
+        # The digest already makes the id unique; the variant is only a
+        # readability aid, so drop it rather than truncate when it does not fit.
+        suffix = f"_{variant:02d}"
+        if len(value) + len(suffix) <= _MODEL_ID_MAX_LENGTH:
+            value += suffix
+    if len(value) > _MODEL_ID_MAX_LENGTH:
+        raise ValueError(f"MTA model id exceeds the IMG name budget: {value!r}")
+    return value
 
 
 def _unique_id(token: str) -> str:
@@ -658,34 +737,48 @@ def _triangle_alpha_decision(
     )
 
 
+# Order matters: the first present layer becomes the primary model and the rest
+# become render companions.
+_RENDER_LAYER_ORDER = ("base", "blend", "additive")
+
+
 def _render_layers(
     triangles: list[_Triangle],
     alpha_decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
     alpha_usage: dict[int, frozenset[int | None]],
     textures: Any,
 ) -> list[tuple[str, list[_Triangle]]]:
-    """Separate standard alpha faces from opaque/cutout faces.
+    """Separate opaque/cutout, source-alpha and additive faces.
 
     GTA's draw_last/additive/depth-write controls are model-level. Keeping a
     BLEND material in a model that also contains opaque faces would apply those
-    controls to the entire DFF, so mixed HP2 models need two render layers.
+    controls to the entire DFF, so mixed HP2 models need separate render layers.
+
+    Additive gets its own layer for the same reason: PS2 alpha_bits 0x48 is
+    Cs*As + Cd, and folding it into the 0x44 layer would draw a glow or a wet
+    road reflection as a flat source-alpha blend.
     """
-    base: list[_Triangle] = []
-    blend: list[_Triangle] = []
+    buckets: dict[str, list[_Triangle]] = {name: [] for name in _RENDER_LAYER_ORDER}
     for triangle in triangles:
         decision = _triangle_alpha_decision(triangle, alpha_decisions, alpha_usage, textures)
-        (blend if decision.mode == "BLEND" else base).append(triangle)
-    return [(name, values) for name, values in (("base", base), ("blend", blend)) if values]
+        if decision.mode != "BLEND":
+            layer = "base"
+        elif is_additive_blend(decision):
+            layer = "additive"
+        else:
+            layer = "blend"
+        buckets[layer].append(triangle)
+    return [(name, buckets[name]) for name in _RENDER_LAYER_ORDER if buckets[name]]
 
 
 def _configure_model_render_state(model: MtaModel, layer: str) -> None:
     model.render_layer = layer
-    if layer == "blend":
-        # HP2 TRACK31 semitransparent textures use alpha_bits=0x44, the normal
-        # source-alpha blend equation. They are not additive effects.
+    if layer in {"blend", "additive"}:
+        # alpha_bits 0x44 is the normal source-alpha blend equation; 0x48 is
+        # Cs*As + Cd, which GTA expresses with the additive model flag.
         model.draw_last = True
         model.no_zbuffer_write = True
-        model.additive = False
+        model.additive = layer == "additive"
 
 
 def _configure_animated_material_render_state(model: MtaModel, animated_hashes: set[int]) -> None:
@@ -1302,9 +1395,20 @@ def _texture_variant_names(
     for texture_hash, modes in sorted(modes_by_hash.items()):
         base = texture_names.get(texture_hash, f"tex_{texture_hash:08x}")
         categories: list[str | None] = [None, *sorted(categories_by_hash.get(texture_hash, set()))]
+        # Wet-road surfaces take a reflection namespace INSTEAD of their surface
+        # category, so a roadshine shader bound to "road_*" cannot pick them up.
+        # One entry then serves every category: the category split exists only
+        # to give shaders separate names, which the marker already does.
+        marker = _reflective_marker(base)
+        reflective = marker is not None
+        reflective_names: dict[str, str] = {}
         for category in categories:
-            prefix = f"{category}_" if category else ""
+            prefix = marker if marker else (f"{category}_" if category else "")
             for mode in sorted(modes):
+                shared = reflective_names.get(mode)
+                if shared is not None:
+                    result[(texture_hash, mode, category)] = shared
+                    continue
                 alpha_suffix = suffixes[mode] if len(modes) > 1 else ""
                 stem = prefix + base
                 candidate = stem[: 31 - len(alpha_suffix)] + alpha_suffix
@@ -1316,6 +1420,8 @@ def _texture_variant_names(
                     candidate = stem[: 31 - len(unique_suffix)] + unique_suffix
                 used.add(candidate.lower())
                 result[(texture_hash, mode, category)] = candidate
+                if reflective:
+                    reflective_names[mode] = candidate
     return result
 
 
@@ -1336,17 +1442,23 @@ def _bounds(points: Iterable[tuple[float, float, float]]) -> dict[str, list[floa
 def _source_visual_points(
     static_objects: dict[Any, list[_Triangle]],
     instances: Iterable[SceneryInstance],
-    templates: dict[str, MeshObject],
+    templates: dict[int, MeshObject],
+    object_offsets: list[int],
 ):
     for triangles in static_objects.values():
         for triangle in triangles:
             for vertex in triangle.vertices:
                 yield vertex.position
-    triangle_cache = {name: list(_triangles_for_object(obj, bake_transform=False)) for name, obj in templates.items()}
+    triangle_cache = {
+        offset: list(_triangles_for_object(obj, bake_transform=False))
+        for offset, obj in templates.items()
+    }
     for instance in instances:
         if _is_mta_visual_excluded(instance.object_name):
             continue
-        for triangle in triangle_cache.get(instance.object_name, ()):
+        if not 0 <= instance.object_index < len(object_offsets):
+            continue
+        for triangle in triangle_cache.get(object_offsets[instance.object_index], ()):
             for vertex in triangle.vertices:
                 point = transform_point(Vec3(*vertex.position), instance.transform)
                 yield (point.x, point.y, point.z)
@@ -1884,10 +1996,20 @@ def build_mta_scene(
     )
     animated_texture_hashes = set(barrier_animation.frame_hashes) if barrier_animation is not None else set()
     if barrier_source_present:
-        barrier_templates = {
-            obj.name: obj for obj in scene.objects
+        barrier_candidates = [
+            obj for obj in scene.objects
             if obj.name in _TRACK_BARRIER_TEMPLATE_UPGRADES.values()
-        }
+        ]
+        barrier_templates = {obj.name: obj for obj in barrier_candidates}
+        if len(barrier_templates) != len(barrier_candidates):
+            # HP2 names are truncated to 23 characters, so "unique by name" is
+            # never safe to assume even where it currently holds.
+            duplicated = sorted(
+                name for name, count in Counter(obj.name for obj in barrier_candidates).items() if count > 1
+            )
+            raise ValueError(
+                f"ambiguous HP2 track-barrier templates (several objects share a name): {duplicated}"
+            )
         missing_templates = sorted(set(_TRACK_BARRIER_TEMPLATE_UPGRADES.values()) - set(barrier_templates))
         required_hashes = {
             texture_hash
@@ -1920,23 +2042,37 @@ def build_mta_scene(
             "complete HP2 track-barrier templates are missing: "
             + ", ".join(placement_deduplication["missing_upgrade_targets"])
         )
-    placement_names = {instance.object_name for instance in scenery_instances}
-    road_names = {obj.name for obj in scene.objects if obj.name.upper().startswith("RD_SECTION")}
-    templates = {
-        obj.name: obj
-        for obj in scene.objects
-        if obj.name not in road_names
-        and (obj.name in placement_names or obj.chunk_offset in scene.scenery_template_offsets)
+    # HP2 object names are truncated to the 23 characters its name field holds,
+    # so distinct meshes share a display name. Route scenery by chunk_offset --
+    # the same stable identity static_triangles below already relies on --
+    # otherwise a same-named object silently replaces another one's geometry.
+    object_offsets = [obj.chunk_offset for obj in scene.objects]
+    placement_offsets = {
+        object_offsets[instance.object_index]
+        for instance in scenery_instances
+        if 0 <= instance.object_index < len(object_offsets)
     }
+    template_candidates = [
+        obj for obj in scene.objects
+        if not _is_road_name(obj.name)
+        and (obj.chunk_offset in placement_offsets or obj.chunk_offset in scene.scenery_template_offsets)
+    ]
+    templates = {obj.chunk_offset: obj for obj in template_candidates}
+    if len(templates) != len(template_candidates):
+        collapsed = Counter(obj.chunk_offset for obj in template_candidates)
+        raise ValueError(
+            "duplicate scenery template chunk offsets: "
+            + ", ".join(f"0x{offset:08x}" for offset, count in sorted(collapsed.items()) if count > 1)
+        )
     excluded_static_objects = [
         obj for obj in scene.objects
-        if obj.name not in placement_names
+        if obj.chunk_offset not in placement_offsets
         and obj.chunk_offset not in scene.scenery_template_offsets
         and _is_mta_visual_excluded(obj.name)
     ]
     static_objects = [
         obj for obj in scene.objects
-        if (obj.name not in placement_names or obj.name in road_names)
+        if (obj.chunk_offset not in placement_offsets or _is_road_name(obj.name))
         and obj.chunk_offset not in scene.scenery_template_offsets
         and not _is_mta_visual_excluded(obj.name)
     ]
@@ -1947,7 +2083,7 @@ def build_mta_scene(
         obj.chunk_offset: list(_triangles_for_object(obj, bake_transform=True))
         for obj in static_objects
     }
-    road_source_objects = [obj for obj in static_objects if obj.name.upper().startswith("RD_SECTION")]
+    road_source_objects = [obj for obj in static_objects if _is_road_name(obj.name)]
     road_surface_classification = _classify_road_triangles(
         static_triangles,
         {obj.chunk_offset for obj in road_source_objects},
@@ -1967,6 +2103,7 @@ def build_mta_scene(
     max_col3_coordinate = 0.0
     mixed_render_models_split = 0
     blend_companion_models = 0
+    additive_companion_models = 0
     road_models: list[MtaModel] = []
     lod_candidate_records: list[dict[str, Any]] = []
     lod_decisions: list[dict[str, Any]] = []
@@ -1991,9 +2128,10 @@ def build_mta_scene(
 
     def emit_world_part(
         part: list[_Triangle], source_name: str, role: str, token: str, part_index: int,
-        lod_enabled: bool | None = None,
+        lod_enabled: bool | None = None, source_offset: int | None = None,
     ) -> None:
         nonlocal mixed_render_models_split, blend_companion_models, blend_only_lod_excluded
+        nonlocal additive_companion_models
         origin = _bounds_center(part)
         layers = _render_layers(part, alpha_decisions, alpha_usage, textures)
         if len(layers) > 1:
@@ -2010,20 +2148,30 @@ def build_mta_scene(
             blend_only_lod_excluded += 1
         unique_id = _unique_id(f"{track_id}:{token}:{part_index}")
         base_model: MtaModel | None = None
+        # The first layer is the primary model; the rest are render companions.
+        # An all-transparent part has no base layer, so "blend" alone (or
+        # "additive" alone) has to be able to act as the primary.
+        primary_layer = layers[0][0]
         for layer, layer_triangles in layers:
-            is_companion = layer == "blend" and len(layers) > 1
+            is_companion = layer != primary_layer
             model_id = (
-                _model_id(track_id, "a", f"{token}:blend", part_index)
+                _model_id(track_id, "a", f"{token}:{layer}", part_index)
                 if is_companion
                 else _model_id(track_id, "s", token, part_index)
             )
             cell = cell_for_xy(origin[0], origin[1], chunk_size)
-            model = MtaModel(model_id, source_name, role, zone_name(track_id, cell), origin)
+            model = MtaModel(
+                model_id, source_name, role, zone_name(track_id, cell), origin,
+                source_offset=source_offset,
+            )
             _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
             _configure_model_render_state(model, layer)
             _configure_animated_material_render_state(model, animated_texture_hashes)
             if is_companion:
-                blend_companion_models += 1
+                if layer == "additive":
+                    additive_companion_models += 1
+                else:
+                    blend_companion_models += 1
             if vertex_colors == "off":
                 model.colors.clear()
             model.lod_distance = _detail_lod_distance(part) if lod_id else _auto_lod(model)
@@ -2040,8 +2188,8 @@ def build_mta_scene(
             models.append(model)
             placements.append(MtaPlacement(
                 model_id, model.zone, "building", origin, (0.0, 0.0, 0.0), source_name,
-                lod_id if layer == "base" else None,
-                unique_id if layer == "base" else _unique_id(unique_id + ":blend"),
+                lod_id if not is_companion else None,
+                unique_id if not is_companion else _unique_id(f"{unique_id}:{layer}"),
             ))
         if lod_id is not None and base_layer is not None and base_model is not None:
             source_model = base_model
@@ -2102,7 +2250,7 @@ def build_mta_scene(
         for part_index, part in enumerate(parts):
             emit_world_part(
                 part, obj.name, role, f"static:{obj.chunk_offset}:{obj.name}:{part_index}", part_index,
-                object_lod_enabled,
+                object_lod_enabled, source_offset=obj.chunk_offset,
             )
 
     overflow_models: list[MtaModel] = []
@@ -2156,20 +2304,30 @@ def build_mta_scene(
             for index in range(1, len(points) - 1)
         )
     excluded_scenery_placements: Counter[str] = Counter()
-    variant_placements: dict[tuple[str, tuple[float, float, float]], list[tuple[Any, tuple[float, float, float], tuple[float, float, float]]]] = defaultdict(list)
+    variant_placements: dict[tuple[int, tuple[float, float, float]], list[tuple[Any, tuple[float, float, float], tuple[float, float, float]]]] = defaultdict(list)
     max_matrix_error = 0.0
     prop_pivot_offsets_before: list[float] = []
     prop_pivot_offsets_after: list[float] = []
     prop_placement_corrections: list[float] = []
     max_pivot_world_reconstruction_error = 0.0
+    classified_instances = 0
     for instance in scenery_instances:
-        if instance.object_name in road_names:
+        # Names classify a *kind* here (road/water/sky) and every object sharing
+        # a truncated name shares its kind, so these stay name-based. The
+        # template itself is always resolved by chunk offset.
+        template_offset = (
+            object_offsets[instance.object_index]
+            if 0 <= instance.object_index < len(object_offsets)
+            else None
+        )
+        if _is_road_name(instance.object_name):
             # Streaming sections may reference road records as placements.
             # Roads are static source objects, not scenery props.
             excluded_scenery_placements[instance.object_name] += 1
+            classified_instances += 1
             continue
         if _is_water_model(instance.object_name):
-            water_object = templates.get(instance.object_name)
+            water_object = templates.get(template_offset)
             if water_object is None:
                 warnings.append(f"missing WATER template: {instance.object_name}")
             else:
@@ -2188,20 +2346,32 @@ def build_mta_scene(
                 water_quads.extend(generated_water)
                 water_generation.append({"source": instance.object_name, **generation_report})
             excluded_scenery_placements[instance.object_name] += 1
+            classified_instances += 1
             continue
         if _is_sky_model(instance.object_name):
             excluded_scenery_placements[instance.object_name] += 1
+            classified_instances += 1
             continue
-        if instance.object_name not in templates:
-            warnings.append(f"missing scenery template: {instance.object_name}")
+        if template_offset not in templates:
+            offset_hint = "unresolved" if template_offset is None else f"0x{template_offset:08x}"
+            warnings.append(f"missing scenery template: {instance.object_name} ({offset_hint})")
+            classified_instances += 1
             continue
         try:
             position, rotation, scale, error = decompose_placement(instance.transform)
         except ValueError as exc:
             warnings.append(f"{instance.object_name}: {exc}")
+            classified_instances += 1
             continue
         max_matrix_error = max(max_matrix_error, error)
-        variant_placements[(instance.object_name, _scale_signature(scale))].append((instance, position, rotation))
+        classified_instances += 1
+        variant_placements[(template_offset, _scale_signature(scale))].append((instance, position, rotation))
+
+    if classified_instances != len(scenery_instances):
+        raise ValueError(
+            "MTA scenery instances were not fully classified: "
+            f"{classified_instances} of {len(scenery_instances)}"
+        )
 
     aggregate_water_simplified = len(water_quads) > _MTA_WATER_SAFE_QUAD_BUDGET
     if aggregate_water_simplified:
@@ -2209,9 +2379,10 @@ def build_mta_scene(
 
     sorted_variants = sorted(variant_placements.items())
     report_progress("Building prop models", 0, len(sorted_variants), None)
-    for variant_index, ((name, scale), entries) in enumerate(sorted_variants, 1):
+    for variant_index, ((template_offset, scale), entries) in enumerate(sorted_variants, 1):
+        obj = templates[template_offset]
+        name = obj.name
         report_progress("Building prop models", variant_index, len(sorted_variants), name)
-        obj = templates[name]
         triangles = _scaled_triangles(obj, scale)
         if not triangles:
             warnings.append(f"empty scenery template: {name}")
@@ -2243,8 +2414,9 @@ def build_mta_scene(
                 for part_index, part in enumerate(_split_model_triangles(chunk_triangles, max_vertices, None)):
                     emit_world_part(
                         part, name, "static_scenery",
-                        f"promoted:{name}:{scale}:{chunk_index}:{part_index}", chunk_index * 1000 + part_index,
-                        True,
+                        f"promoted:{template_offset:08x}:{name}:{scale}:{chunk_index}:{part_index}",
+                        chunk_index * 1000 + part_index,
+                        True, source_offset=template_offset,
                     )
             continue
         layers = _render_layers(triangles, alpha_decisions, alpha_usage, textures)
@@ -2284,20 +2456,34 @@ def build_mta_scene(
 
         counts = Counter(cell_for_xy(position[0], position[1], chunk_size) for _instance, position, _rotation in adjusted_entries)
         owner_cell = sorted(counts, key=lambda cell: (-counts[cell], cell))[0]
+        # The first layer is the primary model; the rest are render companions.
+        # An all-transparent template has no base layer, so "blend" alone (or
+        # "additive" alone) has to be able to act as the primary.
+        primary_layer = layers[0][0]
+        # Key the model id on the template's own chunk offset: HP2 names are
+        # truncated to 23 characters and collide, and enumeration order shifts
+        # whenever the template set changes.
+        prop_token = f"{template_offset:08x}:{name}:{scale}"
         for layer, layer_triangles in layers:
-            is_companion = layer == "blend" and len(layers) > 1
+            is_companion = layer != primary_layer
             model_id = (
-                _model_id(track_id, "a", f"prop:{name}:{scale}:blend", variant_index)
+                _model_id(track_id, "a", f"prop:{prop_token}:{layer}")
                 if is_companion
-                else _model_id(track_id, "p", f"{name}:{scale}", variant_index)
+                else _model_id(track_id, "p", prop_token)
             )
             prop_lod_id = _lod_model_id(model_id) if decision["decision"] == "candidate" and lod_mode != "off" and not is_companion else None
-            model = MtaModel(model_id, name, "prop", zone_name(track_id, owner_cell), origin)
+            model = MtaModel(
+                model_id, name, "prop", zone_name(track_id, owner_cell), origin,
+                source_offset=template_offset,
+            )
             _fill_model(model, layer_triangles, texture_names, texture_variants, alpha_decisions, alpha_usage, textures)
             _configure_model_render_state(model, layer)
             _configure_animated_material_render_state(model, animated_texture_hashes)
             if is_companion:
-                blend_companion_models += 1
+                if layer == "additive":
+                    additive_companion_models += 1
+                else:
+                    blend_companion_models += 1
             prop_pivot_offsets_after.append(_length(_local_bounds_center(model.vertices)))
             if vertex_colors == "off":
                 model.colors.clear()
@@ -2305,9 +2491,9 @@ def build_mta_scene(
             models.append(model)
             for entry_index, (instance, position, rotation) in enumerate(adjusted_entries):
                 cell = cell_for_xy(position[0], position[1], chunk_size)
-                unique_id = _unique_id(f"{track_id}:prop:{name}:{scale}:{entry_index}") if prop_lod_id and layer == "base" else None
-                placements.append(MtaPlacement(model_id, zone_name(track_id, cell), "object", position, rotation, instance.object_name, prop_lod_id if layer == "base" else None, unique_id))
-            if prop_lod_id is not None and layer == "base":
+                unique_id = _unique_id(f"{track_id}:prop:{template_offset:08x}:{name}:{scale}:{entry_index}") if prop_lod_id and not is_companion else None
+                placements.append(MtaPlacement(model_id, zone_name(track_id, cell), "object", position, rotation, instance.object_name, prop_lod_id if not is_companion else None, unique_id))
+            if prop_lod_id is not None and not is_companion:
                 lod_model = MtaModel(
                     prop_lod_id, name, "lod", zone_name(track_id, owner_cell), origin,
                     materials=list(model.materials), collision_kind="bounds",
@@ -2317,7 +2503,7 @@ def build_mta_scene(
                 models.append(lod_model)
                 for entry_index, (_instance, position, rotation) in enumerate(adjusted_entries):
                     cell = cell_for_xy(position[0], position[1], chunk_size)
-                    unique_id = _unique_id(f"{track_id}:prop:{name}:{scale}:{entry_index}")
+                    unique_id = _unique_id(f"{track_id}:prop:{template_offset:08x}:{name}:{scale}:{entry_index}")
                     placements.append(MtaPlacement(prop_lod_id, zone_name(track_id, cell), "object", position, rotation, name, None, unique_id))
 
     zones = sorted({placement.zone for placement in placements} | {model.zone for model in models})
@@ -2350,7 +2536,9 @@ def build_mta_scene(
             f"invalid LOD assignment: names={lod_name_assignment_errors[:5]}, unresolved={unresolved_lod_parents[:5]}, "
             f"maximum transform difference={max_lod_placement_difference}"
         )
-    source_bounds = _bounds(_source_visual_points(static_triangles, scenery_instances, templates))
+    source_bounds = _bounds(
+        _source_visual_points(static_triangles, scenery_instances, templates, object_offsets)
+    )
     visual_ids = {model.model_id for model in models if model.kind != "native_collision"}
     output_bounds = _bounds(_output_visual_points(models, [p for p in placements if p.model_id in visual_ids]))
     bounds_error = 0.0
@@ -2367,10 +2555,73 @@ def build_mta_scene(
         )
     if bounds_error > 0.01:
         raise ValueError(f"MTA scene bounds changed during optimization (maximum error {bounds_error:.9g})")
+
+    # Per-source-object conservation. The whole-scene bounding box above cannot
+    # see an interior mesh disappear, and comparing aggregate triangle totals
+    # cannot either: spatial clipping legitimately inflates the output. Splitting
+    # and clipping only ever ADD triangles for a given source object, so a
+    # shortfall against any single source object is real geometry loss.
+    placed_template_offsets = {offset for offset, _scale in variant_placements}
+    source_names_by_offset = {obj.chunk_offset: obj.name for obj in scene.objects}
+
+    def _renderable_triangle_count(triangles: Iterable[_Triangle]) -> int:
+        # Spatial clipping discards zero-area slivers, and HP2 meshes contain a
+        # few genuinely degenerate faces, so they cannot be part of the floor.
+        # Placement scales are always non-zero (decompose_placement rejects a
+        # degenerate matrix), so a scaled triangle stays non-degenerate.
+        return sum(1 for triangle in triangles if _triangle_area_squared(triangle) > 1e-12)
+
+    expected_source_triangles: dict[int, int] = {
+        obj.chunk_offset: _renderable_triangle_count(static_triangles.get(obj.chunk_offset, ()))
+        for obj in static_objects
+    }
+    for offset in placed_template_offsets:
+        expected_source_triangles[offset] = _renderable_triangle_count(
+            _triangles_for_object(templates[offset], bake_transform=False)
+        )
+    produced_source_triangles: Counter[int] = Counter()
+    for model in models:
+        if model.is_lod or model.source_offset is None:
+            continue
+        produced_source_triangles[model.source_offset] += len(model.faces)
+    triangle_loss_by_source = [
+        {
+            "chunk_offset": f"0x{offset:08x}",
+            "name": source_names_by_offset.get(offset, "?"),
+            "expected": expected,
+            "produced": produced_source_triangles.get(offset, 0),
+        }
+        for offset, expected in sorted(expected_source_triangles.items())
+        if expected and produced_source_triangles.get(offset, 0) < expected
+    ]
+    if triangle_loss_by_source:
+        lost = sum(item["expected"] - item["produced"] for item in triangle_loss_by_source)
+        raise ValueError(
+            f"MTA export dropped source geometry: {len(triangle_loss_by_source)} objects, "
+            f"{lost} triangles; first offenders {triangle_loss_by_source[:5]}"
+        )
+
+    # Model ids are a 32-bit digest and uniqueIDs 31 bits, with no collision
+    # check anywhere else in the pipeline; a collision silently overwrites a
+    # DFF/COL on disk and the set-based archive validation cannot see it.
+    duplicate_model_ids = sorted(
+        model_id for model_id, count in Counter(model.model_id for model in models).items() if count > 1
+    )
+    if duplicate_model_ids:
+        raise ValueError(f"duplicate MTA model ids: {duplicate_model_ids[:5]}")
+
     source_expanded_triangles = sum(len(triangles) for triangles in static_triangles.values())
-    template_triangle_counts = {name: sum(1 for _triangle in _triangles_for_object(obj, bake_transform=False)) for name, obj in templates.items()}
+    template_triangle_counts = {
+        offset: sum(1 for _triangle in _triangles_for_object(obj, bake_transform=False))
+        for offset, obj in templates.items()
+    }
     source_expanded_triangles += sum(
-        template_triangle_counts.get(instance.object_name, 0)
+        template_triangle_counts.get(
+            object_offsets[instance.object_index]
+            if 0 <= instance.object_index < len(object_offsets)
+            else None,
+            0,
+        )
         for instance in scenery_instances
         if not _is_mta_visual_excluded(instance.object_name)
     )
@@ -2392,6 +2643,10 @@ def build_mta_scene(
         for key, name in texture_variants.items()
         if key in referenced_texture_variants and textures.get(key[0]) is not None
     }
+    reflective_markers = (_REFLECTIVE_TEXTURE_MARKER, _REFLECTIVE_MASK_MARKER)
+    reflective_textures = sorted(
+        {name for name in texture_variants.values() if name.startswith(reflective_markers)}
+    )
     missing_texture_hashes = sorted(value for value in referenced_texture_hashes if value not in texture_names)
     warnings.extend(f"missing texture hash: 0x{value:08x}" for value in missing_texture_hashes)
     animation_bindings: list[MtaTextureAnimationBinding] = []
@@ -2451,6 +2706,15 @@ def build_mta_scene(
         "prop_models": sum(model.kind == "prop" for model in models),
         "mixed_render_models_split": mixed_render_models_split,
         "blend_companion_models": blend_companion_models,
+        "additive_companion_models": additive_companion_models,
+        "render_layer_models": dict(sorted(Counter(model.render_layer for model in models).items())),
+        "reflective_textures": reflective_textures,
+        "triangle_loss_by_source": triangle_loss_by_source,
+        "duplicate_source_names": dict(sorted(
+            (name, count)
+            for name, count in Counter(obj.name for obj in scene.objects).items()
+            if count > 1
+        )),
         "draw_last_models": sum(model.draw_last for model in models),
         "no_zbuffer_write_models": sum(model.no_zbuffer_write for model in models),
         "additive_models": sum(model.additive for model in models),

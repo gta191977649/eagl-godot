@@ -23,6 +23,28 @@ class MaterialAlphaDecision:
     texture_fx: int | None
 
 
+# PS2 GS ALPHA register: the blend output is (A - B) * C + D. HP2 only ever
+# emits three of the encodings, and the pair below are the two that blend:
+#   0x44 -> (Cs - Cd) * As + Cd   normal source-alpha blend
+#   0x48 -> (Cs -  0) * As + Cd   additive (glow, reflections, lens flare)
+# Both are "BLEND" as far as texture storage goes -- the difference is a
+# draw-state property of the model, which GTA expresses with its additive flag.
+PS2_ALPHA_BITS_SOURCE_ALPHA = 0x44
+PS2_ALPHA_BITS_ADDITIVE = 0x48
+
+# Share of intermediate alpha above which a texture is a gradient rather than a
+# binary alpha-test mask. The measured distribution is bimodal with an empty gap
+# between 0% and 1.28%, so this sits in the gap and still tolerates a handful of
+# stray antialiased texels on a real cutout.
+_SOFT_ALPHA_FRACTION = 0.005
+PS2_ALPHA_BITS_BLEND = (PS2_ALPHA_BITS_SOURCE_ALPHA, PS2_ALPHA_BITS_ADDITIVE)
+
+
+def is_additive_blend(decision: MaterialAlphaDecision) -> bool:
+    """True when the source draws this material with Cs*As + Cd."""
+    return decision.mode == "BLEND" and decision.alpha_bits == PS2_ALPHA_BITS_ADDITIVE
+
+
 def is_opaque_surface_state(render_flag: int | None) -> bool:
     if render_flag is None:
         return False
@@ -45,10 +67,23 @@ def scene_texture_render_flags(scene: Scene) -> dict[int, frozenset[int | None]]
 def _pixel_candidate(texture: Texture) -> tuple[AlphaMode, float | None, str]:
     zero_count = getattr(texture, "alpha_zero_count", None)
     opaque_count = getattr(texture, "alpha_opaque_count", None)
+    intermediate_count = getattr(texture, "alpha_intermediate_count", None) or 0
     if zero_count is not None and opaque_count is not None:
+        total = zero_count + opaque_count + intermediate_count
+        # Soft alpha has to be ruled out before the endpoint test, not after it.
+        # Reaching here means the TPK does not flag semitransparency and the
+        # blend byte is not a blending one, so the PS2 never blends this
+        # texture; alpha can only drive an alpha *test*, which is a binary
+        # decision. A mask authored for one therefore has essentially no
+        # intermediate alpha: measured across tracks 11/21/31/41/61, all 337
+        # genuine cutouts hold exactly 0% while every soft road transition,
+        # shoulder and median holds at least 1.28%. Treating a gradient as a
+        # cutout punches holes straight through roads and terrain.
+        if total and intermediate_count / total > _SOFT_ALPHA_FRACTION:
+            return "OPAQUE", None, "intermediate_alpha_without_tpk_semitransparency"
         if zero_count > 0 and opaque_count > 0:
             return "MASK", getattr(texture, "alpha_cutoff", None) or 0.5, "pixel_cutout_endpoints"
-        if getattr(texture, "alpha_intermediate_count", None):
+        if intermediate_count:
             return "OPAQUE", None, "intermediate_alpha_without_tpk_semitransparency"
         return "OPAQUE", None, "opaque_pixels"
     if getattr(texture, "alpha_mode", None) == "MASK":
@@ -71,9 +106,14 @@ def decide_material_alpha(
     alpha_bits = getattr(texture, "alpha_bits", None)
     alpha_fix = getattr(texture, "alpha_fix", None)
     texture_fx = getattr(texture, "texture_fx", None)
-    if semitransparency or alpha_bits == 0x44:
+    if semitransparency or alpha_bits in PS2_ALPHA_BITS_BLEND:
+        reason = (
+            "tpk_additive_blend"
+            if alpha_bits == PS2_ALPHA_BITS_ADDITIVE
+            else "tpk_semitransparency"
+        )
         return MaterialAlphaDecision(
-            "BLEND", None, "tpk_semitransparency", render_flag,
+            "BLEND", None, reason, render_flag,
             semitransparency, alpha_bits, alpha_fix, texture_fx,
         )
     if is_opaque_surface_state(render_flag):
@@ -130,7 +170,13 @@ def alpha_diagnostics(
             corrected.append({"hash": f"0x{texture_hash:08x}", "name": name, "source_mode": source_mode})
         semitransparency = getattr(texture, "is_any_semitransparency", None) if texture is not None else None
         alpha_bits = getattr(texture, "alpha_bits", None) if texture is not None else None
-        if texture is not None and alpha_bits is not None and bool(semitransparency) != (alpha_bits == 0x44):
+        # 0x48 is additive but still semitransparent; only a non-blending
+        # alpha_bits contradicts the TPK semitransparency flag.
+        if (
+            texture is not None
+            and alpha_bits is not None
+            and bool(semitransparency) != (alpha_bits in PS2_ALPHA_BITS_BLEND)
+        ):
             tpk_conflicts.append(
                 {
                     "hash": f"0x{texture_hash:08x}",

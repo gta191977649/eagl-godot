@@ -74,3 +74,54 @@ def progress_byte_chunks(
             yield chunk
             bar.update(len(chunk))
             report_progress(desc, bar.n, total, None)
+
+
+@contextmanager
+def cli_progress_context(enabled: bool = True):
+    """Render report_progress() updates as tqdm bars for terminal runs.
+
+    The GUI installs its own callback; without this the CLI silently drops
+    every progress report, so long exports look like they have hung.
+    """
+    if not enabled:
+        yield
+        return
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        yield
+        return
+
+    state: dict[str, Any] = {"bar": None, "stage": None}
+
+    def close() -> None:
+        if state["bar"] is not None:
+            state["bar"].close()
+        state["bar"] = None
+        state["stage"] = None
+
+    def callback(stage: str, current: int, total: int | None, item: Any | None) -> None:
+        if stage != state["stage"]:
+            close()
+            state["stage"] = stage
+            state["bar"] = tqdm(total=total, desc=stage, unit="item", disable=None)
+        bar = state["bar"]
+        if bar is None:
+            return
+        if total is not None and bar.total != total:
+            bar.total = total
+        # Stages report an absolute position; tqdm counts increments. A stage
+        # that restarts its counter would otherwise stall the bar forever, so
+        # rewind instead of clamping the difference to zero.
+        if current < bar.n:
+            bar.reset(total=bar.total)
+        bar.update(current - bar.n)
+        if item is not None:
+            label = getattr(item, "name", None) or str(item)
+            bar.set_postfix_str(label[:40], refresh=False)
+
+    try:
+        with progress_context(callback):
+            yield
+    finally:
+        close()
