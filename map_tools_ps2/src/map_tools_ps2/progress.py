@@ -80,10 +80,15 @@ def progress_byte_chunks(
 def cli_progress_context(enabled: bool = True):
     """Render report_progress() updates as tqdm bars for terminal runs.
 
-    The GUI installs its own callback; without this the CLI silently drops
-    every progress report, so long exports look like they have hung.
+    Without this the CLI silently drops every progress report, so long exports
+    look like they have hung.
+
+    An embedder that already installed a callback keeps it: the GUI calls the
+    CLI entry point directly with its output redirected, so taking the callback
+    over would freeze its progress bar and draw tqdm's escape codes into its
+    log pane instead.
     """
-    if not enabled:
+    if not enabled or _callback.get() is not None:
         yield
         return
     try:

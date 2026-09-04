@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import threading
 import time
 import tkinter as tk
@@ -23,6 +24,9 @@ from .race_catalog import FAMILIES, TRACK_IDS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+_BATCH_MODES = ("All Tracks (standalone MTA)", "All Family Packs")
 
 
 TRACK_GROUPS = (
@@ -110,7 +114,13 @@ class ExportGui:
         self.lod_min_triangles = tk.StringVar(value="300")
         self.lod_repeated_triangles = tk.StringVar(value="600")
         self.lod_repeated_count = tk.StringVar(value="32")
+        self.batch_mode = tk.StringVar(value="All Tracks (standalone MTA)")
+        self.batch_existing = tk.StringVar(value="Skip")
         self.status = tk.StringVar(value="Ready")
+        # Set while a batch runs so per-track progress still shows how far the
+        # whole run has got.
+        self._batch_prefix = ""
+        self._batch_cancel = threading.Event()
 
         self._load_settings()
         self._build_ui()
@@ -162,6 +172,7 @@ class ExportGui:
             (self.global_output_dir, "global_output_dir"),
             (self.sound_output_dir, "sound_output_dir"),
             (self.sound_workers, "sound_workers"),
+            (self.batch_mode, "batch_mode"), (self.batch_existing, "batch_existing"),
         ):
             if key in data:
                 variable.set(str(data[key]))
@@ -188,6 +199,7 @@ class ExportGui:
             "global_dir": self.global_dir.get(), "global_output_dir": self.global_output_dir.get(),
             "sound_dir": self.sound_dir.get(), "sound_output_dir": self.sound_output_dir.get(),
             "sound_workers": self.sound_workers.get(),
+            "batch_mode": self.batch_mode.get(), "batch_existing": self.batch_existing.get(),
         }
         try:
             self.settings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -223,6 +235,7 @@ class ExportGui:
         frontend = ttk.Frame(notebook, padding=12)
         global_textures = ttk.Frame(notebook, padding=12)
         sound = ttk.Frame(notebook, padding=12)
+        batch = ttk.Frame(notebook, padding=12)
         notebook.add(basic, text="Export Options")
         notebook.add(lod, text="LOD Options")
         notebook.add(skybox, text="Skybox Export")
@@ -230,7 +243,8 @@ class ExportGui:
         notebook.add(frontend, text="Frontend Texture Export")
         notebook.add(global_textures, text="GLOBAL Texture Export")
         notebook.add(sound, text="SOUND Export")
-        for frame in (basic, lod, skybox, route, frontend, global_textures, sound):
+        notebook.add(batch, text="Batch Track Export")
+        for frame in (basic, lod, skybox, route, frontend, global_textures, sound, batch):
             frame.columnconfigure(1, weight=1)
 
         self._combo(basic, 0, "Export Type", self.export_type, ("MTA Resource", "GLB Only", "GLB + Debug", "Godot Package"))
@@ -323,6 +337,25 @@ class ExportGui:
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 14))
         self.sound_button = ttk.Button(sound, text="Export All SOUND to MP3", command=self._start_sound_export)
         self.sound_button.grid(row=4, column=0, sticky="w")
+
+        self._combo(batch, 0, "Batch Mode", self.batch_mode, _BATCH_MODES)
+        self._combo(batch, 1, "If Output Exists", self.batch_existing, ("Skip", "Overwrite"))
+        ttk.Label(
+            batch,
+            text="Exports every track found in the game directory, one after another, into the "
+                 "Output Root above. Tracks use the Export Options and LOD Options tabs; family "
+                 "packs use the fixed family settings and ignore them. A track that fails is "
+                 "logged and the run continues, with a summary at the end.\n"
+                 "Skip: leave a non-empty output folder alone, so an interrupted run can resume. "
+                 "Overwrite: delete that folder first (asks once before starting).",
+            foreground="#666", wraplength=700, justify="left",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 14))
+        self.batch_button = ttk.Button(batch, text="Start Batch Export", command=self._start_batch_export)
+        self.batch_button.grid(row=3, column=0, sticky="w")
+        self.batch_cancel_button = ttk.Button(
+            batch, text="Stop After Current", command=self._cancel_batch, state="disabled"
+        )
+        self.batch_cancel_button.grid(row=3, column=1, sticky="w", padx=(8, 0))
 
         bottom = ttk.Frame(self.root, padding=12)
         bottom.grid(row=2, column=0, sticky="ew")
@@ -591,8 +624,147 @@ class ExportGui:
         self.worker = threading.Thread(target=self._run_export, args=(args,), daemon=True)
         self.worker.start()
 
+    def _cancel_batch(self) -> None:
+        self._batch_cancel.set()
+        self.batch_cancel_button.configure(state="disabled")
+        self._append_log("Stop requested; finishing the current track first.\n")
+
+    def _batch_jobs(self) -> list[tuple[str, Path, list[str]]]:
+        """Build the (label, output, CLI args) list for the selected batch mode."""
+        game_dir = self.game_dir.get().strip()
+        root = Path(self.output_dir.get().strip())
+        author = self.author.get().strip() or "map_tools_ps2"
+        if self.batch_mode.get() == _BATCH_MODES[1]:
+            return [
+                (f"{family} pack", root / f"hp2_{family}_pack",
+                 ["export-mta-families", "--game-dir", game_dir, "--output", str(root),
+                  "--family", family, "--author", author])
+                for family in FAMILIES.values()
+            ]
+        tracks = Path(game_dir) / "ZZDATA" / "TRACKS"
+        numbers = sorted(
+            {path.stem.replace("TRACKB", "") for path in tracks.glob("TRACKB*.LZC")}
+            | {path.stem.replace("TRACKB", "") for path in tracks.glob("TRACKB*.BUN")},
+            key=lambda value: int(value) if value.isdigit() else 0,
+        )
+        texture_dir = str(tracks)
+        jobs: list[tuple[str, Path, list[str]]] = []
+        for number in numbers:
+            if not number.isdigit():
+                continue
+            resource_name = f"HP2_TRACK{int(number):02d}"
+            target = root / resource_name
+            args = ["export-mta", "--game-dir", game_dir, "--track", number,
+                    "--output", str(target), "--texture-dir", texture_dir,
+                    "--resource-name", resource_name, "--author", author]
+            # Batch runs reuse the Export/LOD tabs, minus the per-track fields.
+            for option, value in (("--collision", self.collision.get()),
+                                  ("--native-collision", self.native_collision.get()),
+                                  ("--vertex-colors", self.vertex_colors.get()),
+                                  ("--chunk-size", self.chunk_size.get()),
+                                  ("--lod-mode", self.lod_mode.get()),
+                                  ("--lod-min-size", self.lod_min_size.get()),
+                                  ("--lod-target-ratio", self.lod_target_ratio.get()),
+                                  ("--lod-small-size", self.lod_small_size.get()),
+                                  ("--lod-small-diagonal", self.lod_small_diagonal.get()),
+                                  ("--lod-min-triangles", self.lod_min_triangles.get()),
+                                  ("--lod-repeated-triangles", self.lod_repeated_triangles.get()),
+                                  ("--lod-repeated-count", self.lod_repeated_count.get())):
+                if value.strip():
+                    args.extend((option, value.strip()))
+            jobs.append((_track_display_name(number), target, args))
+        return jobs
+
+    def _start_batch_export(self) -> None:
+        if self.worker and self.worker.is_alive():
+            return
+        if not Path(self.game_dir.get().strip()).is_dir():
+            messagebox.showerror("Batch Export Error", "The PS2 game directory does not exist.")
+            return
+        if not self.output_dir.get().strip():
+            messagebox.showerror("Batch Export Error", "Please select an output directory.")
+            return
+        jobs = self._batch_jobs()
+        if not jobs:
+            messagebox.showerror("Batch Export Error", "No TRACKB## files were found to export.")
+            return
+        overwrite = self.batch_existing.get() == "Overwrite"
+        occupied = [target for _label, target, _args in jobs if target.is_dir() and any(target.iterdir())]
+        if overwrite and occupied:
+            # Deleting a whole export tree is not recoverable, so name what goes.
+            listed = "\n".join(str(path) for path in occupied[:8])
+            more = f"\n… and {len(occupied) - 8} more" if len(occupied) > 8 else ""
+            if not messagebox.askyesno(
+                "Delete existing exports?",
+                f"Overwrite will permanently delete {len(occupied)} existing output "
+                f"folder(s) before exporting:\n\n{listed}{more}\n\nContinue?",
+                icon="warning", default="no",
+            ):
+                return
+        self._save_settings()
+        self._batch_cancel.clear()
+        self._append_log(f"\n=== Batch Export Started ({len(jobs)} jobs) ===\n")
+        self.status.set("Starting batch export…")
+        self._set_export_buttons("disabled")
+        self.batch_cancel_button.configure(state="normal")
+        self.progress.configure(mode="determinate", maximum=100, value=0)
+        self.worker = threading.Thread(target=self._run_batch, args=(jobs, overwrite), daemon=True)
+        self.worker.start()
+
+    def _run_batch(self, jobs: list[tuple[str, Path, list[str]]], overwrite: bool) -> None:
+        stream = _QueueStream(self.events)
+        done = skipped = 0
+        failures: list[str] = []
+        try:
+            with progress_context(self._on_progress):
+                for index, (label, target, args) in enumerate(jobs, 1):
+                    if self._batch_cancel.is_set():
+                        self.events.put(("log", f"Stopped before {label}.\n"))
+                        break
+                    self._batch_prefix = f"[{index}/{len(jobs)}] {label} — "
+                    self.events.put(("log", f"\n--- [{index}/{len(jobs)}] {label} -> {target} ---\n"))
+                    if target.is_dir() and any(target.iterdir()):
+                        if not overwrite:
+                            skipped += 1
+                            self.events.put(("log", "Output already exists; skipped.\n"))
+                            continue
+                        try:
+                            shutil.rmtree(target)
+                        except OSError as exc:
+                            failures.append(f"{label}: could not remove {target}: {exc}")
+                            self.events.put(("log", f"FAILED to remove {target}: {exc}\n"))
+                            continue
+                    try:
+                        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+                            code = cli_main(args)
+                    except SystemExit as exc:
+                        # argparse and the CLI report user errors by raising
+                        # SystemExit, which is a BaseException and would
+                        # otherwise kill the worker and the rest of the batch.
+                        detail = exc.code if isinstance(exc.code, str) else f"exit code {exc.code}"
+                        failures.append(f"{label}: {detail}")
+                        self.events.put(("log", f"FAILED: {detail}\n"))
+                        continue
+                    except Exception as exc:  # one bad track must not end the run
+                        failures.append(f"{label}: {exc}")
+                        self.events.put(("log", f"FAILED: {exc}\n"))
+                        continue
+                    if code:
+                        failures.append(f"{label}: exit code {code}")
+                        self.events.put(("log", f"FAILED with exit code {code}\n"))
+                    else:
+                        done += 1
+            summary = f"Batch finished: {done} exported, {skipped} skipped, {len(failures)} failed"
+            if failures:
+                summary += "\n  " + "\n  ".join(failures)
+            self.events.put(("done" if not failures else "error", summary + "\n"))
+        except (Exception, SystemExit) as exc:
+            self.events.put(("error", f"Batch export failed: {exc}\n"))
+        finally:
+            self._batch_prefix = ""
+
     def _set_export_buttons(self, state: str) -> None:
-        for button in (self.start_button, self.skybox_button, self.route_button, self.frontend_button, self.global_button, self.sound_button):
+        for button in (self.start_button, self.skybox_button, self.route_button, self.frontend_button, self.global_button, self.sound_button, self.batch_button):
             button.configure(state=state)
 
     def _prepare_output(self, track_number: str) -> tuple[Path, str]:
@@ -721,7 +893,7 @@ class ExportGui:
             if total and total > 0:
                 self.progress.configure(maximum=total, value=min(current, total))
                 suffix = f" — {item_name}" if item_name else ""
-                self.status.set(f"{stage}: {current}/{total}{suffix}")
+                self.status.set(f"{self._batch_prefix}{stage}: {current}/{total}{suffix}")
 
         log_parts: list[str] = []
         terminal: tuple[str, str] | None = None
@@ -752,6 +924,7 @@ class ExportGui:
             self.worker = None
             self.progress.stop()
             self._set_export_buttons("normal")
+            self.batch_cancel_button.configure(state="disabled")
             self._append_log(text)
             if kind == "done":
                 self.progress.configure(value=self.progress["maximum"])
