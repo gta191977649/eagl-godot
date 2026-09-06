@@ -35,6 +35,9 @@ class Texture:
     clut_pixel_storage_mode: int | None = None
     is_swizzled: bool | None = None
     texture_fx: int | None = None
+    uv_animation_flags: int | None = None
+    uv_scroll_u: float | None = None
+    uv_scroll_v: float | None = None
     alpha_bits: int | None = None
     alpha_fix: int | None = None
     is_any_semitransparency: int | None = None
@@ -43,6 +46,9 @@ class Texture:
     alpha_zero_count: int | None = None
     alpha_opaque_count: int | None = None
     alpha_intermediate_count: int | None = None
+    luminance_max: float | None = None
+    grayscale_fraction: float | None = None
+    alpha_luminance_correlation: float | None = None
 
 
 @dataclass
@@ -183,6 +189,11 @@ def read_ps2_tpk_bytes(data: bytes, source_path: Path, *, flip_vertical: bool = 
         pixel_storage_mode = entry[0x4A]
         clut_pixel_storage_mode = entry[0x4B]
         texture_fx = entry[0x4E]
+        # HP2's renderer consumes this tail as the material UV animation
+        # descriptor. 0x100 enables scrolling; the following floats are the
+        # authored U/V rates. These are source fields, not name heuristics.
+        uv_animation_flags = struct.unpack_from("<I", entry, 0x78)[0]
+        uv_scroll_u, uv_scroll_v = struct.unpack_from("<ff", entry, 0x7C)
         is_any_semitransparency = entry[0x4F]
         is_swizzled = entry[0x55] != 0
         alpha_bits = entry[0x76]
@@ -211,6 +222,7 @@ def read_ps2_tpk_bytes(data: bytes, source_path: Path, *, flip_vertical: bool = 
             rgba = _flip_rgba_vertical(rgba, width, height)
         alpha_mode, alpha_cutoff = _material_alpha_properties_for_rgba(rgba, is_any_semitransparency)
         alpha_stats = _alpha_channel_stats(rgba[3::4])
+        color_stats = _reflection_channel_stats(rgba)
         textures.append(
             Texture(
                 name=name,
@@ -233,6 +245,9 @@ def read_ps2_tpk_bytes(data: bytes, source_path: Path, *, flip_vertical: bool = 
                 clut_pixel_storage_mode=clut_pixel_storage_mode,
                 is_swizzled=is_swizzled,
                 texture_fx=texture_fx,
+                uv_animation_flags=uv_animation_flags,
+                uv_scroll_u=uv_scroll_u,
+                uv_scroll_v=uv_scroll_v,
                 alpha_bits=alpha_bits,
                 alpha_fix=alpha_fix,
                 is_any_semitransparency=is_any_semitransparency,
@@ -241,9 +256,39 @@ def read_ps2_tpk_bytes(data: bytes, source_path: Path, *, flip_vertical: bool = 
                 alpha_zero_count=alpha_stats[2],
                 alpha_opaque_count=alpha_stats[3],
                 alpha_intermediate_count=alpha_stats[4],
+                luminance_max=color_stats[0],
+                grayscale_fraction=color_stats[1],
+                alpha_luminance_correlation=color_stats[2],
             )
         )
     return tuple(textures)
+
+
+def _reflection_channel_stats(rgba: bytes) -> tuple[float, float, float]:
+    """Return name-independent signals used to distinguish control masks."""
+    count = len(rgba) // 4
+    if not count:
+        return 0.0, 1.0, 0.0
+    luminance: list[float] = []
+    alpha: list[float] = []
+    grayscale = 0
+    for offset in range(0, len(rgba), 4):
+        red, green, blue, value_alpha = rgba[offset : offset + 4]
+        luminance.append((77 * red + 150 * green + 29 * blue) / 256.0)
+        alpha.append(float(value_alpha))
+        if max(red, green, blue) - min(red, green, blue) <= 2:
+            grayscale += 1
+    mean_luminance = sum(luminance) / count
+    mean_alpha = sum(alpha) / count
+    covariance = sum(
+        (value_luminance - mean_luminance) * (value_alpha - mean_alpha)
+        for value_luminance, value_alpha in zip(luminance, alpha)
+    )
+    luminance_variance = sum((value - mean_luminance) ** 2 for value in luminance)
+    alpha_variance = sum((value - mean_alpha) ** 2 for value in alpha)
+    denominator = (luminance_variance * alpha_variance) ** 0.5
+    correlation = covariance / denominator if denominator else 0.0
+    return max(luminance), grayscale / count, correlation
 
 
 def _flip_rgba_vertical(rgba: bytes, width: int, height: int) -> bytes:

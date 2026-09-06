@@ -15,6 +15,7 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Mu
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
+from . import dynamic_physics
 from .binary import Matrix4, Vec3, transform_point
 from .glb_writer import _decode_vif_color_5551, _indices_for_block
 from .material_alpha import (
@@ -26,6 +27,7 @@ from .material_alpha import (
 )
 from .model import MeshObject, Scene, SceneryInstance, TrackCollisionPolygon, transformed_block_vertices
 from .progress import report_progress
+from .special_textures import SPECIAL_TEXTURE_PREFIXES, SURFACE_TEXTURE_PREFIXES
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,11 @@ class MtaMaterial:
     render_flag: int | None = None
     hp2_material_id: int | None = None
     surface_category: str | None = None
+    special_role: str | None = None
+    source_alpha_mode: str | None = None
+    source_alpha_cutoff: float | None = None
+    source_submeshes: tuple[int, ...] = ()
+    source_texture_slots: tuple[int, ...] = ()
 
 
 @dataclass
@@ -70,6 +77,7 @@ class MtaModel:
     # not unique in HP2, so this is the only stable way to account for a source
     # object's triangles across the split/clip pipeline.
     source_offset: int | None = None
+    physics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -115,7 +123,7 @@ class MtaScene:
     warnings: list[str]
     report: dict[str, Any]
     water_quads: list[MtaWaterQuad] = field(default_factory=list)
-    texture_variants: dict[tuple[int, str, str | None], str] = field(default_factory=dict)
+    texture_variants: dict[tuple[int, str, str | None, str | None], str] = field(default_factory=dict)
     texture_animations: list[MtaTextureAnimationBinding] = field(default_factory=list)
 
 
@@ -133,25 +141,14 @@ class _Triangle:
     render_flag: int | None = None
     hp2_material_id: int | None = None
     surface_category: str | None = None
+    special_role: str | None = None
+    source_submesh: int | None = None
+    source_texture_slot: int | None = None
 
 
 _VEGETATION_RE = re.compile(r"BUSH|TREE|CONIFER|VINE|GRASS|LEAF|FOLIAGE", re.IGNORECASE)
 _SMALL_VEGETATION_RE = re.compile(r"^(?:XT_).*(?:GRASS|BUSH|FERN|FLOWER|LEAF|WEED)", re.IGNORECASE)
 _SKY_RE = re.compile(r"SKYDOME", re.IGNORECASE)
-# Wet-road surfaces. HP2 draws these as a source-alpha base pass plus an
-# additive mask, but the masks carry their shape in alpha and no colour at all
-# (RD_PUDDLE_MASK's whole palette is black; RD_PUDDLE2_MASK's white entries are
-# alpha 0), so no GTA blend mode can reproduce the reflection. Marking the names
-# gives an MTA shader a stable glob to bind to. The marker follows the surface
-# category, so an existing "road_*" shader keeps matching.
-_REFLECTIVE_TEXTURE_RE = re.compile(r"PUDDLE", re.IGNORECASE)
-# The base pass and its mask are not interchangeable: the base carries the
-# visible wet colour, the mask carries only a shape in its alpha channel and is
-# pure black in RGB. A shader that samples them the same way paints dead colour,
-# so they get separate namespaces.
-_REFLECTIVE_MASK_RE = re.compile(r"_MASK$", re.IGNORECASE)
-_REFLECTIVE_TEXTURE_MARKER = "refl_"
-_REFLECTIVE_MASK_MARKER = "reflmask_"
 # A model id becomes "<id>.dff" / "<id>.col" in the IMG directory, whose name
 # field is 24 bytes read as a C string -- 23 usable characters, so the id has
 # 19. Texture names inside the TXD are a separate, larger budget (31).
@@ -207,13 +204,71 @@ _SURFACE_PREFIX_CATEGORY = {
 }
 
 
-def _reflective_marker(name: str) -> str | None:
-    """Shader namespace for a wet-road texture, or None when it is not one."""
-    if not _REFLECTIVE_TEXTURE_RE.search(name):
-        return None
-    if _REFLECTIVE_MASK_RE.search(name):
-        return _REFLECTIVE_MASK_MARKER
-    return _REFLECTIVE_TEXTURE_MARKER
+def _triangle_special_role(triangle: _Triangle) -> str | None:
+    return triangle.special_role
+
+
+def _source_special_roles(
+    scene: Scene,
+    textures: Any,
+    texture_animations: Iterable[Any],
+) -> tuple[dict[tuple[int | None, int], str], dict[int, dict[str, Any]]]:
+    """Resolve special roles exclusively from authored binary fields."""
+    roles: dict[tuple[int | None, int], str] = {}
+    evidence: dict[int, dict[str, Any]] = {}
+
+    for texture_hash, texture in textures.textures.items():
+        flags = int(getattr(texture, "uv_animation_flags", 0) or 0)
+        u = float(getattr(texture, "uv_scroll_u", 0.0) or 0.0)
+        v = float(getattr(texture, "uv_scroll_v", 0.0) or 0.0)
+        if flags & 0x100 and (u != 0.0 or v != 0.0):
+            roles[(None, texture_hash)] = "uv_scroll"
+            evidence[texture_hash] = {
+                "kind": "uv_scroll", "source": "tpk_entry",
+                "flagsOffset": "0x78", "flags": f"0x{flags:08x}",
+                "uOffset": "0x7c", "vOffset": "0x80", "u": u, "v": v,
+            }
+
+    for animation in texture_animations:
+        for phase, texture_hash in enumerate(animation.frame_hashes):
+            roles[(None, texture_hash)] = "texture_animation"
+            evidence[texture_hash] = {
+                "kind": "texture_animation", "source": "TextureAnimPack",
+                "metadataChunk": "0x30300102", "framesChunk": "0x30300103",
+                "animation": animation.name, "phase": phase,
+                "fps": animation.frames_per_second,
+            }
+
+    for obj in scene.objects:
+        if not (obj.source_flags & 0x10):
+            continue
+        area_by_texture: dict[int, float] = defaultdict(float)
+        slot_by_texture: dict[int, int] = {}
+        for block_index, block in enumerate(obj.blocks):
+            texture_hash = _texture_hash(obj, block_index)
+            if texture_hash is None:
+                continue
+            slot = block.texture_index if block.texture_index is not None else block_index
+            slot_by_texture.setdefault(texture_hash, slot)
+            positions = transformed_block_vertices(obj, block)
+            indices = _indices_for_block(positions, obj.name, block)
+            for offset in range(0, len(indices), 3):
+                face = indices[offset : offset + 3]
+                if len(face) != 3:
+                    continue
+                tri = _Triangle(tuple(_Vertex((positions[i].x, positions[i].y, positions[i].z), (0, 0), (255, 255, 255, 255)) for i in face), texture_hash)
+                area_by_texture[texture_hash] += math.sqrt(_triangle_area_squared(tri)) * 0.5
+        if not area_by_texture:
+            continue
+        dominant = min(area_by_texture, key=lambda h: (-area_by_texture[h], slot_by_texture[h]))
+        roles[(obj.chunk_offset, dominant)] = "model_animation"
+        evidence[dominant] = {
+            "kind": "model_animation", "source": "solid_model_header",
+            "objectOffset": f"0x{obj.chunk_offset:08x}", "modelFlagsOffset": "0x30",
+            "modelFlags": f"0x{obj.source_flags:04x}", "textureSlot": slot_by_texture[dominant],
+            "dominantTriangleArea": area_by_texture[dominant],
+        }
+    return roles, evidence
 
 
 def _is_water_model(name: str) -> bool:
@@ -319,6 +374,7 @@ def _is_road_name(name: str) -> bool:
 
 def _deduplicate_scenery_instances(
     instances: Iterable[SceneryInstance],
+    physics_states: dict | None = None,
 ) -> tuple[list[SceneryInstance], dict[str, Any]]:
     """Remove exact HP2 streaming-section overlaps for the flattened MTA scene.
 
@@ -328,16 +384,18 @@ def _deduplicate_scenery_instances(
 
     Keep this deliberately exact: two records are duplicates only when they
     reference the same source object and their complete source transforms are
-    identical. The original Scene and its section metadata are never modified.
+    identical, including the physics binding state. The original Scene and its
+    section metadata are never modified.
     """
     unique: list[SceneryInstance] = []
-    occurrences: Counter[tuple[int, Matrix4]] = Counter()
+    occurrences: Counter[tuple] = Counter()
     for instance in instances:
         # Key on object_index, not object_name. HP2 truncates object names to
         # the 23 characters its name field holds, so distinct meshes collide on
         # a shared display name; object_index is resolved from the unique
         # per-object name_hash when the section records are parsed.
-        key = (instance.object_index, instance.transform)
+        physical_state = (physics_states or {}).get((instance.source_chunk_offset, instance.record_index), ())
+        key = (instance.object_index, instance.transform, physical_state)
         occurrences[key] += 1
         if occurrences[key] == 1:
             unique.append(instance)
@@ -363,7 +421,9 @@ def _mesh_visual_fingerprint(obj: MeshObject) -> str:
 def _resolve_mta_scenery_instances(
     scene: Scene,
 ) -> tuple[list[SceneryInstance], dict[str, Any], list[str]]:
-    source_instances, base_report = _deduplicate_scenery_instances(scene.scenery_instances)
+    physics_states = scene.source_physics.instance_states()
+    source_instances, base_report = _deduplicate_scenery_instances(
+        scene.scenery_instances, physics_states)
     # Only the barrier upgrade targets are looked up by name. HP2 names are
     # truncated to 23 characters and collide, so an ambiguous target would
     # silently resolve to whichever object happened to be parsed last.
@@ -388,7 +448,10 @@ def _resolve_mta_scenery_instances(
     barrier_duplicates_removed = 0
 
     for instance in source_instances:
-        upgrade_name = _TRACK_BARRIER_TEMPLATE_UPGRADES.get(instance.object_name)
+        physical_state = physics_states.get((instance.source_chunk_offset, instance.record_index), ())
+        # A visual-only barrier substitution cannot rewrite a source rigid
+        # body's model identity while retaining its original collision binding.
+        upgrade_name = None if physical_state else _TRACK_BARRIER_TEMPLATE_UPGRADES.get(instance.object_name)
         target_name = upgrade_name if upgrade_name is not None else instance.object_name
         is_track_barrier = (
             instance.object_name in _TRACK_BARRIER_TEMPLATE_UPGRADES
@@ -420,7 +483,8 @@ def _resolve_mta_scenery_instances(
 
         if target_obj is not None and target_name in upgrade_targets:
             transform_key = tuple(tuple(round(value, 5) for value in row) for row in instance.transform)
-            key = (_mesh_visual_fingerprint(target_obj), transform_key)
+            key = ((instance.object_index, instance.transform, physical_state) if physical_state
+                   else (_mesh_visual_fingerprint(target_obj), transform_key))
             barrier_occurrences[key] += 1
             if barrier_occurrences[key] > 1:
                 barrier_duplicates_removed += 1
@@ -502,7 +566,12 @@ def _texture_hash(obj: MeshObject, block_index: int) -> int | None:
     return None
 
 
-def _triangles_for_object(obj: MeshObject, *, bake_transform: bool) -> Iterable[_Triangle]:
+def _triangles_for_object(
+    obj: MeshObject,
+    *,
+    bake_transform: bool,
+    special_roles: dict[tuple[int | None, int], str] | None = None,
+) -> Iterable[_Triangle]:
     for block_index, block in enumerate(obj.blocks):
         positions = transformed_block_vertices(obj, block) if bake_transform else block.run.vertices
         indices = _indices_for_block(positions, obj.name, block)
@@ -519,7 +588,14 @@ def _triangles_for_object(obj: MeshObject, *, bake_transform: bool) -> Iterable[
                 uv = uvs[index] if index < len(uvs) else (0.0, 0.0)
                 color = _rgba(colors[index] if index < len(colors) else None)
                 values.append(_Vertex((p.x, p.y, p.z), uv, color))
-            yield _Triangle(tuple(values), tex_hash, block.render_flag)  # type: ignore[arg-type]
+            role = None
+            if tex_hash is not None and special_roles:
+                role = special_roles.get((obj.chunk_offset, tex_hash), special_roles.get((None, tex_hash)))
+            yield _Triangle(
+                tuple(values), tex_hash, block.render_flag, special_role=role,
+                source_submesh=block_index,
+                source_texture_slot=block.texture_index if block.texture_index is not None else block_index,
+            )  # type: ignore[arg-type]
 
 
 def _triangle_cell(triangle: _Triangle, chunk_size: float) -> tuple[int, int]:
@@ -607,6 +683,9 @@ def _spatial_clip_triangles(triangles: list[_Triangle], chunk_size: float) -> di
                         triangle.render_flag,
                         triangle.hp2_material_id,
                         triangle.surface_category,
+                        triangle.special_role,
+                        triangle.source_submesh,
+                        triangle.source_texture_slot,
                     )
                     if _triangle_area_squared(clipped) > 1e-12:
                         chunks[(cell_x, cell_y)].append(clipped)
@@ -629,6 +708,8 @@ def _transform_triangles(
         result.append(_Triangle(
             tuple(vertices), triangle.texture_hash, triangle.render_flag,
             triangle.hp2_material_id, triangle.surface_category,
+            triangle.special_role,
+            triangle.source_submesh, triangle.source_texture_slot,
         ))  # type: ignore[arg-type]
     return result
 
@@ -682,24 +763,30 @@ def _fill_model(
     model: MtaModel,
     triangles: list[_Triangle],
     texture_names: dict[int, str],
-    texture_variants: dict[tuple[int, str, str | None], str],
+    texture_variants: dict[tuple[int, str, str | None, str | None], str],
     alpha_decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
     alpha_usage: dict[int, frozenset[int | None]],
     textures: Any,
 ) -> None:
-    material_index: dict[tuple[int | None, str, int | None, str | None], int] = {}
+    material_index: dict[tuple[int | None, str, int | None, str | None, str | None], int] = {}
     for triangle in triangles:
-        decision = MaterialAlphaDecision("OPAQUE", None, "missing_texture", triangle.render_flag, None, None, None, None)
+        source_decision = MaterialAlphaDecision("OPAQUE", None, "missing_texture", triangle.render_flag, None, None, None, None)
         if triangle.texture_hash is not None:
-            decision = alpha_decisions.get((triangle.texture_hash, triangle.render_flag)) or decide_material_alpha(
+            source_decision = alpha_decisions.get((triangle.texture_hash, triangle.render_flag)) or decide_material_alpha(
                 textures.get(triangle.texture_hash), triangle.render_flag, alpha_usage.get(triangle.texture_hash, ())
             )
-        key = (triangle.texture_hash, decision.mode, triangle.hp2_material_id, triangle.surface_category)
+        role = _triangle_special_role(triangle)
+        decision = (
+            MaterialAlphaDecision("OPAQUE", None, "shader_managed_reflection", triangle.render_flag, None, None, None, None)
+            if role == "reflection" else source_decision
+        )
+        surface_category = triangle.surface_category
+        key = (triangle.texture_hash, decision.mode, triangle.hp2_material_id, surface_category, role)
         if key not in material_index:
             texture_name = None
             if triangle.texture_hash is not None and textures.get(triangle.texture_hash) is not None:
                 texture_name = texture_variants.get(
-                    (triangle.texture_hash, decision.mode, triangle.surface_category),
+                    (triangle.texture_hash, decision.mode, surface_category, role),
                     texture_names.get(triangle.texture_hash),
                 )
             material_index[key] = len(model.materials)
@@ -713,9 +800,27 @@ def _fill_model(
                     decision.reason,
                     triangle.render_flag,
                     triangle.hp2_material_id,
-                    triangle.surface_category,
+                    surface_category,
+                    role,
+                    source_decision.mode,
+                    source_decision.cutoff,
+                    (triangle.source_submesh,) if triangle.source_submesh is not None else (),
+                    (triangle.source_texture_slot,) if triangle.source_texture_slot is not None else (),
                 )
             )
+        else:
+            index = material_index[key]
+            material = model.materials[index]
+            submeshes = tuple(sorted(set(material.source_submeshes) | (
+                {triangle.source_submesh} if triangle.source_submesh is not None else set()
+            )))
+            slots = tuple(sorted(set(material.source_texture_slots) | (
+                {triangle.source_texture_slot} if triangle.source_texture_slot is not None else set()
+            )))
+            if submeshes != material.source_submeshes or slots != material.source_texture_slots:
+                model.materials[index] = replace(
+                    material, source_submeshes=submeshes, source_texture_slots=slots,
+                )
         base = len(model.vertices)
         for vertex in triangle.vertices:
             model.vertices.append(tuple(vertex.position[i] - model.origin[i] for i in range(3)))
@@ -731,6 +836,11 @@ def _triangle_alpha_decision(
     alpha_usage: dict[int, frozenset[int | None]],
     textures: Any,
 ) -> MaterialAlphaDecision:
+    if _triangle_special_role(triangle) == "reflection":
+        return MaterialAlphaDecision(
+            "OPAQUE", None, "shader_managed_reflection", triangle.render_flag,
+            None, None, None, None,
+        )
     if triangle.texture_hash is None:
         return MaterialAlphaDecision("OPAQUE", None, "missing_texture", triangle.render_flag, None, None, None, None)
     return alpha_decisions.get((triangle.texture_hash, triangle.render_flag)) or decide_material_alpha(
@@ -891,9 +1001,13 @@ def _scale_signature(scale: tuple[float, float, float]) -> tuple[float, float, f
     return tuple(round(value, 4) for value in scale)  # type: ignore[return-value]
 
 
-def _scaled_triangles(obj: MeshObject, scale: tuple[float, float, float]) -> list[_Triangle]:
+def _scaled_triangles(
+    obj: MeshObject,
+    scale: tuple[float, float, float],
+    special_roles: dict[tuple[int | None, int], str] | None = None,
+) -> list[_Triangle]:
     result = []
-    for triangle in _triangles_for_object(obj, bake_transform=False):
+    for triangle in _triangles_for_object(obj, bake_transform=False, special_roles=special_roles):
         result.append(
             _Triangle(
                 tuple(
@@ -904,6 +1018,9 @@ def _scaled_triangles(obj: MeshObject, scale: tuple[float, float, float]) -> lis
                 triangle.render_flag,
                 triangle.hp2_material_id,
                 triangle.surface_category,
+                triangle.special_role,
+                triangle.source_submesh,
+                triangle.source_texture_slot,
             )
         )
     return result
@@ -1057,7 +1174,8 @@ def _classify_road_triangles(
                 category_counts[category] += 1
             classified.append(_Triangle(
                 triangle.vertices, triangle.texture_hash, triangle.render_flag,
-                material_id, category,
+                material_id, category, triangle.special_role,
+                triangle.source_submesh, triangle.source_texture_slot,
             ))
         triangles_by_offset[offset] = classified
 
@@ -1071,6 +1189,64 @@ def _classify_road_triangles(
         },
         "prefixed_triangles": dict(sorted(category_counts.items())),
     }
+
+
+def _classify_reflection_triangles(
+    triangles_by_offset: dict[int, list[_Triangle]],
+    polygons: Iterable[TrackCollisionPolygon],
+    alpha_decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
+    alpha_usage: dict[int, frozenset[int | None]],
+    textures: Any,
+) -> int:
+    """Apply reflection semantics from native puddle collision surfaces."""
+    source = [
+        polygon for polygon in polygons
+        if polygon.material_id in {4, 20} and _native_collision_role(polygon) == "primary_road"
+    ]
+    shapes = [Polygon([(point.x, point.y) for point in polygon.points_ps2]) for polygon in source]
+    valid = [(polygon, shape) for polygon, shape in zip(source, shapes) if shape.is_valid and shape.area > 1e-9]
+    if not valid:
+        return 0
+    source, shapes = map(list, zip(*valid))
+    tree = STRtree(shapes)
+    matched = 0
+    for object_offset, triangles in triangles_by_offset.items():
+        points = [Point(
+            sum(vertex.position[0] for vertex in triangle.vertices) / 3.0,
+            sum(vertex.position[1] for vertex in triangle.vertices) / 3.0,
+        ) for triangle in triangles]
+        candidates: dict[int, list[int]] = defaultdict(list)
+        if points:
+            query_indices, polygon_indices = tree.query(points, predicate="intersects")
+            for query_index, polygon_index in zip(query_indices, polygon_indices):
+                candidates[int(query_index)].append(int(polygon_index))
+        classified = []
+        for triangle_index, triangle in enumerate(triangles):
+            options = candidates.get(triangle_index, [])
+            if not options:
+                classified.append(triangle)
+                continue
+            x, y = points[triangle_index].x, points[triangle_index].y
+            z = sum(vertex.position[2] for vertex in triangle.vertices) / 3.0
+            selected = min(options, key=lambda index: abs(_polygon_height_at_xy(source[index], x, y) - z))
+            material_id = source[selected].material_id
+            decision = (
+                alpha_decisions.get((triangle.texture_hash, triangle.render_flag))
+                if triangle.texture_hash is not None else None
+            )
+            if decision is None and triangle.texture_hash is not None:
+                decision = decide_material_alpha(
+                    textures.get(triangle.texture_hash), triangle.render_flag,
+                    alpha_usage.get(triangle.texture_hash, ()),
+                )
+            classified.append(replace(
+                triangle, hp2_material_id=material_id,
+                surface_category=_SURFACE_PREFIX_CATEGORY.get(material_id, triangle.surface_category),
+                special_role="reflection" if decision is not None and decision.mode == "BLEND" else triangle.special_role,
+            ))
+            matched += int(decision is not None and decision.mode == "BLEND")
+        triangles_by_offset[object_offset] = classified
+    return matched
 
 
 def _hp2_surface_override(material_id: int, rules: dict[str, Any]) -> int | None:
@@ -1425,43 +1601,43 @@ def _texture_variant_names(
     texture_names: dict[int, str],
     decisions: dict[tuple[int, int | None], MaterialAlphaDecision],
     categories_by_hash: dict[int, set[str]],
-) -> dict[tuple[int, str, str | None], str]:
+    roles_by_hash: dict[int, set[str]],
+) -> dict[tuple[int, str, str | None, str | None], str]:
     modes_by_hash: dict[int, set[str]] = defaultdict(set)
     for (texture_hash, _render_flag), decision in decisions.items():
         modes_by_hash[texture_hash].add(decision.mode)
     used: set[str] = set()
-    result: dict[tuple[int, str, str | None], str] = {}
+    result: dict[tuple[int, str, str | None, str | None], str] = {}
     suffixes = {"OPAQUE": "_o", "MASK": "_m", "BLEND": "_b"}
+    shared_special_names: dict[tuple[int, str, str], str] = {}
     for texture_hash, modes in sorted(modes_by_hash.items()):
         base = texture_names.get(texture_hash, f"tex_{texture_hash:08x}")
         categories: list[str | None] = [None, *sorted(categories_by_hash.get(texture_hash, set()))]
-        # Wet-road surfaces take a reflection namespace INSTEAD of their surface
-        # category, so a roadshine shader bound to "road_*" cannot pick them up.
-        # One entry then serves every category: the category split exists only
-        # to give shaders separate names, which the marker already does.
-        marker = _reflective_marker(base)
-        reflective = marker is not None
-        reflective_names: dict[str, str] = {}
+        roles: list[str | None] = [None, *sorted(roles_by_hash.get(texture_hash, set()))]
         for category in categories:
-            prefix = marker if marker else (f"{category}_" if category else "")
-            for mode in sorted(modes):
-                shared = reflective_names.get(mode)
-                if shared is not None:
-                    result[(texture_hash, mode, category)] = shared
-                    continue
-                alpha_suffix = suffixes[mode] if len(modes) > 1 else ""
-                stem = prefix + base
-                candidate = stem[: 31 - len(alpha_suffix)] + alpha_suffix
-                if candidate.lower() in used:
-                    token = hashlib.blake2s(
-                        f"{texture_hash}:{category}:{mode}".encode("utf-8"), digest_size=4
-                    ).hexdigest()
-                    unique_suffix = f"_{token}{alpha_suffix}"
-                    candidate = stem[: 31 - len(unique_suffix)] + unique_suffix
-                used.add(candidate.lower())
-                result[(texture_hash, mode, category)] = candidate
-                if reflective:
-                    reflective_names[mode] = candidate
+            for role in roles:
+                prefix = SPECIAL_TEXTURE_PREFIXES[role] if role else (
+                    SURFACE_TEXTURE_PREFIXES[category] if category else ""
+                )
+                effective_modes = {"OPAQUE"} if role == "reflection" else modes
+                for mode in sorted(effective_modes):
+                    shared_key = (texture_hash, mode, role) if role else None
+                    if shared_key is not None and shared_key in shared_special_names:
+                        result[(texture_hash, mode, category, role)] = shared_special_names[shared_key]
+                        continue
+                    alpha_suffix = suffixes[mode] if len(effective_modes) > 1 else ""
+                    stem = prefix + base
+                    candidate = stem[: 31 - len(alpha_suffix)] + alpha_suffix
+                    if candidate.lower() in used:
+                        token = hashlib.blake2s(
+                            f"{texture_hash}:{category}:{mode}:{role}".encode("utf-8"), digest_size=4
+                        ).hexdigest()
+                        unique_suffix = f"_{token}{alpha_suffix}"
+                        candidate = stem[: 31 - len(unique_suffix)] + unique_suffix
+                    used.add(candidate.lower())
+                    result[(texture_hash, mode, category, role)] = candidate
+                    if shared_key is not None:
+                        shared_special_names[shared_key] = candidate
     return result
 
 
@@ -2044,6 +2220,7 @@ def build_mta_scene(
         for instance in scene.scenery_instances
     )
     texture_animations = tuple(getattr(textures, "animations", {}).values())
+    special_roles, special_evidence = _source_special_roles(scene, textures, texture_animations)
     barrier_animation = next(
         (animation for animation in texture_animations if animation.name.upper() == _TRACK_BARRIER_ANIMATION_NAME),
         None,
@@ -2106,15 +2283,17 @@ def build_mta_scene(
         for instance in scenery_instances
         if 0 <= instance.object_index < len(object_offsets)
     }
+    dynamic_templates = dynamic_physics.instance_templates(scene.source_physics)
+    dynamic_offsets = {object_offsets[i.object_index] for i in scenery_instances if (i.source_chunk_offset, i.record_index) in dynamic_templates}
     road_instances: dict[int, list[SceneryInstance]] = defaultdict(list)
     for instance in scenery_instances:
         if 0 <= instance.object_index < len(scene.objects):
             obj = scene.objects[instance.object_index]
-            if _is_road_name(obj.name):
+            if _is_road_name(obj.name) and obj.chunk_offset not in dynamic_offsets:
                 road_instances[obj.chunk_offset].append(instance)
     template_candidates = [
         obj for obj in scene.objects
-        if not _is_road_name(obj.name)
+        if (not _is_road_name(obj.name) or obj.chunk_offset in dynamic_offsets)
         and (obj.chunk_offset in placement_offsets or obj.chunk_offset in scene.scenery_template_offsets)
     ]
     templates = {obj.chunk_offset: obj for obj in template_candidates}
@@ -2132,7 +2311,8 @@ def build_mta_scene(
     ]
     static_objects = [
         obj for obj in scene.objects
-        if (obj.chunk_offset not in placement_offsets or _is_road_name(obj.name))
+        if obj.chunk_offset not in dynamic_offsets
+        and (obj.chunk_offset not in placement_offsets or _is_road_name(obj.name))
         and (obj.chunk_offset not in scene.scenery_template_offsets or obj.chunk_offset in road_instances)
         and not _is_mta_visual_excluded(obj.name)
     ]
@@ -2152,7 +2332,9 @@ def build_mta_scene(
                 [instance.transform for instance in road_instances[obj.chunk_offset]]
                 if obj.chunk_offset in road_instances else [obj.transform]
             )
-            for triangle in _triangles_for_object(replace(obj, transform=transform), bake_transform=True)
+            for triangle in _triangles_for_object(
+                replace(obj, transform=transform), bake_transform=True, special_roles=special_roles
+            )
         ]
         for obj in static_objects
     }
@@ -2162,12 +2344,25 @@ def build_mta_scene(
         {obj.chunk_offset for obj in road_source_objects},
         scene.track_collision_polygons,
     )
+    reflection_triangle_matches = _classify_reflection_triangles(
+        static_triangles, scene.track_collision_polygons, alpha_decisions, alpha_usage, textures
+    )
     categories_by_hash: dict[int, set[str]] = defaultdict(set)
-    for obj in road_source_objects:
-        for triangle in static_triangles.get(obj.chunk_offset, []):
+    roles_by_hash: dict[int, set[str]] = defaultdict(set)
+    for triangles in static_triangles.values():
+        for triangle in triangles:
             if triangle.texture_hash is not None and triangle.surface_category is not None:
                 categories_by_hash[triangle.texture_hash].add(triangle.surface_category)
-    texture_variants = _texture_variant_names(texture_names, alpha_decisions, categories_by_hash)
+    for triangles in static_triangles.values():
+        for triangle in triangles:
+            role = _triangle_special_role(triangle)
+            if triangle.texture_hash is not None and role is not None:
+                roles_by_hash[triangle.texture_hash].add(role)
+    for (object_offset, texture_hash), role in special_roles.items():
+        roles_by_hash[texture_hash].add(role)
+    texture_variants = _texture_variant_names(
+        texture_names, alpha_decisions, categories_by_hash, roles_by_hash
+    )
 
     models: list[MtaModel] = []
     placements: list[MtaPlacement] = []
@@ -2261,8 +2456,8 @@ def build_mta_scene(
             models.append(model)
             placements.append(MtaPlacement(
                 model_id, model.zone, "building", origin, (0.0, 0.0, 0.0), source_name,
-                lod_id if not is_companion else None,
-                unique_id if not is_companion else _unique_id(f"{unique_id}:{layer}"),
+                lod_id,
+                unique_id if lod_id is not None or not is_companion else _unique_id(f"{unique_id}:{layer}"),
             ))
         if lod_id is not None and base_layer is not None and base_model is not None:
             source_model = base_model
@@ -2376,8 +2571,9 @@ def build_mta_scene(
             (points[0], points[index], points[index + 1])
             for index in range(1, len(points) - 1)
         )
+    dynamic_variants = {}
     excluded_scenery_placements: Counter[str] = Counter()
-    variant_placements: dict[tuple[int, tuple[float, float, float]], list[tuple[Any, tuple[float, float, float], tuple[float, float, float]]]] = defaultdict(list)
+    variant_placements: dict[tuple[int, tuple[float, float, float], str], list[tuple[Any, tuple[float, float, float], tuple[float, float, float]]]] = defaultdict(list)
     max_matrix_error = 0.0
     prop_pivot_offsets_before: list[float] = []
     prop_pivot_offsets_after: list[float] = []
@@ -2393,13 +2589,14 @@ def build_mta_scene(
             if 0 <= instance.object_index < len(object_offsets)
             else None
         )
-        if _is_road_name(instance.object_name):
+        is_dynamic = (instance.source_chunk_offset, instance.record_index) in dynamic_templates
+        if _is_road_name(instance.object_name) and not is_dynamic:
             # The placement has already been baked into static_triangles.
             # Do not also emit a scenery copy of the road.
             excluded_scenery_placements[instance.object_name] += 1
             classified_instances += 1
             continue
-        if _is_water_model(instance.object_name):
+        if _is_water_model(instance.object_name) and not is_dynamic:
             water_object = templates.get(template_offset)
             if water_object is None:
                 warnings.append(f"missing WATER template: {instance.object_name}")
@@ -2421,7 +2618,7 @@ def build_mta_scene(
             excluded_scenery_placements[instance.object_name] += 1
             classified_instances += 1
             continue
-        if _is_sky_model(instance.object_name):
+        if _is_sky_model(instance.object_name) and not is_dynamic:
             excluded_scenery_placements[instance.object_name] += 1
             classified_instances += 1
             continue
@@ -2438,7 +2635,12 @@ def build_mta_scene(
             continue
         max_matrix_error = max(max_matrix_error, error)
         classified_instances += 1
-        variant_placements[(template_offset, _scale_signature(scale))].append((instance, position, rotation))
+        physical = dynamic_templates.get((instance.source_chunk_offset, instance.record_index))
+        signature = dynamic_physics.source_signature(physical) if physical else ""
+        variant_key = (template_offset, _scale_signature(scale), signature)
+        if physical:
+            dynamic_variants[variant_key] = physical
+        variant_placements[variant_key].append((instance, position, rotation))
 
     if classified_instances != len(scenery_instances):
         raise ValueError(
@@ -2452,11 +2654,11 @@ def build_mta_scene(
 
     sorted_variants = sorted(variant_placements.items())
     report_progress("Building prop models", 0, len(sorted_variants), None)
-    for variant_index, ((template_offset, scale), entries) in enumerate(sorted_variants, 1):
+    for variant_index, ((template_offset, scale, physical_signature), entries) in enumerate(sorted_variants, 1):
         obj = templates[template_offset]
         name = obj.name
         report_progress("Building prop models", variant_index, len(sorted_variants), name)
-        triangles = _scaled_triangles(obj, scale)
+        triangles = _scaled_triangles(obj, scale, special_roles)
         if not triangles:
             warnings.append(f"empty scenery template: {name}")
             continue
@@ -2469,7 +2671,10 @@ def build_mta_scene(
         )
         decision["scale"] = list(scale)
         lod_decisions.append(decision)
-        promoted_static = len(entries) == 1 and max(extent) >= lod_min_size
+        physical = dynamic_variants.get((template_offset, scale, physical_signature))
+        if physical:
+            decision["decision"] = "dynamic_no_static_lod"
+        promoted_static = physical is None and len(entries) == 1 and max(extent) >= lod_min_size
         if promoted_static:
             _instance, position, rotation = entries[0]
             world_triangles = _transform_triangles(triangles, position, rotation)
@@ -2493,6 +2698,10 @@ def build_mta_scene(
                     )
             continue
         layers = _render_layers(triangles, alpha_decisions, alpha_usage, textures)
+        if physical:
+            # A render companion would become an independent rigid body. Keep
+            # all material faces in one body; report model-level blend limits.
+            layers = [("base", triangles)]
         if len(layers) > 1:
             mixed_render_models_split += 1
         # All render companions share the full visual template pivot. This is
@@ -2537,6 +2746,8 @@ def build_mta_scene(
         # truncated to 23 characters and collide, and enumeration order shifts
         # whenever the template set changes.
         prop_token = f"{template_offset:08x}:{name}:{scale}"
+        if physical_signature:
+            prop_token += ":" + physical_signature
         for layer, layer_triangles in layers:
             is_companion = layer != primary_layer
             model_id = (
@@ -2560,6 +2771,8 @@ def build_mta_scene(
             prop_pivot_offsets_after.append(_length(_local_bounds_center(model.vertices)))
             if vertex_colors == "off":
                 model.colors.clear()
+            if physical:
+                dynamic_physics.configure(model, physical, scale, entries[0][0].object_hash)
             model.lod_distance = prop_lod_distance
             models.append(model)
             for entry_index, (instance, position, rotation) in enumerate(adjusted_entries):
@@ -2634,7 +2847,7 @@ def build_mta_scene(
     # cannot either: spatial clipping legitimately inflates the output. Splitting
     # and clipping only ever ADD triangles for a given source object, so a
     # shortfall against any single source object is real geometry loss.
-    placed_template_offsets = {offset for offset, _scale in variant_placements}
+    placed_template_offsets = {key[0] for key in variant_placements}
     source_names_by_offset = {obj.chunk_offset: obj.name for obj in scene.objects}
 
     def _renderable_triangle_count(triangles: Iterable[_Triangle]) -> int:
@@ -2734,7 +2947,7 @@ def build_mta_scene(
     )
     referenced_texture_hashes = {material.texture_hash for model in models for material in model.materials if material.texture_hash is not None}
     referenced_texture_variants = {
-        (material.texture_hash, material.alpha_mode, material.surface_category)
+        (material.texture_hash, material.alpha_mode, material.surface_category, material.special_role)
         for model in models
         for material in model.materials
         if material.texture_hash is not None
@@ -2745,15 +2958,18 @@ def build_mta_scene(
         for key, name in texture_variants.items()
         if key in referenced_texture_variants and textures.get(key[0]) is not None
     }
-    reflective_markers = (_REFLECTIVE_TEXTURE_MARKER, _REFLECTIVE_MASK_MARKER)
     reflective_textures = sorted(
-        {name for name in texture_variants.values() if name.startswith(reflective_markers)}
+        {
+            name
+            for (_texture_hash, _mode, _category, role), name in texture_variants.items()
+            if role == "reflection"
+        }
     )
     missing_texture_hashes = sorted(value for value in referenced_texture_hashes if value not in texture_names)
     warnings.extend(f"missing texture hash: 0x{value:08x}" for value in missing_texture_hashes)
     animation_bindings: list[MtaTextureAnimationBinding] = []
-    if barrier_animation is not None:
-        for phase, texture_hash in enumerate(barrier_animation.frame_hashes):
+    for animation in texture_animations:
+        for phase, texture_hash in enumerate(animation.frame_hashes):
             target_names = sorted({
                 material.texture_name
                 for model in models
@@ -2762,10 +2978,10 @@ def build_mta_scene(
             })
             animation_bindings.extend(
                 MtaTextureAnimationBinding(
-                    animation_name=barrier_animation.name,
+                    animation_name=animation.name,
                     target_texture_name=target_name,
-                    frame_hashes=barrier_animation.frame_hashes,
-                    frames_per_second=barrier_animation.frames_per_second,
+                    frame_hashes=animation.frame_hashes,
+                    frames_per_second=animation.frames_per_second,
                     phase=phase,
                 )
                 for target_name in target_names
@@ -2782,6 +2998,12 @@ def build_mta_scene(
     }
     report = {
         "source_objects": len(scene.objects),
+        "special_texture_evidence": {
+            f"0x{texture_hash:08x}": value for texture_hash, value in sorted(special_evidence.items())
+        },
+        "reflection_triangle_matches": reflection_triangle_matches,
+        "source_physics": scene.source_physics.report(),
+        "dynamic_physics": {"models": [{"model_id": m.model_id, **m.physics} for m in models if m.physics], "game_verified": False},
         "static_source_objects": len(static_objects),
         "source_placements": len(scene.scenery_instances),
         **placement_deduplication,
@@ -2900,9 +3122,12 @@ def build_mta_scene(
                 )
             ),
             "material_modes": dict(Counter(material.alpha_mode for model in models for material in model.materials)),
-            "txd_variant_modes": dict(Counter(mode for _texture_hash, mode, _category in texture_variants)),
+            "txd_variant_modes": dict(Counter(mode for _texture_hash, mode, _category, _role in texture_variants)),
             "txd_variant_categories": dict(Counter(
-                category or "original" for _texture_hash, _mode, category in texture_variants
+                category or "original" for _texture_hash, _mode, category, _role in texture_variants
+            )),
+            "txd_variant_special_roles": dict(Counter(
+                role or "ordinary" for _texture_hash, _mode, _category, role in texture_variants
             )),
             "txd_variants": len(texture_variants),
         },

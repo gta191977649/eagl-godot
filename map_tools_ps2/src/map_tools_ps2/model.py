@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .source_physics import SourcePhysics, parse_source_physics
+
 from dataclasses import dataclass, field
 
 from .binary import IDENTITY4, Matrix4, Vec3, f32le, transform_point, u32le
@@ -41,6 +43,8 @@ class MeshObject:
     blocks: tuple[DecodedBlock, ...]
     texture_hashes: tuple[int, ...] = ()
     name_hash: int | None = None
+    source_flags: int = 0
+    has_vertex_animation_chunk: bool = False
 
     @property
     def vertex_runs(self) -> tuple[VifVertexRun, ...]:
@@ -163,6 +167,7 @@ class Scene:
     route_points: list[dict[str, object]] = field(default_factory=list)
     route_stats: dict[str, object] = field(default_factory=dict)
     allowed_road_areas: list[AllowedRoadArea] = field(default_factory=list)
+    source_physics: SourcePhysics = field(default_factory=SourcePhysics)
 
     @property
     def vertex_count(self) -> int:
@@ -208,6 +213,7 @@ def parse_mesh_object(object_chunk: Chunk, bundle: bytes) -> MeshObject | None:
     run_metadata = next((chunk for chunk in children if chunk.chunk_id == 0x00034004), None)
     vif_data = next((chunk for chunk in children if chunk.chunk_id == 0x00034005), None)
     texture_refs = next((chunk for chunk in children if chunk.chunk_id == 0x00034006), None)
+    vertex_animation = next((chunk for chunk in children if chunk.chunk_id == 0x0003401D), None)
     if header is None or vif_data is None:
         return None
 
@@ -216,6 +222,14 @@ def parse_mesh_object(object_chunk: Chunk, bundle: bytes) -> MeshObject | None:
     if name_info is None:
         return None
     name, name_start = name_info
+    # The game aligns the 0x34003 payload to 16 bytes before treating it as an
+    # eModel. FUN_001036c8 tests bit 0x10 at eModel+0x30 before allocating an
+    # eVertexAnimator, so preserve that source flag explicitly.
+    structure_offset = ((header.offset + 0x17) & ~0x0F) - header.data_offset
+    source_flags = (
+        int.from_bytes(header_payload[structure_offset + 0x30 : structure_offset + 0x32], "little")
+        if structure_offset + 0x32 <= len(header_payload) else 0
+    )
 
     vif_payload = _strip_vif_prefix(vif_data.payload(bundle))
     metadata_payload = run_metadata.payload(bundle) if run_metadata else b""
@@ -240,11 +254,14 @@ def parse_mesh_object(object_chunk: Chunk, bundle: bytes) -> MeshObject | None:
         blocks=blocks,
         texture_hashes=_read_texture_hashes(texture_refs.payload(bundle)) if texture_refs else (),
         name_hash=u32le(header_payload, 0x08) if len(header_payload) >= 0x0C else None,
+        source_flags=source_flags,
+        has_vertex_animation_chunk=vertex_animation is not None,
     )
 
 
 def parse_scene(chunks: tuple[Chunk, ...], bundle: bytes) -> Scene:
     scene = Scene()
+    scene.source_physics = parse_source_physics(chunks, bundle)
     for chunk in _walk(chunks):
         if chunk.chunk_id == 0x80034002:
             obj = parse_mesh_object(chunk, bundle)
@@ -299,6 +316,8 @@ def instantiated_mesh_object(obj: MeshObject, instance: SceneryInstance) -> Mesh
         blocks=obj.blocks,
         texture_hashes=obj.texture_hashes,
         name_hash=obj.name_hash,
+        source_flags=obj.source_flags,
+        has_vertex_animation_chunk=obj.has_vertex_animation_chunk,
     )
 
 

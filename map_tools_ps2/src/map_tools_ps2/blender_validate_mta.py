@@ -109,6 +109,8 @@ def main() -> None:
         dff_face_counts[path.stem] = sum(len(geometry.triangles) for geometry in value.geometry_list)
     col_models = 0
     col_faces = 0
+    col_boxes = 0
+    col_spheres = 0
     bounds_only_col_models = 0
     max_bounds_only_col_error = 0.0
     max_mesh_col_bounds_error = 0.0
@@ -119,6 +121,8 @@ def main() -> None:
         value.load_file(str(path))
         col_models += len(value.models)
         col_faces += sum(len(model.mesh_faces) for model in value.models)
+        col_boxes += sum(len(model.boxes) for model in value.models)
+        col_spheres += sum(len(model.spheres) for model in value.models)
         bounds_only_col_models += sum(
             not model.mesh_faces and not model.boxes and not model.spheres
             for model in value.models
@@ -161,6 +165,15 @@ def main() -> None:
                     )
                     if staged_vertices else dff_bounds.get(path.stem)
                 )
+                primitive = (expected_model or {}).get("dynamic_collision_primitive")
+                if primitive and expected:
+                    center = primitive["center"]
+                    half = ([primitive["radius"]] * 3 if primitive["type"] == "sphere"
+                            else primitive["half_extents"])
+                    expected = (
+                        tuple(min(expected[0][axis], center[axis] - half[axis]) for axis in range(3)),
+                        tuple(max(expected[1][axis], center[axis] + half[axis]) for axis in range(3)),
+                    )
                 if expected is None:
                     raise RuntimeError(f"mesh COL has no matching DFF: {path.name}")
                 max_mesh_col_bounds_error = max(
@@ -272,6 +285,8 @@ def main() -> None:
                 "textured_materials": textured_materials,
                 "col_models": col_models,
                 "col_faces": col_faces,
+                "col_boxes": col_boxes,
+                "col_spheres": col_spheres,
                 "bounds_only_col_models": bounds_only_col_models,
                 "max_bounds_only_col_error": max_bounds_only_col_error,
                 "max_mesh_col_bounds_error": max_mesh_col_bounds_error,

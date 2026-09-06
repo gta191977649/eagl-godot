@@ -13,10 +13,29 @@ import xml.etree.ElementTree as ET
 
 from .img_archive import read_img_v2_directory
 from .race_catalog import FAMILIES, load_profiles
+from .special_textures import (
+    SPECIAL_TEXTURE_CONTRACT_VERSION,
+    SPECIAL_TEXTURE_NAME_MAX_VISIBLE,
+    SPECIAL_TEXTURE_PREFIXES,
+)
 
 
 def validate_pack(pack: Path, base: int):
     manifest = json.loads((pack / "track_manifest.json").read_text())
+    special_contract = manifest.get("specialTextures", {})
+    assert special_contract.get("version") == SPECIAL_TEXTURE_CONTRACT_VERSION
+    assert special_contract.get("prefixes") == SPECIAL_TEXTURE_PREFIXES
+    special_path = special_contract.get("file")
+    assert special_path == "special_textures.json"
+    special = json.loads((pack / special_path).read_text(encoding="utf-8"))
+    special_names = {record["name"] for record in special["textures"]}
+    prefixes = tuple(special_contract["prefixes"].values())
+    assert all(name.startswith(prefixes) and len(name) <= SPECIAL_TEXTURE_NAME_MAX_VISIBLE for name in special_names)
+    assert len(special_names) == len(special["textures"])
+    for record in special["textures"]:
+        assert record["name"].startswith(SPECIAL_TEXTURE_PREFIXES[record["effectKind"]])
+        if record["effectKind"] == "reflection":
+            assert record.get("reflectionLayer") in {"surface", "mask"}, record["name"]
     assert not (pack / "eagleZones.txt").exists(), "managed pack must not auto-load"
     assert set(manifest["tracks"]) == {str(i) for i in range(base+1,base+7)}
     declared = {n.attrib["src"] for n in ET.parse(pack / "meta.xml").getroot() if n.tag == "file"}
@@ -55,6 +74,7 @@ def validate_pack(pack: Path, base: int):
                 assert (row["lodParent"], row.get("uniqueID")) in identities, (key, row)
         for binding in track["environment"].get("animations", []):
             assert binding["frames"] and all(p in declared for p in binding["frames"])
+        assert set(track["environment"].get("specialTextures", [])) <= special_names
         scene = json.loads((pack / "tracks" / key / "scene.report.json").read_text())
         assert scene["native_polygons_unassigned"] == 0, key
         carriers += scene.get("native_collision_carriers", 0)
@@ -62,6 +82,10 @@ def validate_pack(pack: Path, base: int):
     report = json.loads((pack / "sharing.report.json").read_text())
     assert report["blender_validation"]["status"] == "ok"
     assert report["definitions_after"] == len(definitions)
+    if "texture_mapping" in report:
+        assert report["texture_mapping"]["canonical_names"] == report["textures_after"]
+        assert len(report["texture_mapping"]["identity_digest"]) == 64
+    assert "special_textures.json" in declared
     return {"family": FAMILIES[base], "tracks": 6, "placements": placements,
             "native_collision_carriers": carriers,
             "models_before": report["models_before"], "definitions_after": len(definitions),

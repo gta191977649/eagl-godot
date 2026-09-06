@@ -468,6 +468,19 @@ class TextureTests(unittest.TestCase):
             "b89c98e0e3128d5c4d1bcae25b9054ac030a180f9a65b4c7dd20fdeae35f7ff9",
         )
 
+    def test_fixture_reads_source_uv_scroll_descriptor(self):
+        location_bin = TRACKS_ROOT / "TEX41LOCATION.BIN"
+        if not location_bin.exists():
+            self.skipTest("TEX41LOCATION.BIN fixture is not available")
+
+        values = {texture.name: texture for texture in read_ps2_tpk(location_bin)}
+        river = values["RIVER_BOTTOM"]
+        ordinary = values["RD_PUDDLE"]
+        self.assertEqual(river.uv_animation_flags, 0x100)
+        self.assertAlmostEqual(river.uv_scroll_u, 0.0)
+        self.assertAlmostEqual(river.uv_scroll_v, -0.390625)
+        self.assertEqual(ordinary.uv_animation_flags, 0)
+
 
 class GlbMaterialTests(unittest.TestCase):
     def test_alpha_roads_are_not_exported_double_sided(self):

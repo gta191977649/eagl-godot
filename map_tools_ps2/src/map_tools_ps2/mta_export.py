@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .dynamic_physics import collision_primitive, definition_attributes, placement_attributes, definition_physics_key
+
 import json
 import os
 import re
@@ -82,26 +84,39 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
     texture_dir.mkdir(parents=True, exist_ok=True)
     texture_records = []
     cutoff_by_variant = {
-        (material.texture_hash, material.alpha_mode, material.surface_category): material.alpha_cutoff
+        (material.texture_hash, material.alpha_mode, material.surface_category, material.special_role): material.alpha_cutoff
         for model in scene.models
         for material in model.materials
         if material.texture_hash is not None
     }
     variants = scene.texture_variants or {
-        (tex_hash, (textures.get(tex_hash).alpha_mode or "OPAQUE"), None): name
+        (tex_hash, (textures.get(tex_hash).alpha_mode or "OPAQUE"), None, None): name
         for tex_hash, name in scene.texture_names.items()
         if textures.get(tex_hash) is not None
     }
     emitted_texture_names: set[str] = set()
-    for (tex_hash, alpha_mode, surface_category), texture_name in sorted(
-        variants.items(), key=lambda item: (item[0][0], item[0][1], item[0][2] or "")
+    for (tex_hash, alpha_mode, surface_category, special_role), texture_name in sorted(
+        variants.items(), key=lambda item: (item[0][0], item[0][1], item[0][2] or "", item[0][3] or "")
     ):
         texture = textures.get(tex_hash)
         if texture is None:
             continue
-        # Several variant keys can share one name: wet-road textures collapse
-        # their surface categories into a single "refl_" entry. The TXD holds
-        # one raster per name.
+        # Reflection materials are deliberately opaque in the DFF/IDE so the
+        # shader owns blending and ordering.  The TXD raster is independent:
+        # its source alpha is the authored reflection mask and must remain
+        # DXT5/BLEND instead of being flattened to opaque DXT1.
+        raster_alpha_mode = (
+            str(texture.alpha_mode or "OPAQUE").upper()
+            if special_role == "reflection"
+            else alpha_mode
+        )
+        raster_alpha_cutoff = (
+            texture.alpha_cutoff
+            if special_role == "reflection"
+            else cutoff_by_variant.get((tex_hash, alpha_mode, surface_category, special_role))
+        )
+        # Several variant keys can share one emitted name. The TXD holds one
+        # raster per name even when multiple material records reference it.
         if texture_name in emitted_texture_names:
             continue
         emitted_texture_names.add(texture_name)
@@ -111,15 +126,16 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
             "hash": tex_hash,
             "name": texture_name,
             "file": f"textures/{filename}",
-            "has_alpha": alpha_mode != "OPAQUE",
-            "alpha_mode": alpha_mode,
-            "alpha_cutoff": cutoff_by_variant.get((tex_hash, alpha_mode, surface_category)),
+            "has_alpha": raster_alpha_mode != "OPAQUE",
+            "alpha_mode": raster_alpha_mode,
+            "alpha_cutoff": raster_alpha_cutoff,
             "source_alpha_mode": texture.alpha_mode or "OPAQUE",
+            "special_role": special_role,
         }
         texture_records.append(record)
 
     material_catalog: list[dict[str, Any]] = []
-    material_indices: dict[tuple[int | None, str | None, str, int | None, str | None], int] = {}
+    material_indices: dict[tuple[int | None, str | None, str, int | None, str | None, str | None], int] = {}
     model_records = []
     for model in scene.models:
         model_materials = []
@@ -127,6 +143,7 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
             key = (
                 material.texture_hash, material.texture_name, material.alpha_mode,
                 material.hp2_material_id, material.surface_category,
+                material.special_role,
             )
             if key not in material_indices:
                 material_indices[key] = len(material_catalog)
@@ -141,6 +158,11 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
                         "render_flag": material.render_flag,
                         "hp2_material_id": material.hp2_material_id,
                         "surface_category": material.surface_category,
+                        "special_role": material.special_role,
+                        "source_alpha_mode": material.source_alpha_mode,
+                        "source_alpha_cutoff": material.source_alpha_cutoff,
+                        "source_submeshes": list(material.source_submeshes),
+                        "source_texture_slots": list(material.source_texture_slots),
                     }
                 )
             model_materials.append(material_indices[key])
@@ -160,6 +182,7 @@ def _write_staging(scene: MtaScene, textures: Any, root: Path) -> Path:
                 "collision_faces": model.collision_faces,
                 "collision_materials": model.collision_materials,
                 "collision_kind": model.collision_kind,
+                "dynamic_collision_primitive": collision_primitive(model),
                 "render_layer": model.render_layer,
                 "draw_last": model.draw_last,
                 "additive": model.additive,
@@ -444,6 +467,7 @@ def _write_resource_xml(
             # GTA also uses COL bounds for streaming. Models without physical
             # collision receive a same-name bounds-only COL3.
             attrs["col"] = model.model_id
+            attrs.update(definition_attributes(model))
             ET.SubElement(definition_root, "definition", attrs)
         _indent_write(definition_root, zone_dir / f"{zone}.definition")
 
@@ -467,6 +491,7 @@ def _write_resource_xml(
                 placement_attrs["lodParent"] = placement.lod_parent
             if placement.unique_id:
                 placement_attrs["uniqueID"] = placement.unique_id
+            placement_attrs.update(placement_attributes(models[placement.model_id]))
             ET.SubElement(map_root, placement.element_type, placement_attrs)
         _indent_write(map_root, zone_dir / f"{zone}.map")
 

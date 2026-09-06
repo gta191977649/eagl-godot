@@ -5,6 +5,7 @@ import random
 import struct
 import xml.etree.ElementTree as ET
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,8 +27,6 @@ from map_tools_ps2.route_export import write_route_txt
 from map_tools_ps2.mta_scene import (
     DEFAULT_HP2_TO_GTA_SURFACE,
     MtaWaterQuad,
-    _REFLECTIVE_MASK_MARKER,
-    _REFLECTIVE_TEXTURE_MARKER,
     _deduplicate_scenery_instances,
     _lod_model_id,
     _model_id,
@@ -272,6 +271,7 @@ def test_mta_staging_preserves_texture_alpha_metadata(tmp_path):
             "alpha_mode": "OPAQUE",
                 "alpha_cutoff": None,
                 "source_alpha_mode": "OPAQUE",
+                "special_role": None,
         }
     ]
     assert (tmp_path / "textures" / "ROAD01.png").read_bytes() == b"png-data"
@@ -333,8 +333,8 @@ def test_mta_creates_txd_variants_for_one_texture_with_multiple_surface_states()
     )
     result = build_mta_scene(source, TextureLibrary({123: texture}), track_id=31, resource_name="TEST")
     assert result.texture_variants == {
-        (123, "MASK", None): "SHARED_m",
-        (123, "OPAQUE", None): "SHARED_o",
+        (123, "MASK", None, None): "SHARED_m",
+        (123, "OPAQUE", None, None): "SHARED_o",
     }
     assert {material.alpha_mode for model in result.models for material in model.materials} == {"MASK", "OPAQUE"}
 
@@ -1444,9 +1444,7 @@ def test_source_alpha_blend_model_stays_non_additive():
     assert result.report["additive_companion_models"] == 0
 
 
-def test_wet_road_textures_carry_a_shader_marker_after_the_surface_prefix():
-    # MTA binds shaders to world textures by glob, and no GTA blend mode can
-    # reproduce HP2's puddle reflection, so the names have to be targetable.
+def test_reflection_role_comes_from_native_surface_not_texture_name():
     source = Scene(
         objects=[
             _triangle_object("RD_SECTION_ROAD", 1, texture_hashes=(100,)),
@@ -1463,7 +1461,7 @@ def test_wet_road_textures_carry_a_shader_marker_after_the_surface_prefix():
             ),
         ],
         track_collision_polygons=[
-            _surface_polygon(0, 1, 0), _surface_polygon(1, 1, 20), _surface_polygon(2, 1, 40),
+            _surface_polygon(0, 1, 0), _surface_polygon(1, 4, 20), _surface_polygon(2, 4, 40),
         ],
     )
     textures = TextureLibrary({
@@ -1475,24 +1473,123 @@ def test_wet_road_textures_carry_a_shader_marker_after_the_surface_prefix():
     result = build_mta_scene(source, textures, track_id=41, resource_name="TEST")
     names = set(result.texture_variants.values())
 
-    # The marker REPLACES the surface category. A roadshine shader bound to
-    # "road_*" must not pick these up, so no road_ variant may survive, and
-    # every surface category collapses onto the one name. The mask gets its own
-    # namespace because its RGB is empty and only its alpha carries the shape.
-    assert "reflmask_RD_PUDDLE2_MASK" in names
+    assert "refl_RD_PUDDLE2_MASK" in names
     assert "refl_RD_PUDDLE2" in names
     assert not any(name.startswith("road_") and "PUDDLE" in name for name in names)
+    # The building copy has no source reflection evidence, so the same source
+    # pixels remain an ordinary, independent material variant there.
     assert {
         name for key, name in result.texture_variants.items() if key[0] == 200
-    } == {"reflmask_RD_PUDDLE2_MASK"}
+    } == {"RD_PUDDLE2_MASK", "refl_RD_PUDDLE2_MASK"}
     assert "road_RD_SHLDR1" in names
-    assert not any(
-        name.startswith((_REFLECTIVE_TEXTURE_MARKER, _REFLECTIVE_MASK_MARKER))
-        for name in names if "PUDDLE" not in name
-    )
     assert result.report["reflective_textures"] == [
-        "refl_RD_PUDDLE2", "reflmask_RD_PUDDLE2_MASK",
+        "refl_RD_PUDDLE2", "refl_RD_PUDDLE2_MASK",
     ]
+
+
+def test_parkland_reflections_use_the_same_source_driven_namespace():
+    source = Scene(
+        objects=[_mixed_alpha_object("RD_SECTION_WET")],
+        track_collision_polygons=[_surface_polygon(0, 4, 0), _surface_polygon(1, 4, 30)],
+    )
+    textures = TextureLibrary({
+        100: _alpha_texture("W_RDWATER", blend=True),
+        200: _alpha_texture("W_RDWATER_MASK", blend=True, additive=True),
+    })
+
+    result = build_mta_scene(source, textures, track_id=11, resource_name="TEST")
+
+    assert {material.texture_name for model in result.models for material in model.materials} == {
+        "refl_W_RDWATER", "refl_W_RDWATER_MASK",
+    }
+    assert result.report["reflective_textures"] == [
+        "refl_W_RDWATER", "refl_W_RDWATER_MASK",
+    ]
+
+
+def test_reflection_is_opaque_for_ide_but_preserves_source_alpha_metadata(tmp_path):
+    source = Scene(
+        objects=[_triangle_object("RENAMED_SURFACE", 1, texture_hashes=(100,))],
+        track_collision_polygons=[_surface_polygon(0, 4, 0)],
+    )
+    textures = TextureLibrary({100: _alpha_texture("COMPLETELY_ARBITRARY", blend=True, additive=True)})
+    result = build_mta_scene(
+        source, textures,
+        track_id=41, resource_name="TEST",
+    )
+    model = next(model for model in result.models if model.materials)
+    material = model.materials[0]
+    assert material.texture_name.startswith("refl_")
+    assert material.special_role == "reflection"
+    assert material.alpha_mode == "OPAQUE"
+    assert material.source_alpha_mode == "BLEND"
+    assert not model.draw_last and not model.additive and not model.no_zbuffer_write
+    staged = json.loads(_write_staging(result, textures, tmp_path).read_text(encoding="utf-8"))
+    reflection_texture = next(texture for texture in staged["textures"] if texture["special_role"] == "reflection")
+    assert reflection_texture["alpha_mode"] == "BLEND"
+    assert reflection_texture["has_alpha"] is True
+
+
+def test_uv_scroll_uses_tpk_fields_and_not_texture_name():
+    animated = SimpleNamespace(**vars(_alpha_texture("RENAMED_A", blend=False)),
+                               uv_animation_flags=0x100, uv_scroll_u=-0.390625, uv_scroll_v=0.0)
+    ordinary = SimpleNamespace(**vars(_alpha_texture("RIVER_BOTTOM", blend=False)),
+                               uv_animation_flags=0, uv_scroll_u=0.0, uv_scroll_v=0.0)
+    result = build_mta_scene(
+        Scene(objects=[
+            _triangle_object("A", 1, texture_hashes=(100,)),
+            _triangle_object("B", 2, texture_hashes=(200,)),
+        ]),
+        TextureLibrary({100: animated, 200: ordinary}), track_id=41, resource_name="TEST",
+    )
+    names = {material.texture_hash: material.texture_name for model in result.models for material in model.materials}
+    assert names[100].startswith("uvscroll_")
+    assert not names[200].startswith("uvscroll_")
+
+
+def test_vertex_animator_marks_only_dominant_texture_slot():
+    obj = _mixed_alpha_object("RENAMED_MODEL")
+    obj = replace(obj, source_flags=0x10, has_vertex_animation_chunk=True)
+    result = build_mta_scene(
+        Scene(objects=[obj]),
+        TextureLibrary({100: _alpha_texture("FIRST", blend=False), 200: _alpha_texture("SECOND", blend=True)}),
+        track_id=61, resource_name="TEST", collision_mode="bounds-only",
+    )
+    roles = {material.texture_hash: material.special_role for model in result.models for material in model.materials}
+    assert sum(role == "model_animation" for role in roles.values()) == 1
+
+
+def test_wet_road_render_layers_share_the_generated_lod_link():
+    wet = _three_layer_object("RD_SECTION_WET")
+    wet = MeshObject(
+        wet.name,
+        wet.chunk_offset,
+        _matrix(rotation=(0, 0, 0), scale=(10, 10, 1), position=(0, 0, 0)),
+        tuple(
+            DecodedBlock(wet.blocks[0].run, primitive_mode="triangles", texture_index=index)
+            for index in range(3)
+        ),
+        wet.texture_hashes,
+        wet.name_hash,
+    )
+    source = Scene(objects=[wet])
+    textures = TextureLibrary({
+        100: _alpha_texture("ROAD_BASE", blend=False),
+        200: _alpha_texture("RD_PUDDLE2", blend=True),
+        300: _alpha_texture("RD_PUDDLE2_MASK", blend=True, additive=True),
+    })
+
+    result = build_mta_scene(
+        source, textures, track_id=41, resource_name="TEST", collision_mode="bounds-only",
+        lod_min_size=50,
+    )
+    lod = next(model for model in result.models if model.is_lod)
+    details = [placement for placement in result.placements if placement.model_id != lod.model_id]
+    lod_placement = next(placement for placement in result.placements if placement.model_id == lod.model_id)
+
+    assert len(details) == 3
+    assert {placement.lod_parent for placement in details} == {lod.model_id}
+    assert {placement.unique_id for placement in details} == {lod_placement.unique_id}
 
 
 def test_model_ids_fit_the_img_directory_name_field():

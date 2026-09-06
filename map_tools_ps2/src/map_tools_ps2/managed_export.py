@@ -1,6 +1,8 @@
 """Family-wide Eagle asset sharing with per-track placement manifests."""
 from __future__ import annotations
 
+from .dynamic_physics import definition_attributes, placement_attributes, definition_physics_key
+
 import hashlib
 import json
 import pickle
@@ -21,6 +23,12 @@ from .progress import report_progress
 from .race_catalog import FAMILIES, load_profiles, validate_profile
 from .route_export import write_route_txt
 from .textures import TextureLibrary, load_texture_library_for_track
+from .special_textures import (
+    SPECIAL_TEXTURE_CONTRACT_VERSION,
+    SPECIAL_TEXTURE_PREFIXES,
+    canonical_texture_name,
+    reflection_layer_for_texture,
+)
 
 
 def digest(value):
@@ -32,11 +40,25 @@ def geometry_key(model):
                   | {"materials": [asdict(m) for m in model.materials], "is_lod": model.is_lod})
 
 
-def texture_key(texture, alpha, cutoff, category, animation=None):
+def definition_key(model, geometry=None):
+    return digest([geometry or geometry_key(model), model.collision_vertices,
+                   model.collision_faces, model.collision_materials, model.collision_kind,
+                   definition_physics_key(model), model.lod_distance, model.draw_last,
+                   model.additive, model.no_zbuffer_write])
+
+
+def texture_key(texture, alpha, cutoff, category, animation=None, role=None, effect=None):
     # Equal pixels are not interchangeable when shaders animate them with
     # different phase offsets. Keep surface and animation identities intact.
-    return digest([hashlib.sha256(texture.png).hexdigest(), texture.width,
-                   texture.height, alpha, cutoff, category, animation])
+    values = [hashlib.sha256(texture.png).hexdigest(), texture.width,
+              texture.height, alpha, cutoff, category, animation]
+    # Preserve every pre-feature canonical name; only special variants add a
+    # new identity component.
+    if role is not None:
+        values.append(role)
+    if effect is not None:
+        values.append(effect)
+    return digest(values)
 
 
 def export_family(game_dir: Path, output: Path, base: int, *, blender=None, dragonff=None, author="map_tools_ps2"):
@@ -50,12 +72,18 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
     (output / "tracks").mkdir()
     (output / "effects").mkdir()
     (output / "effects" / "barrier.fx").write_text(_BARRIER_ANIMATION_FX, encoding="utf-8")
+    (output / "effects" / "additive.fx").write_text(
+        (Path(__file__).with_name("data") / "additive.fx").read_text(encoding="utf-8"), encoding="utf-8"
+    )
     profiles = load_profiles()
     library = TextureLibrary({})
     merged = MtaScene(base, output.name, [], [], ["shared"], {}, [], {"lod_mode": "off"})
     models, geom_names, geometry_by_id, texture_keys, tracks = {}, {}, {}, {}, {}
+    synthetic_keys: dict[int, str] = {}
+    canonical_keys: dict[str, str] = {}
     original_models = original_textures = original_texture_bytes = 0
     model_occurrences = Counter()
+    special_by_name = {}
     family = FAMILIES[base]
     track_ids = list(range(base + 1, base + 7))
     prepare_stage = f"Family {family}: preparing tracks"
@@ -75,7 +103,7 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
         write_route_txt(scene, track_dir / "route.txt", track=track_id)
         cache_root = output.parent / ".hp2_export_cache"
         cache_root.mkdir(exist_ok=True)
-        dependencies = [Path(__file__).with_name(name) for name in ("mta_scene.py", "managed_collision.py", "mta_lod.py", "model.py", "textures.py")]
+        dependencies = [Path(__file__).with_name(name) for name in ("mta_scene.py", "managed_collision.py", "mta_lod.py", "model.py", "textures.py", "source_physics.py", "dynamic_physics.py")]
         stamp = digest([hashlib.sha256(data).hexdigest(),
                         *[hashlib.sha256(p.read_bytes()).hexdigest() for p in dependencies],
                         *[hashlib.sha256(p.read_bytes()).hexdigest() for p in textures.source_paths]])
@@ -94,7 +122,7 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
         texture_items = sorted(mta.texture_variants.items(), key=lambda item: str(item[0]))
         texture_stage = f"Family {family}: sharing textures (track {track_id})"
         report_progress(texture_stage, 0, len(texture_items), None)
-        for texture_index, ((tex_hash, alpha, category), name) in enumerate(texture_items, 1):
+        for texture_index, ((tex_hash, alpha, category, role), name) in enumerate(texture_items, 1):
             report_progress(texture_stage, texture_index, len(texture_items), name)
             texture = textures.get(tex_hash)
             if texture is None:
@@ -104,17 +132,70 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
             animation = next(([a.phase, a.frames_per_second,
                                [hashlib.sha256(textures.get(h).png).hexdigest() for h in a.frame_hashes]]
                               for a in mta.texture_animations if a.target_texture_name == name), None)
-            key = texture_key(texture, alpha, cutoff, category, animation)
+            source_evidence = mta.report.get("special_texture_evidence", {}).get(f"0x{tex_hash:08x}", {})
+            effect_identity = None
+            if role == "uv_scroll":
+                effect_identity = [source_evidence.get("flags"), source_evidence.get("u"), source_evidence.get("v")]
+            elif role == "uv_rotate":
+                effect_identity = [source_evidence.get("flags"), source_evidence.get("rotation")]
+            key = texture_key(texture, alpha, cutoff, category, animation, role, effect_identity)
             original_texture_bytes += len(texture.png)
-            canonical = (category + "_" if category else "hp2_") + key[:20]
+            canonical = canonical_texture_name(key, surface=category, special=role)
             synthetic = int(key[:12], 16)
-            if synthetic in library.textures and library.textures[synthetic].png != texture.png:
-                raise ValueError("texture digest prefix collision")
+            if len(canonical) > 31:
+                raise ValueError(f"MTA texture name exceeds 31 visible characters: {canonical}")
+            if synthetic in synthetic_keys and synthetic_keys[synthetic] != key:
+                raise ValueError(f"texture synthetic-hash collision: {canonical}")
+            if canonical in canonical_keys and canonical_keys[canonical] != key:
+                raise ValueError(f"texture canonical-name collision: {canonical}")
+            synthetic_keys[synthetic] = key
+            canonical_keys[canonical] = key
             library.textures[synthetic] = replace(texture, tex_hash=synthetic)
-            merged.texture_variants[(synthetic, alpha, category)] = canonical
+            merged.texture_variants[(synthetic, alpha, category, role)] = canonical
             merged.texture_names[synthetic] = canonical
             texture_remap[name] = (synthetic, canonical)
             texture_keys[key] = len(texture.png)
+        track_special_names = set()
+        for model in mta.models:
+            for material_index, material in enumerate(model.materials):
+                if not material.special_role or not material.texture_name:
+                    continue
+                target = texture_remap.get(material.texture_name)
+                source_texture = textures.get(material.texture_hash)
+                if target is None or source_texture is None:
+                    continue
+                canonical = target[1]
+                track_special_names.add(canonical)
+                record = special_by_name.setdefault(canonical, {
+                    "name": canonical,
+                    "effectKind": material.special_role,
+                    "prefix": SPECIAL_TEXTURE_PREFIXES[material.special_role],
+                    "sourceName": source_texture.name,
+                    "sourceHash": f"0x{material.texture_hash:08x}",
+                    "tracks": set(), "bindings": [],
+                    "sourceAlphaMode": material.source_alpha_mode,
+                    "sourceAlphaCutoff": material.source_alpha_cutoff,
+                    "exportAlphaMode": material.alpha_mode,
+                    **(
+                        {"reflectionLayer": reflection_layer_for_texture(source_texture)}
+                        if material.special_role == "reflection" else {}
+                    ),
+                    "evidence": mta.report.get("special_texture_evidence", {}).get(
+                        f"0x{material.texture_hash:08x}",
+                        {"kind": "reflection", "source": "native_collision_material", "materialIds": [4, 20]}
+                        if material.special_role == "reflection" else {},
+                    ),
+                })
+                record["tracks"].add(track_id)
+                binding = {
+                    "track": track_id, "object": model.source_name,
+                    "objectOffset": f"0x{model.source_offset:08x}" if model.source_offset is not None else None,
+                    "materialIndex": material_index,
+                    "submeshes": list(material.source_submeshes),
+                    "textureSlots": list(material.source_texture_slots),
+                }
+                if binding not in record["bindings"]:
+                    record["bindings"].append(binding)
         remap = {}
         original_models += len(mta.models)
         model_stage = f"Family {family}: sharing models (track {track_id})"
@@ -125,8 +206,7 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
                 texture_name=texture_remap[material.texture_name][1]) if material.texture_name in texture_remap
                 else material for material in model.materials]
             geom = geometry_key(model)
-            key = digest([geom, model.collision_vertices, model.collision_faces, model.collision_materials,
-                          model.collision_kind, model.lod_distance, model.draw_last, model.additive, model.no_zbuffer_write])
+            key = definition_key(model, geom)
             canonical = f"h{base}_" + key[:15]
             remap[model.model_id] = canonical
             model_occurrences[canonical] += 1
@@ -146,6 +226,7 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
                 "doubleSided": "true", "uniqueID": placement.unique_id or f"t{track_id}_{index}"}
             if placement.lod_parent:
                 attrs["lodParent"] = remap[placement.lod_parent]
+            attrs.update(placement_attributes(models[remap[placement.model_id]]))
             ET.SubElement(placements, placement.element_type, attrs)
         _indent_write(placements, track_dir / "track.map")
         animations = []
@@ -162,6 +243,13 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
             if target:
                 animations.append({"texture": target[1], "frames": frames,
                     "fps": animation.frames_per_second, "phase": animation.phase})
+                special = special_by_name.get(target[1])
+                if special is not None:
+                    variants = special.setdefault("animationBindings", [])
+                    parameters = {"name": animation.animation_name, "frames": frames,
+                                  "fps": animation.frames_per_second, "phase": animation.phase}
+                    if parameters not in variants:
+                        variants.append(parameters)
         sky = []
         for obj in scene.objects:
             if "SKYDOME" in obj.name.upper() or "SKYBOX" in obj.name.upper():
@@ -172,10 +260,17 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
                         (output / name).write_bytes(texture.png)
                         if name not in sky:
                             sky.append(name)
+        additive_textures = sorted({
+            material.texture_name
+            for model in mta.models if model.additive
+            for material in model.materials if material.texture_name
+        })
         tracks[str(track_id)] = {**profile, "routeFile": f"tracks/{track_id}/route.txt",
             "mapFile": f"tracks/{track_id}/track.map", "offset": [0, 0, 0],
             "water": [asdict(q) for q in mta.water_quads],
-            "environment": {"skyTextures": sky, "animations": animations},
+            "environment": {"skyTextures": sky, "animations": animations,
+                            "additiveTextures": additive_textures,
+                            "specialTextures": sorted(track_special_names)},
             "grid": list(vars(scene.track_route_segments[0].points[0].position_ps2).values())}
         # Grid anchor always comes from the authored route, never segment order.
         route = next(r for r in scene.track_route_segments if r.route_index == profile["spawn"]["route"])
@@ -227,18 +322,38 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
             ET.SubElement(definitions, "definition", {"id": name, "zone": "shared",
                 "dff": geom_names[geometry_by_id[name]], "col": col_for[name], "txd": f"family{base}",
                 "lodDistance": str(model.lod_distance), "flags": ",".join(flags),
-                **{flag: "true" for flag in flags}})
+                **{flag: "true" for flag in flags}, **definition_attributes(model)})
         _indent_write(definitions, output / "zones" / "shared" / "shared.definition")
-        savings = {"models_before": original_models, "definitions_after": len(models),
+        savings = {"dynamic_definitions": sum(bool(m.physics) for m in models.values()),
+            "dynamic_mapping_status": "native_gta_approximation_pending_game_validation",
+            "models_before": original_models, "definitions_after": len(models),
             "dff_after": len(dff_entries), "col_after": len(cols),
             "textures_before": original_textures, "textures_after": len(texture_keys),
+            "texture_mapping": {"canonical_names": len(canonical_keys),
+                "identity_digest": digest(sorted(canonical_keys.items()))},
             "texture_png_bytes_before": original_texture_bytes, "texture_png_bytes_after": sum(texture_keys.values()),
             "dff_bytes_before_dedup": sum((loose / "dff" / (n + ".dff")).stat().st_size * model_occurrences[n] for n in models),
             "dff_bytes_after": sum(len(e.data) for e in dff_entries),
             "col_bytes_before_dedup": sum((loose / "col" / (n + ".col")).stat().st_size * model_occurrences[n] for n in models),
             "col_bytes_after": sum(map(len, cols.values())), "blender_validation": report}
+    special_records = []
+    for record in sorted(special_by_name.values(), key=lambda value: (value["prefix"], value["name"])):
+        record["family"] = family
+        record["tracks"] = sorted(record["tracks"])
+        record["bindings"].sort(key=lambda value: (value["track"], value["objectOffset"] or "", value["materialIndex"]))
+        evidence = record.get("evidence", {})
+        if record["effectKind"] == "uv_scroll":
+            record["parameters"] = {"u": evidence.get("u", 0.0), "v": evidence.get("v", 0.0)}
+        elif record["effectKind"] == "uv_rotate":
+            record["parameters"] = {"rotation": evidence.get("rotation")}
+        special_records.append(record)
+    special_payload = {"version": SPECIAL_TEXTURE_CONTRACT_VERSION, "family": FAMILIES[base], "prefixes": SPECIAL_TEXTURE_PREFIXES,
+                       "textures": special_records}
+    (output / "special_textures.json").write_text(json.dumps(special_payload, indent=2) + "\n", encoding="utf-8")
     manifest = {"version": 1, "family": FAMILIES[base], "resource": output.name,
-                "definitions": ["zones/shared/shared.definition"], "tracks": tracks}
+                "definitions": ["zones/shared/shared.definition"],
+                "specialTextures": {"version": SPECIAL_TEXTURE_CONTRACT_VERSION, "file": "special_textures.json", "prefixes": SPECIAL_TEXTURE_PREFIXES},
+                "tracks": tracks}
     (output / "track_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (output / "sharing.report.json").write_text(json.dumps(savings, indent=2) + "\n", encoding="utf-8")
     (output / "pack_server.lua").write_text((Path(__file__).with_name("data") / "hp2_pack_server.lua").read_text(encoding="utf-8"), encoding="utf-8")
@@ -259,10 +374,48 @@ def export_family(game_dir: Path, output: Path, base: int, *, blender=None, drag
 
 
 def command(args):
+    exported = []
     for base, family in FAMILIES.items():
         if args.family != "all" and args.family != family:
             continue
-        export_family(Path(args.game_dir), Path(args.output) / ("hp2_" + family + "_pack"), base,
+        pack = Path(args.output) / ("hp2_" + family + "_pack")
+        export_family(Path(args.game_dir), pack, base,
             blender=Path(args.blender) if args.blender else None,
             dragonff=Path(args.dragonff_path) if args.dragonff_path else None, author=args.author)
+        exported.append(pack)
+    _write_special_texture_summary(Path(args.output), exported)
     return 0
+
+
+def _write_special_texture_summary(output: Path, packs: list[Path]) -> None:
+    records = []
+    for pack in packs:
+        payload = json.loads((pack / "special_textures.json").read_text(encoding="utf-8"))
+        for record in payload["textures"]:
+            records.append({"family": payload["family"], **record})
+    records.sort(key=lambda value: (value["prefix"], value["name"], value["family"]))
+    (output / "special_textures.json").write_text(
+        json.dumps({"version": SPECIAL_TEXTURE_CONTRACT_VERSION, "prefixes": SPECIAL_TEXTURE_PREFIXES, "textures": records}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    lines = [
+        "# HP2 special textures", "",
+        "| Prefix | Canonical texture | Effect | Layer | Source | Hash | Family | Tracks | Source alpha | Export alpha | Evidence |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for record in records:
+        evidence = record.get("evidence", {})
+        source = evidence.get("source", "")
+        track_list = ", ".join(map(str, record["tracks"]))
+        source_alpha = record.get("sourceAlphaMode") or "OPAQUE"
+        export_alpha = record.get("exportAlphaMode") or "OPAQUE"
+        lines.append(
+            f"| {record['prefix']} | `{record['name']}` | {record['effectKind']} | {record.get('reflectionLayer', '')} | "
+            f"`{record['sourceName']}` | `{record['sourceHash']}` | {record['family']} | "
+            f"{track_list} | {source_alpha} | {export_alpha} | {source} |"
+        )
+    lines.extend(["", "## Prefixes with no exported textures", ""])
+    present = {record["prefix"] for record in records}
+    missing = [prefix for prefix in SPECIAL_TEXTURE_PREFIXES.values() if prefix not in present]
+    lines.append(", ".join(f"`{prefix}`" for prefix in missing) if missing else "None.")
+    (output / "special_textures.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

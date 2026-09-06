@@ -308,7 +308,7 @@ def _build_lod_model(source: dict, target: dict, materials: list[bpy.types.Mater
     return None, {"status": "skipped", "ratio": None, "attempts": attempts}
 
 
-def _collision_collection(model: dict) -> tuple[bpy.types.Collection, bpy.types.Object, bpy.types.Mesh] | None:
+def _collision_collection(model: dict) -> tuple[bpy.types.Collection, list[bpy.types.Object], bpy.types.Mesh] | None:
     if not model["collision_faces"]:
         return None
     collection = bpy.data.collections.new(model["model_id"])
@@ -332,7 +332,26 @@ def _collision_collection(model: dict) -> tuple[bpy.types.Collection, bpy.types.
     obj = bpy.data.objects.new(model["model_id"] + "_col", mesh)
     collection.objects.link(obj)
     obj.dff.type = "COL"
-    return collection, obj, mesh
+    objects = [obj]
+    primitive = model.get("dynamic_collision_primitive")
+    if primitive:
+        volume = bpy.data.objects.new(model["model_id"] + "_dynamic", None)
+        volume.location = primitive["center"]
+        if primitive["type"] == "sphere":
+            volume.empty_display_type = "SPHERE"
+            volume.empty_display_size = float(primitive["radius"])
+        elif primitive["type"] == "box":
+            volume.empty_display_type = "CUBE"
+            volume.scale = primitive["half_extents"]
+        else:
+            raise ValueError(f"unsupported dynamic collision primitive: {primitive['type']}")
+        volume.dff.type = "COL"
+        volume.dff.col_material = int(primitive.get("surface", 0))
+        volume.dff.col_day_light = 15
+        volume.dff.col_night_light = 15
+        collection.objects.link(volume)
+        objects.append(volume)
+    return collection, objects, mesh
 
 
 def _export_bounds_only_col(module, model: dict, path: Path) -> None:
@@ -557,7 +576,7 @@ def main() -> None:
         if collision_data is None:
             _export_bounds_only_col(col_module, model, col_dir / f"{model['model_id']}.col")
         else:
-            collection, collision_obj, collision_mesh = collision_data
+            collection, collision_objects, collision_mesh = collision_data
             col_module.export_col(
                 {
                     "file_name": str(col_dir / f"{model['model_id']}.col"),
@@ -567,7 +586,8 @@ def main() -> None:
                     "only_selected": False,
                 }
             )
-            bpy.data.objects.remove(collision_obj, do_unlink=True)
+            for collision_obj in collision_objects:
+                bpy.data.objects.remove(collision_obj, do_unlink=True)
             bpy.data.meshes.remove(collision_mesh)
             bpy.data.collections.remove(collection)
         visual_mesh = obj.data
@@ -677,6 +697,8 @@ def main() -> None:
             if "_p_" in path.stem:
                 max_prop_local_aabb_center_error = max(max_prop_local_aabb_center_error, center_error)
     col_faces = 0
+    col_boxes = 0
+    col_spheres = 0
     bounds_only_cols = 0
     max_bounds_only_col_error = 0.0
     max_mesh_col_bounds_error = 0.0
@@ -686,6 +708,8 @@ def main() -> None:
         value = col_module.col.coll()
         value.load_file(str(path))
         col_faces += sum(len(model.mesh_faces) for model in value.models)
+        col_boxes += sum(len(model.boxes) for model in value.models)
+        col_spheres += sum(len(model.spheres) for model in value.models)
         bounds_only_cols += sum(
             not model.mesh_faces and not model.boxes and not model.spheres
             for model in value.models
@@ -730,6 +754,15 @@ def main() -> None:
                         tuple(min(float(vertex[axis]) for vertex in staged_vertices) for axis in range(3)),
                         tuple(max(float(vertex[axis]) for vertex in staged_vertices) for axis in range(3)),
                     )
+                    primitive = expected_model.get("dynamic_collision_primitive")
+                    if primitive:
+                        center = primitive["center"]
+                        half = ([primitive["radius"]] * 3 if primitive["type"] == "sphere"
+                                else primitive["half_extents"])
+                        expected_bounds = (
+                            tuple(min(expected_bounds[0][axis], center[axis] - half[axis]) for axis in range(3)),
+                            tuple(max(expected_bounds[1][axis], center[axis] + half[axis]) for axis in range(3)),
+                        )
                 else:
                     expected_bounds = dff_bounds[path.stem]
                 max_mesh_col_bounds_error = max(
@@ -781,6 +814,8 @@ def main() -> None:
                 "max_prop_local_aabb_center_error": max_prop_local_aabb_center_error,
                 "max_local_aabb_center_error": max_local_aabb_center_error,
                 "col_faces": col_faces,
+                "col_boxes": col_boxes,
+                "col_spheres": col_spheres,
                 "bounds_only_cols": bounds_only_cols,
                 "max_bounds_only_col_error": max_bounds_only_col_error,
                 "max_mesh_col_bounds_error": max_mesh_col_bounds_error,
